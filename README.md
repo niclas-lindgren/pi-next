@@ -87,12 +87,80 @@ when those paths are not configured.
 
 Create a disposable test repository, configure its model/provider and the
 project's authority adapter, then start Pi there. Inspect the available
-commands with `/pi-next` and use status/recovery commands before enabling an
-automatic loop. Pi-next can run coding workers with shell, file, and Git
-access, so its host process has the permissions of the user running Pi.
+commands with `/pi-next` and run `/pi-next-doctor` and `/pi-next-status` before
+enabling an automatic loop. Pi-next can run coding workers with shell, file,
+and Git access, so its host process has the permissions of the user running Pi.
 
 Runtime state is kept under `.pi/` and issue worktrees under `.worktrees/`,
 both ignored by Git.
+
+## Command reference
+
+Commands are Pi slash commands and run without asking the model to interpret
+the command:
+
+| Command | Purpose |
+| --- | --- |
+| `/pi-next auto` | Run the bounded autonomous issue loop. |
+| `/pi-next fresh [#N]` | Claim an issue and start a parentless worker session. |
+| `/pi-next [#N]` | Run one issue-scoped transition, using the live shortlist when no issue is given. |
+| `/pi-next-doctor` | Validate package identity, project configuration, and the configured workflow helper. |
+| `/pi-next-status` | Show local PLAN/loop state without invoking a model. |
+| `/pi-next-loop status\|stop\|resume` | Inspect, stop, or recover a bounded loop. |
+| `/pi-next-handoff` | Check whether the current checkout is safe to hand off. |
+| `/pi-next-view all\|off\|#N\|run ID\|compact\|verbose\|status` | Filter the worker display/transcript or select its density. |
+
+`/pi-next-doctor` and `/pi-next-status` are diagnostic only; a successful
+local status check does not establish issue ownership. `stop` never resets,
+stashes, or commits worker changes.
+
+## Architecture and safety boundaries
+
+Pi-next is a kernel around a consumer's authority source:
+
+```text
+consumer config + authority adapter
+                 |
+                 v
+  discovery -> lease/CAS ownership -> canonical worktree
+                 |
+                 v
+       bounded worker -> PLAN -> verification -> guarded completion
+```
+
+The kernel owns generic work-item identity, leases, canonical workspaces,
+durable transitions, worker lifecycle, verification sequencing, and bounded
+telemetry. An authority adapter owns discovery, freshness, labels/statuses,
+and completion semantics. Repository instructions, model selection, deployment
+policy, and credentials remain consumer-owned. A PLAN is recovery state, not
+ownership authority: resume requires a fresh authoritative lease and the
+canonical worktree for the exact item.
+
+Workers run in child Pi processes with the canonical worktree as their process
+working directory. This prevents the parent coordination checkout from being
+used as an issue workspace, but it is not an OS sandbox: workers can still use
+any shell/file/Git capability granted by the host. Review the host, model,
+extensions, repository, and credentials before enabling automation.
+
+## Recovery and troubleshooting
+
+1. Run `/pi-next-doctor` and `/pi-next-status` in the consumer checkout.
+2. Inspect `git status` and `.pi/runtime/` without deleting the canonical
+   worktree or PLAN artifacts.
+3. Use `/pi-next-loop status`; resume only after the authoritative lease and
+   worktree are available.
+4. Use `/pi-next-loop resume` for an interrupted owned loop. Foreign or stale
+   PLAN files are refused rather than treated as ownership.
+5. If a lease/worktree conflict remains, stop automation and resolve the live
+   authority conflict first; do not force-push, reset, or manually claim the
+   issue branch.
+
+Common failures are intentional fail-closed behavior: invalid config, missing
+adapter capability, stale ownership, ambiguous PLAN identity, dirty handoff,
+and verification/freshness changes stop the transition rather than guessing.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for stable boundaries,
+[`SECURITY.md`](SECURITY.md) for the threat model, and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for support and change guidance.
 
 ## Development
 

@@ -36,6 +36,10 @@ test("the package manifest exposes only the pi-next entry extension", async () =
   });
   assert.ok(manifest.files?.includes("extensions"));
   assert.ok(manifest.files?.includes("package.json"));
+  assert.ok(manifest.files?.includes("SECURITY.md"));
+  assert.ok(manifest.files?.includes("CONTRIBUTING.md"));
+  assert.ok(manifest.files?.includes("CHANGELOG.md"));
+  assert.ok(manifest.files?.includes("docs"));
 });
 
 test("a disposable consumer can install the package with Pi's local lifecycle", async () => {

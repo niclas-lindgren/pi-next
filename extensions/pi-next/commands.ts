@@ -5,6 +5,7 @@ import type {
 import { existsSync } from "node:fs";
 
 import { currentPlanIssue } from "./auto-telemetry.ts";
+import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
@@ -47,6 +48,7 @@ import {
   resolvePlanIdentity,
   runHelper,
   safeNotify,
+  workflowPath,
 } from "./util.ts";
 import {
   runIssueWorker,
@@ -56,6 +58,7 @@ import {
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
+import { piNextRuntimeIdentity } from "../../src/version.ts";
 
 /**
  * Delivers through the shared lifecycle-aware host boundary (#583) instead
@@ -511,6 +514,37 @@ export function registerPiNextCommands(
   });
 
   registerPiNextLoopCommand(pi, (event) => appendWorkerWorkLog(pi, event));
+
+  pi.registerCommand("pi-next-doctor", {
+    description: "Check the installed pi-next package, project config, and workflow prerequisites",
+    handler: async (_args, ctx) => {
+      try {
+        const identity = piNextRuntimeIdentity();
+        const config = loadPiNextConfig(ctx.cwd);
+        const helper = workflowPath(ctx.cwd, "helperDir");
+        const repository = await runHelper(ctx.cwd, "pi-next-state.sh", [ctx.cwd]).then(
+          () => "available",
+          () => "missing or not executable",
+        );
+        notifySafely(
+          ctx,
+          [
+            `Pi-next version=${identity.version} revision=${identity.revision}`,
+            `Config: valid (adapter=${config.authority.adapter}, schema=${config.version})`,
+            `Workflow helper: ${repository} (${helper})`,
+            `Project policy: ${config.repositoryPolicy.entrypoints.join(", ") || "none configured"}`,
+          ].join("\n"),
+          repository === "available" ? "info" : "warning",
+        );
+      } catch (error) {
+        notifySafely(
+          ctx,
+          `pi-next doctor failed: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      }
+    },
+  });
 
   pi.registerCommand("pi-next-status", {
     description: "Show local plan state without invoking the model",

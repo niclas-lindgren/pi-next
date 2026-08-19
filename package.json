@@ -15,6 +15,10 @@
     "types",
     "README.md",
     "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "docs",
     "package.json",
     "tsconfig.json"
   ],
@@ -22,7 +26,8 @@
     ".": "./extensions/pi-next.ts",
     "./coordination": "./src/coordination/index.ts",
     "./config": "./src/coordination/config.ts",
-    "./authority": "./src/coordination/work-authority.ts"
+    "./authority": "./src/coordination/work-authority.ts",
+    "./version": "./src/version.ts"
   },
   "pi": {
     "extensions": ["./extensions/pi-next.ts"]
