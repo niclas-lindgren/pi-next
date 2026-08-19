@@ -37,6 +37,14 @@ pi update --extensions
 pi remove git:github.com/niclas-lindgren/pi-next
 ```
 
+To move a project to another pinned release, install the new exact tag or
+commit; subsequent `pi update --extensions` runs reconcile that pinned ref
+rather than floating to `main`:
+
+```sh
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.1
+```
+
 A commit SHA may be used while developing. Updating or removing pi-next does
 not own or delete the consumer's workflow state, recovery data, or policy.
 For local development, Pi also accepts a package directory directly:
