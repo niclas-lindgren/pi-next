@@ -71,6 +71,14 @@ Any ownership, identity, freshness, worktree, verification, or integration
 failure stops the transition. Completion is not inferred from a checked PLAN
 checkbox or a model's prose response.
 
+## Runtime feedback
+
+Typed failures can be converted to bounded sanitized feedback events through
+`src/coordination/feedback.ts`. Fingerprints omit run IDs, timestamps, paths,
+and incidental numbers; recurrence is bounded and sinks are optional. Sink
+failures cannot affect ownership, repository mutation, or the controller.
+Consumers decide whether and where escalated events become external issues.
+
 ## Durable state and privacy
 
 Consumer workflow artifacts use configured paths. Pi runtime/session data and
