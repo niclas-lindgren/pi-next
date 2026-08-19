@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -16,6 +16,43 @@ const tsx = join(packageRoot, "node_modules", ".bin", "tsx");
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await exec("git", ["-C", cwd, ...args], { encoding: "utf8" });
   return result.stdout.trim();
+}
+
+async function freshPiHostProbe(cwd: string, env: NodeJS.ProcessEnv, revision: string): Promise<{ commands: Array<{ name: string; sourceInfo: { origin: string; source: string } }>; doctor: string; status: string }> {
+  const child = spawn(pi, ["--mode", "rpc", "--no-session", "--offline", "--approve"], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+  let buffer = "";
+  const events: Array<Record<string, unknown>> = [];
+  let resolveEvent: ((event: Record<string, unknown>) => void) | undefined;
+  const waitFor = (predicate: (event: Record<string, unknown>) => boolean) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const existing = events.find(predicate);
+    if (existing) return resolve(existing);
+    const timeout = setTimeout(() => { resolveEvent = undefined; reject(new Error("timed out waiting for Pi RPC event")); }, 20_000);
+    resolveEvent = (event) => { if (predicate(event)) { clearTimeout(timeout); resolve(event); } };
+  });
+  child.stdout.on("data", (chunk) => {
+    buffer += String(chunk);
+    for (const line of buffer.split(/\r?\n/).slice(0, -1)) {
+      try { const event = JSON.parse(line) as Record<string, unknown>; events.push(event); resolveEvent?.(event); } catch { /* wait for complete JSONL */ }
+    }
+    buffer = buffer.split(/\r?\n/).at(-1) || "";
+  });
+  child.stderr.resume();
+  const send = (value: Record<string, unknown>) => child.stdin.write(`${JSON.stringify(value)}\n`);
+  try {
+    send({ type: "get_commands", id: "commands" });
+    const commandResponse = await waitFor((event) => event.id === "commands");
+    const commands = ((commandResponse.data as { commands: Array<{ name: string; sourceInfo: { origin: string; source: string } }> }).commands);
+    assert.ok(commands.some((command) => command.name === "pi-next"));
+    assert.ok(commands.filter((command) => command.name.startsWith("pi-next")).every((command) => command.sourceInfo.origin === "package" && command.sourceInfo.source.startsWith("git:")));
+    send({ type: "prompt", id: "doctor", message: "/pi-next-doctor" });
+    const doctorEvent = await waitFor((event) => event.type === "extension_ui_request" && event.method === "notify" && String(event.message).includes(`revision=${revision}`));
+    send({ type: "prompt", id: "status", message: "/pi-next-status" });
+    const statusEvent = await waitFor((event) => event.type === "extension_ui_request" && event.method === "notify" && String(event.message).includes("PLAN="));
+    return { commands, doctor: String(doctorEvent.message), status: String(statusEvent.message) };
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  }
 }
 
 /**
@@ -76,8 +113,12 @@ test("fresh consumer installs a pinned package and completes a disposable transi
     await git(consumer, "add", ".pi/settings.json");
     await git(consumer, "commit", "-m", "pin pi-next package");
     assert.equal((await exec("find", [consumer, "-path", "*/.pi/extensions/pi-next*", "-print"], { encoding: "utf8" })).stdout.trim(), "");
+    const host = await freshPiHostProbe(consumer, env, revision);
+    assert.match(host.doctor, /Pi-next version=0\.1\.1/);
+    assert.match(host.doctor, new RegExp(`revision=${revision}`));
+    assert.match(host.status, /PLAN=absent/);
 
-    // A fresh Pi loader process is the activation boundary: no in-process
+    // A fresh loader process is the activation boundary: no in-process
     // loader shortcut can make a copied extension appear active.
     await writeFile(activationRunner, `
       import { DefaultResourceLoader } from ${JSON.stringify(join(packageRoot, "node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js"))};
@@ -99,13 +140,14 @@ test("fresh consumer installs a pinned package and completes a disposable transi
 
     await writeFile(runner, `
       import { InMemoryWorkAuthority, claimIssueLease, ensureIssueWorktree, releaseIssueLease } from ${JSON.stringify(join(installed, "src", "coordination", "index.ts"))};
+      import { LocalIssueLeaseAuthority } from ${JSON.stringify(join(installed, "extensions/pi-next/local-lease.ts"))};
       import { readFile, writeFile } from "node:fs/promises";
       const cwd = process.cwd();
       const authority = new InMemoryWorkAuthority([{ id: "41", number: 41, title: "fixture work", body: "bounded transition", state: "open", priority: "P1", states: ["open"], comments: [] }]);
       const config = JSON.parse(await readFile(".pi-next/config.json", "utf8"));
       const candidates = await authority.listCandidates(config);
       if (candidates.length !== 1) throw new Error("discovery failed");
-      const leases = { lease: undefined, async read() { return this.lease; }, async create(_issue, lease) { if (this.lease) throw new Error("already leased"); this.lease = lease; }, async replace(_issue, expected, lease) { if (this.lease !== expected) throw new Error("compare-and-swap failed"); this.lease = lease; }, async remove(_issue, expected) { if (this.lease !== expected) throw new Error("compare-and-swap failed"); this.lease = undefined; } };
+      const leases = new LocalIssueLeaseAuthority(cwd);
       const now = new Date();
       const lease = await claimIssueLease(leases, { issueNumber: 41, agent: "pi-next", runId: "smoke-run", sessionId: "smoke-session", acquiredAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60000).toISOString() }, now);
       const workspace = await ensureIssueWorktree(cwd, 41);
