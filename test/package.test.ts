@@ -59,6 +59,7 @@ test("the package manifest exposes only the pi-next entry extension", async () =
   assert.ok(manifest.files?.includes("CONTRIBUTING.md"));
   assert.ok(manifest.files?.includes("CHANGELOG.md"));
   assert.ok(manifest.files?.includes("docs"));
+  assert.ok(manifest.files?.includes("examples"));
   assert.ok(manifest.files?.includes("skills"));
 });
 
