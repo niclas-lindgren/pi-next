@@ -12,6 +12,7 @@ import {
   type ManualAcceptanceReview,
 } from "./acceptance-verification.ts";
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
+import { runCandidateReviewGate } from "./candidate-review.ts";
 import { currentGeneration } from "./foreground-supervisor.ts";
 import { recordTransition } from "./workflow-commit-policy.ts";
 import { acceptanceCriteria, issueNumber } from "./plan.ts";
@@ -426,6 +427,7 @@ export function registerCheckTool(pi: ExtensionAPI) {
       let issueFingerprint: string | undefined;
       let issueUpdatedAt: string | undefined;
       let liveAcceptanceCriteria: string[] = [];
+      let issueRisk: "low" | "normal" | "high" | "critical" = "normal";
       let authorityVerified = false;
       if (githubIssue) {
         try {
@@ -433,10 +435,20 @@ export function registerCheckTool(pi: ExtensionAPI) {
           issueFingerprint = live.fingerprint;
           issueUpdatedAt = live.githubUpdatedAt;
           liveAcceptanceCriteria = live.acceptanceCriteria;
+          issueRisk = live.risk;
           authorityVerified = true;
         } catch {
           authorityVerified = false;
         }
+      }
+
+      if (authorityVerified && issueFingerprint && githubIssue) {
+        await runCandidateReviewGate({
+          ctx,
+          issueNumber: githubIssue,
+          authorityFingerprint: issueFingerprint,
+          risk: issueRisk,
+        });
       }
 
       const reviewErrors = [
