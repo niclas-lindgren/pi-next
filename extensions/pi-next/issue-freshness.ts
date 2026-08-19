@@ -34,6 +34,7 @@ export interface LiveIssueFingerprint {
   fingerprint: string;
   githubUpdatedAt?: string;
   acceptanceCriteria: string[];
+  risk: "low" | "normal" | "high" | "critical";
 }
 
 function freshnessFile(cwd: string): string {
@@ -105,10 +106,17 @@ export async function getLiveIssueFingerprint(
   const adapter = authority ?? createWorkAuthority(cwd, config);
   requireAuthorityCapability(adapter, "freshness");
   const item = await adapter.get(String(issueNumber));
+  const authorityText = `${item.title} ${item.body} ${item.priority || ""} ${item.states.join(" ")}`.toLowerCase();
+  const risk = /(?:risk\s*:\s*critical|security|credential|payment|funds|authorization|privacy|schema|migration)/.test(authorityText)
+    ? "critical"
+    : /(?:risk\s*:\s*high|priority\s*:?\s*p0|p0)/.test(authorityText)
+      ? "high"
+      : "normal";
   return {
     fingerprint: adapter.fingerprint(item),
     githubUpdatedAt: item.updatedAt,
     acceptanceCriteria: extractIssueAcceptanceCriteria(item.body),
+    risk,
   };
 }
 

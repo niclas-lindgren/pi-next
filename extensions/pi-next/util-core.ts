@@ -158,6 +158,8 @@ export interface IssueWorkerOptions {
   phase?: string;
   /** Immutable controller-selected worker contract. */
   dispatch?: WorkerDispatchPolicy;
+  /** Reviewers are launched without Pi tools; they receive an exact candidate snapshot. */
+  readOnly?: boolean;
   /**
    * The authoritative coordination root for this run's controller state
    * (`LoopState.coordinationCwd`), transported to the isolated child via
@@ -201,6 +203,7 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
   const child = spawn(executable, [
     ...entrypoint,
     ...dispatchArgs,
+    ...(options.readOnly ? ["--no-tools"] : []),
     "--print",
     "--no-session",
     "--mode",
