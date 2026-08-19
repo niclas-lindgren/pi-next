@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { psDir } from "./util.ts";
-import type { IssueLeaseAuthority } from "../../../.agents/coordination/issue-leases.ts";
-import { isIssueLeaseFresh } from "../../../.agents/coordination/issue-authority.ts";
+import type { IssueLeaseAuthority } from "./issue-leases.ts";
+import { isIssueLeaseFresh } from "./issue-authority.ts";
 import { refreshMainAtIssueBoundary } from "./main-refresh.ts";
 
 const execFileAsync = promisify(execFile);

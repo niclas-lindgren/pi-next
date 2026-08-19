@@ -239,7 +239,7 @@ export class ForegroundSupervisor {
    * lease identify a local run as its owner?" — never local status/mtime
    * ordering, a `running`-looking loop-state file, or a newer-timestamp
    * record. `recoverableAbandonedAutoRun` reads the current authoritative
-   * lease via `.agents/coordination/issue-leases.ts`/`issue-authority.ts`
+   * lease via the reusable `src/coordination/` module.
    * and returns at most the one local run that both (a) still owns that
    * fresh lease and (b) has no live local worker process; every other
    * historical loop record for the same or a different issue is ignored and

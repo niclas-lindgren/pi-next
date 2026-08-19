@@ -3,8 +3,8 @@
  * worktree attach/recreate logic.
  *
  * The harness-neutral core now lives in
- * `.agents/coordination/issue-leases.ts` (#588) so any agent harness can
- * share the same lease lifecycle and worktree derivation. This file
+ * `src/coordination/issue-leases.ts` so any agent harness can share the same
+ * lease lifecycle and worktree derivation. This file
  * remains a thin re-export so every existing pi-next import path keeps
  * working unchanged and behavior is preserved exactly.
  */
@@ -25,11 +25,11 @@ export {
   serializeLeaseForAuthority,
   parseLeaseFromAuthority,
   issueWorkspaceIdentity,
-} from "../../../.agents/coordination/issue-leases.ts";
+} from "../../src/coordination/issue-leases.ts";
 export type {
   IssueLease,
   IssueLeaseAuthority,
   LeaseLifecycleOptions,
   IssueLeaseHeartbeatOptions,
   WorktreeRecoveryDetails,
-} from "../../../.agents/coordination/issue-leases.ts";
+} from "../../src/coordination/issue-leases.ts";

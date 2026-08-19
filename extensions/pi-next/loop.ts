@@ -18,7 +18,7 @@ import {
   releaseIssueLease,
   reconcileIssueLeaseForResume,
   startIssueLeaseHeartbeat,
-} from "../../../.agents/coordination/issue-leases.ts";
+} from "./issue-leases.ts";
 import {
   emptyLoopMetrics,
   loopNow,
@@ -104,7 +104,7 @@ function workerActivityText(event: WorkerWorkLogEvent): string {
 export async function claimLoopIssue(
   cwd: string,
   state: LoopState,
-  authorityOverride?: import("../../../.agents/coordination/issue-leases.ts").IssueLeaseAuthority,
+  authorityOverride?: import("./issue-leases.ts").IssueLeaseAuthority,
 ): Promise<LoopState> {
   if (state.activeIssueNumber && state.activeWorkspace && state.activeLease) {
     if (state.activeLease.agent !== "pi-next") {
@@ -120,7 +120,7 @@ export async function claimLoopIssue(
     // foreign owner or a missing lease.
     const lease = await reconcileIssueLeaseForResume(
       authority,
-      state.activeLease as import("../../../.agents/coordination/issue-authority.ts").IssueLease,
+      state.activeLease as import("./issue-authority.ts").IssueLease,
       new Date(),
     );
     const workspace = await ensureIssueWorktree(
@@ -331,7 +331,7 @@ export async function runOwnedIssueCycle(
       const heartbeat = prepared.activeLease
         ? startIssueLeaseHeartbeat(
             new GitHubIssueLeaseAuthority(coordinationCwd),
-            prepared.activeLease as import("../../../.agents/coordination/issue-authority.ts").IssueLease,
+            prepared.activeLease as import("./issue-authority.ts").IssueLease,
             {
               onRenew: (lease) => {
                 const latest =

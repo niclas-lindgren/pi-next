@@ -1,0 +1,40 @@
+{
+  "name": "pi-next",
+  "version": "0.1.0",
+  "description": "Autonomous issue implementation loop extension for pi-coding-agent",
+  "type": "module",
+  "private": false,
+  "engines": {
+    "node": ">=20.10.0",
+    "pi-coding-agent": ">=0.84.2"
+  },
+  "files": [
+    "extensions",
+    "src",
+    "types",
+    "README.md",
+    "LICENSE",
+    "package.json",
+    "tsconfig.json"
+  ],
+  "exports": {
+    ".": "./extensions/pi-next.ts",
+    "./coordination": "./src/coordination/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
+    "typebox": "^1.3.16"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

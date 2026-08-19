@@ -5,7 +5,7 @@ import { basename } from "node:path";
 import { checkIssueFreshness, primeIssueFreshness } from "./issue-freshness.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
-import { GitHubIssueLeaseAuthority } from "../../../.agents/coordination/issue-leases.ts";
+import { GitHubIssueLeaseAuthority } from "./issue-leases.ts";
 import {
   createSupervisorRuntime,
   type SupervisorRuntime,

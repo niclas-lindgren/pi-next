@@ -5,11 +5,11 @@ import { join } from "node:path";
 import {
   GitHubIssueLeaseAuthority,
   type IssueLeaseAuthority,
-} from "../../../.agents/coordination/issue-leases.ts";
+} from "./issue-leases.ts";
 import {
   isIssueLeaseFresh,
   issueLeaseMatchesOwner,
-} from "../../../.agents/coordination/issue-authority.ts";
+} from "./issue-authority.ts";
 import { registerPiNextCommands as registerBasePiNextCommands } from "./commands.ts";
 import {
   currentSupervisorStatus,

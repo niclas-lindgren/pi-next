@@ -26,7 +26,7 @@ import {
   startIssueLeaseHeartbeat,
   type IssueLease,
   type IssueLeaseAuthority,
-} from "../../../.agents/coordination/issue-leases.ts";
+} from "./issue-leases.ts";
 import {
   quarantineInheritedArtifacts,
   registerPiNextLoopCommand,
