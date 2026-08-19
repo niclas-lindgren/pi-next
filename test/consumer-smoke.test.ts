@@ -95,7 +95,7 @@ test("fresh consumer installs a pinned package and completes a disposable transi
     const activated = JSON.parse(activation.stdout.trim()) as { extension: string; origin: string; identity: { version: string; revision: string } };
     assert.equal(activated.origin, "package");
     assert.match(activated.extension, /extensions[\\/]pi-next\.ts$/);
-    assert.deepEqual(activated.identity, { version: "0.1.0", revision });
+    assert.deepEqual(activated.identity, { version: "0.1.1", revision });
 
     await writeFile(runner, `
       import { InMemoryWorkAuthority, claimIssueLease, ensureIssueWorktree, releaseIssueLease } from ${JSON.stringify(join(installed, "src", "coordination", "index.ts"))};
