@@ -19,6 +19,7 @@
     "CONTRIBUTING.md",
     "CHANGELOG.md",
     "docs",
+    "skills",
     "package.json",
     "tsconfig.json"
   ],
@@ -28,7 +29,8 @@
     "./config": "./src/coordination/config.ts",
     "./authority": "./src/coordination/work-authority.ts",
     "./cli": "./src/coordination/cli.ts",
-    "./version": "./src/version.ts"
+    "./version": "./src/version.ts",
+    "./skills": "./src/skills/sync.ts"
   },
   "pi": {
     "extensions": ["./extensions/pi-next.ts"]
@@ -38,7 +40,9 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "lint": "tsc --noEmit",
-    "coordination-cli": "tsx src/coordination/bin.ts"
+    "coordination-cli": "tsx src/coordination/bin.ts",
+    "skills:sync": "tsx src/skills/bin.ts sync",
+    "skills:check": "tsx src/skills/bin.ts check"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

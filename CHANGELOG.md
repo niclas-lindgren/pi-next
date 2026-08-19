@@ -5,6 +5,10 @@ minor releases may change public behavior and breaking changes are called out.
 
 ## Unreleased
 
+- Added the pinned, allowlisted Matt Pocock engineering skill packs with a
+  deterministic non-interactive sync/check CLI, SHA-256 provenance, preserved
+  MIT license, companion-file validation, and an explicit local trust-boundary
+  overlay (#7).
 - Ported the guarded terminal-completion primitive (`finalize`) and the
   `status`/`claim`/`renew`/`release`/`workspace`/`prepare`/`finalize` JSON
   coordination CLI from a consumer's local copy (#19). `finalize`'s
