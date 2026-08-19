@@ -15,6 +15,7 @@ import { cleanupCompletedIssueWorktree } from "./main-refresh.ts";
 import { runLoopSteps } from "./loop-controller.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
+import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import {
   claimIssueLease,
   ensureIssueWorktree,
@@ -404,6 +405,17 @@ export async function runOwnedIssueCycle(
           { onWorkerState, display },
         );
       } catch (error) {
+        void reportRuntimeFailure(coordinationCwd, {
+          stage: "controller",
+          category: "runtime",
+          severity: "error",
+          outcome: "failed",
+          code: "controller_failed",
+          summary: error instanceof Error ? error.message : String(error),
+          error,
+          issueNumber: prepared.activeIssueNumber,
+          runId: prepared.runId,
+        });
         // runLoopSteps() acquires the controller lock as its first
         // synchronous action and truthfully interrupts/fails LoopState for
         // any error it observes afterward (see interruptLoop() in

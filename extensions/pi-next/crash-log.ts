@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 
 import { createFeedbackEvent, sanitizeFeedbackText } from "../../src/coordination/feedback.ts";
+import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import { runtimeDir, setHostCallDiagnosticsSink } from "./util-core.ts";
 
 /**
@@ -75,6 +76,16 @@ export function recordCrashDiagnostic(
       attempt: 1,
     });
     appendFileSync(file, `${JSON.stringify(event)}\n`, "utf8");
+    void reportRuntimeFailure(knownCwd ?? cwd, {
+      stage: "process",
+      category: kind.startsWith("signal:") ? "external" : "runtime",
+      severity: fatal ? "fatal" : "warning",
+      outcome: "failed",
+      code: kind,
+      summary: event.summary,
+      error,
+      diagnosticRefs: context?.label ? [context.label] : [],
+    });
     trimCrashLog(file);
   } catch {
     // Logging is diagnostic-only; a failure here must not mask or replace

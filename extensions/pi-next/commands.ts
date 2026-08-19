@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { currentPlanIssue } from "./auto-telemetry.ts";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
+import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import {
@@ -127,9 +128,19 @@ async function executeIssueWorker(
     : await task;
   if (!result.ok) {
     const detail = result.output.trim().slice(-1_000);
-    throw new Error(
-      `Issue worker failed (${result.signal || `exit ${result.code ?? "unknown"}`})${detail ? `: ${detail}` : ""}`,
-    );
+    const error = new Error(`Issue worker failed (${result.signal || `exit ${result.code ?? "unknown"}`})${detail ? `: ${detail}` : ""}`);
+    void reportRuntimeFailure(cwd, {
+      stage: observer?.phase || "worker",
+      category: "runtime",
+      severity: "error",
+      outcome: "failed",
+      code: "worker_failed",
+      summary: error.message,
+      error,
+      issueNumber: observer?.issueNumber,
+      runId: observer?.runId,
+    });
+    throw error;
   }
 }
 
@@ -545,6 +556,15 @@ export function registerPiNextCommands(
           repository === "available" ? "info" : "warning",
         );
       } catch (error) {
+        void reportRuntimeFailure(ctx.cwd, {
+          stage: "doctor",
+          category: "runtime",
+          severity: "error",
+          outcome: "failed",
+          code: "doctor_failed",
+          summary: error instanceof Error ? error.message : String(error),
+          error,
+        });
         notifySafely(
           ctx,
           `pi-next doctor failed: ${error instanceof Error ? error.message : String(error)}`,
