@@ -187,9 +187,17 @@ export async function commitExplicitPaths(
   options: { issueNumber?: number; kind?: CommitKind } = {},
 ): Promise<string> {
   const normalized = [...new Set(paths.map(normalizeRepoPath))];
-  const kind = options.kind || classifyCommitPaths(normalized, cwd);
+  const actualKind = classifyCommitPaths(normalized, cwd);
+  // Caller labels are hints only. A substantive path can never be disguised
+  // as bookkeeping; lifecycle is accepted only for an actually workflow-only
+  // path set and remains subject to the same bounded bookkeeping budget.
+  const kind: CommitKind = actualKind === "substantive"
+    ? "substantive"
+    : options.kind === "lifecycle"
+      ? "lifecycle"
+      : "workflow-only";
   const issue = options.issueNumber || issueNumber(readFileSync(planFile(cwd), "utf8")) || undefined;
-  if (kind === "workflow-only") assertWorkflowCommitAllowed(cwd, issue);
+  if (kind === "workflow-only" || kind === "lifecycle") assertWorkflowCommitAllowed(cwd, issue);
   if (!normalized.length) {
     throw new Error("At least one explicit commit path is required");
   }
