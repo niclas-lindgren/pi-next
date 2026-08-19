@@ -33,6 +33,29 @@ export interface ReviewResult extends ReviewBinding {
   reviewerId: string;
 }
 
+/** A fresh, read-only reviewer context. It contains no mutable lifecycle handle. */
+export interface ReviewContext {
+  readonly reviewerId: string;
+  readonly axis: ReviewAxis;
+  readonly round: number;
+  readonly provider?: string;
+  readonly model?: string;
+}
+
+export interface ReviewTelemetry {
+  rounds: number;
+  reviewerIds: string[];
+  axes: ReviewAxis[];
+  blockingFindings: number;
+}
+
+export interface AdversarialReviewResult {
+  status: "bypassed" | "passed" | "blocked";
+  binding: ReviewBinding;
+  results: ReviewResult[];
+  telemetry: ReviewTelemetry;
+}
+
 export interface AdversarialReviewPolicy {
   enabled: boolean;
   requiredRisk: "high" | "critical";
@@ -71,6 +94,8 @@ export function reviewPasses(result: ReviewResult): boolean {
 export function validateReviewResult(expected: ReviewBinding, result: ReviewResult): void {
   assertReviewBinding(expected, result);
   if (!result.reviewerId.trim()) throw new Error("review result requires reviewer identity");
+  if (!Number.isInteger(result.round) || result.round < 0) throw new Error("review result requires a valid round");
+  if (!["spec", "standards", "risk"].includes(result.axis)) throw new Error("review result requires a valid axis");
   if (result.verdict === "pass" && concreteBlockingFindings(result).length) throw new Error("passing review has blocking findings");
 }
 
@@ -89,4 +114,67 @@ export function nextReviewRound(round: number, policy: AdversarialReviewPolicy):
 export function invalidateReviewBinding(binding: ReviewBinding, candidateSha: string): ReviewBinding {
   if (!candidateSha || candidateSha === binding.candidateSha) throw new Error("repair must produce a new candidate SHA");
   return { ...binding, candidateSha };
+}
+
+export type ReviewContextFactory = (axis: ReviewAxis, round: number) => Promise<ReviewContext> | ReviewContext;
+export type ReviewExecutor = (request: ReviewRequest, context: ReviewContext) => Promise<ReviewResult>;
+
+function defaultReviewContext(axis: ReviewAxis, round: number): ReviewContext {
+  return { reviewerId: `reviewer-${round + 1}-${axis}`, axis, round };
+}
+
+/**
+ * Execute the bounded review gate. Each axis receives a fresh context and the
+ * returned result is rejected unless it describes the exact request. A repair
+ * callback must produce a new candidate SHA, which mechanically invalidates
+ * every result from the previous round.
+ */
+export async function runBoundedAdversarialReview(input: {
+  binding: ReviewBinding;
+  risk?: "low" | "normal" | "high" | "critical";
+  policy?: AdversarialReviewPolicy;
+  dispatch: (axis: ReviewAxis, binding: ReviewBinding, round: number) => WorkerDispatchPolicy;
+  execute: ReviewExecutor;
+  createContext?: ReviewContextFactory;
+  repair?: (findings: readonly ReviewFinding[], binding: ReviewBinding, round: number) => Promise<ReviewBinding>;
+}): Promise<AdversarialReviewResult> {
+  const policy = input.policy || DEFAULT_ADVERSARIAL_REVIEW_POLICY;
+  if (!requiresAdversarialReview(input.risk, policy)) {
+    return { status: "bypassed", binding: input.binding, results: [], telemetry: { rounds: 0, reviewerIds: [], axes: [], blockingFindings: 0 } };
+  }
+  if (!policy.axes.length) throw new Error("adversarial review requires at least one axis");
+  if (!Number.isInteger(policy.maxRounds) || policy.maxRounds < 1 || policy.maxRounds > 2) throw new Error("invalid adversarial review round bound");
+
+  let binding = input.binding;
+  const results: ReviewResult[] = [];
+  const reviewerIds: string[] = [];
+  const axes: ReviewAxis[] = [];
+  for (let round = 0; round < policy.maxRounds; round += 1) {
+    const roundFindings: ReviewFinding[] = [];
+    for (const axis of [...new Set(policy.axes)]) {
+      const context = await (input.createContext || defaultReviewContext)(axis, round);
+      assertReviewerActionAllowed("read");
+      if (context.axis !== axis || context.round !== round || !context.reviewerId.trim()) {
+        throw new Error("review context does not identify its requested fresh axis and round");
+      }
+      const result = await input.execute({ ...binding, axis, round, dispatch: input.dispatch(axis, binding, round) }, context);
+      validateReviewResult(binding, result);
+      if (result.axis !== axis || result.round !== round) throw new Error("review result axis or round does not match request");
+      results.push(result);
+      reviewerIds.push(result.reviewerId);
+      axes.push(axis);
+      roundFindings.push(...concreteBlockingFindings(result));
+    }
+    if (!roundFindings.length) {
+      return { status: "passed", binding, results, telemetry: { rounds: round + 1, reviewerIds, axes, blockingFindings: 0 } };
+    }
+    if (!input.repair || round + 1 >= policy.maxRounds) {
+      return { status: "blocked", binding, results, telemetry: { rounds: round + 1, reviewerIds, axes, blockingFindings: results.flatMap(concreteBlockingFindings).length } };
+    }
+    binding = await input.repair(roundFindings, binding, round);
+    if (binding.candidateSha === input.binding.candidateSha && round === 0) {
+      throw new Error("review repair must produce a new candidate SHA");
+    }
+  }
+  throw new Error("unreachable adversarial review state");
 }
