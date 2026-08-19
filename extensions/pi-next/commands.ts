@@ -8,6 +8,7 @@ import { currentPlanIssue } from "./auto-telemetry.ts";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
+import { LocalIssueLeaseAuthority } from "./local-lease.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import {
@@ -159,8 +160,11 @@ async function claimAndAttachIssueWorkspace(
   // Production always uses the shared GitHub-backed authority; tests may
   // inject an in-memory authority to exercise this exact handoff sequence
   // without a live GitHub dependency.
-  const leaseAuthority =
-    authorityOverride ?? new GitHubIssueLeaseAuthority(coordinationCwd);
+  const leaseAuthority = authorityOverride ?? (
+    loadPiNextConfig(coordinationCwd).authority.adapter === "memory"
+      ? new LocalIssueLeaseAuthority(coordinationCwd)
+      : new GitHubIssueLeaseAuthority(coordinationCwd)
+  );
   const plan = resolvePlanIdentity(coordinationCwd);
   if (plan.kind === "unresolved" || plan.kind === "ambiguous") {
     throw new PlanAuthorityError(plan.kind, plan.reason, plan.paths);
