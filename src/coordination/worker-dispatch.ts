@@ -43,6 +43,11 @@ export interface WorkerDispatchPolicy {
   outputContract: string;
 }
 
+export interface ModelEscalationState {
+  workItem?: number;
+  attempts: number;
+}
+
 export interface WorkerDispatchInput {
   phase?: string;
   hasPlan?: boolean;
@@ -114,6 +119,18 @@ function outputContract(role: WorkerRole): string {
   if (role === "verification") return "candidate-bound semantic verification evidence";
   if (role === "maintenance") return "bounded sanitized maintenance result";
   return "one controller transition result";
+}
+
+export function nextModelEscalation(
+  state: ModelEscalationState,
+  maxEscalations: number,
+): ModelEscalationState {
+  if (!Number.isInteger(maxEscalations) || maxEscalations < 0 || maxEscalations > 3) throw new Error("invalid escalation bound");
+  return state.attempts >= maxEscalations ? state : { ...state, attempts: state.attempts + 1 };
+}
+
+export function resetModelEscalation(workItem?: number): ModelEscalationState {
+  return { workItem, attempts: 0 };
 }
 
 export function createWorkerDispatch(input: WorkerDispatchInput): WorkerDispatchPolicy {

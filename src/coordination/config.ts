@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type { WorkerModelPolicy, WorkerRole } from "./worker-dispatch.ts";
+import type { AdversarialReviewPolicy, ReviewAxis } from "./adversarial-review.ts";
 
 export const PI_NEXT_CONFIG_VERSION = 1 as const;
 export const PI_NEXT_CONFIG_PATH = ".pi-next/config.json" as const;
@@ -47,6 +48,7 @@ export interface PiNextConfig {
     models: Partial<Record<WorkerRole, WorkerModelPolicy>>;
     maxEscalations: number;
   };
+  adversarialReview: AdversarialReviewPolicy;
 }
 
 /** Defaults contain no product name, domain policy, or hidden consumer path. */
@@ -73,6 +75,7 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
     helperDir: ".pi-next/scripts",
   },
   workerDispatch: { version: 1 as const, models: {}, maxEscalations: 2 },
+  adversarialReview: { enabled: false, requiredRisk: "high" as const, maxRounds: 2, axes: ["spec", "standards"] as ReviewAxis[] },
 });
 
 export class PiNextConfigError extends Error {
@@ -120,7 +123,7 @@ function cloneDefaults(): PiNextConfig {
 
 export function validatePiNextConfig(value: unknown): PiNextConfig {
   const root = object(value, "config");
-  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch"], "config");
+  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
     throw new PiNextConfigError(`config.version must be ${PI_NEXT_CONFIG_VERSION}`);
   }
@@ -189,6 +192,16 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
   if (typeof maxEscalationsRaw !== "number" || !Number.isInteger(maxEscalationsRaw) || maxEscalationsRaw < 0 || maxEscalationsRaw > 3) throw new PiNextConfigError("config.workerDispatch.maxEscalations must be between 0 and 3");
   const maxEscalations = maxEscalationsRaw;
 
+  const reviewValue: Record<string, unknown> = root.adversarialReview === undefined
+    ? { ...DEFAULT_PI_NEXT_CONFIG.adversarialReview }
+    : object(root.adversarialReview, "config.adversarialReview");
+  rejectUnknown(reviewValue, ["enabled", "requiredRisk", "maxRounds", "axes"], "config.adversarialReview");
+  if (typeof reviewValue.enabled !== "boolean") throw new PiNextConfigError("config.adversarialReview.enabled must be boolean");
+  if (reviewValue.requiredRisk !== "high" && reviewValue.requiredRisk !== "critical") throw new PiNextConfigError("config.adversarialReview.requiredRisk must be high or critical");
+  if (typeof reviewValue.maxRounds !== "number" || !Number.isInteger(reviewValue.maxRounds) || reviewValue.maxRounds < 1 || reviewValue.maxRounds > 2) throw new PiNextConfigError("config.adversarialReview.maxRounds must be between 1 and 2");
+  const axesValue = strings(reviewValue.axes, "config.adversarialReview.axes", 3) as ReviewAxis[];
+  if (axesValue.some((axis) => !["spec", "standards", "risk"].includes(axis))) throw new PiNextConfigError("config.adversarialReview.axes contains an unsupported axis");
+
   return {
     version: PI_NEXT_CONFIG_VERSION,
     authority: {
@@ -201,6 +214,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     repositoryPolicy: { entrypoints },
     workflow: paths,
     workerDispatch: { version: 1, models, maxEscalations: Number(maxEscalations) },
+    adversarialReview: { enabled: reviewValue.enabled, requiredRisk: reviewValue.requiredRisk, maxRounds: reviewValue.maxRounds, axes: axesValue },
   };
 }
 
