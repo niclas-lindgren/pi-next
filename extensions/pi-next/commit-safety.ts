@@ -6,6 +6,7 @@ import {
   missingAuthoritativeAcceptanceCriteria,
   verificationReportAuthorityErrors,
 } from "./acceptance-verification.ts";
+import { archivePlanArtifacts } from "./archive.ts";
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
 import {
   acceptanceCriteria,
@@ -20,9 +21,7 @@ import {
   git,
   gitMutation,
   planFile,
-  psDir,
   qualityEvidenceFile,
-  runHelper,
   verifyFile,
   writeJsonAtomic,
 } from "./util-core.ts";
@@ -265,21 +264,17 @@ export async function archiveAndCommit(
   cwd: string,
 ): Promise<{ archive: string; hash: string; issue: number }> {
   const ready = await assertArchiveReady(cwd);
-  const localPs = psDir(cwd);
   const planPath = planFile(cwd);
-  const relativePs = relative(cwd, localPs).split(sep).join("/");
-  if (!relativePs || relativePs.startsWith("../") || isAbsolute(relativePs)) {
-    throw new Error("Archive commits require the repository-local .ps-next directory");
-  }
-
-  const { stdout } = await runHelper(cwd, "pi-next-archive.sh", [localPs]);
-  const archive = stdout.trim();
-  const archiveRelative = relative(cwd, archive).split(sep).join("/");
+  const { archive, history } = archivePlanArtifacts(cwd, ready);
   const paths = [
     relative(cwd, planPath).split(sep).join("/"),
-    `${relativePs}/HISTORY.md`,
-    archiveRelative,
+    relative(cwd, history).split(sep).join("/"),
+    relative(cwd, archive).split(sep).join("/"),
   ];
+  if (paths.some((path) => !path || path.startsWith("../") || isAbsolute(path))) {
+    throw new Error("Archive commits require repository-local workflow paths");
+  }
+
   let hash: string;
   try {
     hash = await commitExplicitPaths(
