@@ -1,0 +1,6 @@
+.pi/*
+!.pi/settings.json
+.worktrees/
+.pi-next/runtime/
+.pi-next/PLAN.md
+.pi-next/VERIFY.md
