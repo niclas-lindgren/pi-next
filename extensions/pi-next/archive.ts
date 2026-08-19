@@ -6,7 +6,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 import { workflowPath } from "./util-core.ts";
 
@@ -23,6 +23,13 @@ export interface ArchivePlanArtifactsResult {
 
 function repoRelative(cwd: string, path: string): string {
   return relative(cwd, path).split(sep).join("/");
+}
+
+function assertRepoLocal(cwd: string, path: string, label: string): void {
+  const repoPath = repoRelative(cwd, path);
+  if (!repoPath || repoPath.startsWith("../") || isAbsolute(repoPath)) {
+    throw new Error(`${label} must remain inside the consumer repository`);
+  }
 }
 
 function slug(value: string): string {
@@ -56,14 +63,23 @@ export function archivePlanArtifacts(
 
   const archiveDir = workflowPath(cwd, "archiveDir");
   const stateDir = workflowPath(cwd, "stateDir");
-  mkdirSync(archiveDir, { recursive: true });
-  mkdirSync(stateDir, { recursive: true });
+  assertRepoLocal(cwd, planPath, "Plan path");
+  assertRepoLocal(cwd, archiveDir, "Archive directory");
+  assertRepoLocal(cwd, stateDir, "Workflow state directory");
 
   const date = (input.now ?? new Date()).toISOString().slice(0, 10);
   const title = planTitle(input.plan, input.issue);
   const titleSlug = slug(title) || `issue-${input.issue}`;
-  const archive = `${archiveDir}/PLAN-${date}-${input.issue}-${titleSlug}.md`;
-  const history = `${stateDir}/HISTORY.md`;
+  const archive = join(
+    archiveDir,
+    `PLAN-${date}-${input.issue}-${titleSlug}.md`,
+  );
+  const history = join(stateDir, "HISTORY.md");
+  assertRepoLocal(cwd, archive, "Archive path");
+  assertRepoLocal(cwd, history, "History path");
+
+  mkdirSync(archiveDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
   const archiveRelative = repoRelative(cwd, archive);
 
   if (existsSync(archive)) {
@@ -90,6 +106,3 @@ export function archivePlanArtifacts(
   unlinkSync(planPath);
   return { archive, history };
 }
-
-/** Package-owned archive implementation intentionally ignores helperDir. */
-export const packageOwnedArchiveMarker = basename(import.meta.url);
