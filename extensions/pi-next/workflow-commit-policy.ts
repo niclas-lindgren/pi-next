@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { runtimeDir, writeJsonAtomic } from "./util-core.ts";
 
+/** One bounded bookkeeping budget spans planning, verification, lifecycle,
+ * archive, diagnostics, and performance evidence. */
 export const WORKFLOW_ONLY_COMMIT_LIMIT = 2;
 
 export type CommitKind = "substantive" | "workflow-only" | "lifecycle";
@@ -93,9 +95,9 @@ export function classifyCommitPaths(paths: string[], cwd = process.cwd()): Commi
 export function assertWorkflowCommitAllowed(cwd: string, issue: number | undefined): void {
   if (!issue) return;
   const current = normalizeIssue(readCommitTelemetry(cwd).issues[String(issue)]);
-  if (current.workflowOnly >= WORKFLOW_ONLY_COMMIT_LIMIT) {
+  if (current.workflowOnly + current.lifecycle >= WORKFLOW_ONLY_COMMIT_LIMIT) {
     throw new Error(
-      `Workflow-only commit bound reached for issue #${issue} (${WORKFLOW_ONLY_COMMIT_LIMIT}); batch PLAN/VERIFY changes with a substantive commit or use one lifecycle checkpoint`,
+      `Workflow-only/lifecycle commit bound reached for issue #${issue} (${WORKFLOW_ONLY_COMMIT_LIMIT}); batch bookkeeping with substantive work or one lifecycle checkpoint`,
     );
   }
 }
