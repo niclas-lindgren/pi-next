@@ -167,6 +167,7 @@ Common failures are intentional fail-closed behavior: invalid config, missing
 adapter capability, stale ownership, ambiguous PLAN identity, dirty handoff,
 and verification/freshness changes stop the transition rather than guessing.
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for stable boundaries,
+[`docs/WORKERS.md`](docs/WORKERS.md) for role/model/skill/capability dispatch,
 [`docs/SKILLS.md`](docs/SKILLS.md) for optional skill trust and updates,
 [`SECURITY.md`](SECURITY.md) for the threat model, and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for support and change guidance.

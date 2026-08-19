@@ -21,6 +21,7 @@ import {
   type WorkerWorkLogEvent,
 } from "./worker-activity.ts";
 import type { WorkerDisplaySink } from "./worker-display.ts";
+import type { WorkerDispatchPolicy } from "../../src/coordination/worker-dispatch.ts";
 
 const execFileAsync = promisify(execFile);
 export const execAsync = promisify(exec);
@@ -155,6 +156,8 @@ export interface IssueWorkerOptions {
   issueNumber?: number;
   runId?: string;
   phase?: string;
+  /** Immutable controller-selected worker contract. */
+  dispatch?: WorkerDispatchPolicy;
   /**
    * The authoritative coordination root for this run's controller state
    * (`LoopState.coordinationCwd`), transported to the isolated child via
@@ -189,8 +192,15 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
   if (!entrypoint[0]) {
     return Promise.reject(new Error("Unable to determine the Pi worker entrypoint"));
   }
+  const dispatchArgs = options.dispatch?.modelPolicy?.model
+    ? ["--model", options.dispatch.modelPolicy.model]
+    : [];
+  if (options.dispatch?.modelPolicy?.thinking) {
+    dispatchArgs.push("--thinking", options.dispatch.modelPolicy.thinking);
+  }
   const child = spawn(executable, [
     ...entrypoint,
+    ...dispatchArgs,
     "--print",
     "--no-session",
     "--mode",
@@ -203,6 +213,13 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
       PI_NEXT_ISSUE_WORKER: "1",
       ...(options.coordinationCwd
         ? { PI_NEXT_COORDINATION_CWD: options.coordinationCwd }
+        : {}),
+      ...(options.dispatch
+        ? {
+            PI_NEXT_WORKER_ROLE: options.dispatch.role,
+            PI_NEXT_WORKER_CAPABILITY: options.dispatch.capabilityProfile,
+            PI_NEXT_WORKER_SKILLS: options.dispatch.skills.join(","),
+          }
         : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -294,7 +311,14 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
         output,
         code,
         signal,
-        telemetry: telemetry.finish(),
+        telemetry: options.dispatch
+          ? { ...telemetry.finish(), dispatch: {
+              version: options.dispatch.version,
+              role: options.dispatch.role,
+              skills: options.dispatch.skills,
+              capabilityProfile: options.dispatch.capabilityProfile,
+            } }
+          : telemetry.finish(),
       });
     };
     child.once("error", (error) => {

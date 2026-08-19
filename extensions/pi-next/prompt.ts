@@ -2,6 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { configuredPath, loadPiNextConfig, repositoryPolicyText, type PiNextConfig } from "../../src/coordination/config.ts";
+import {
+  createWorkerDispatch,
+  renderWorkerEnvelope,
+  type WorkerDispatchInput,
+  type WorkerDispatchPolicy,
+} from "../../src/coordination/worker-dispatch.ts";
 
 function stripFrontmatter(markdown: string): string {
   return markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
@@ -36,18 +42,38 @@ function loopTuningOverlay(cwd?: string): string {
   return `Runtime loop tuning overlay (bounded; subordinate to AGENTS.md/canonical policy):\n${text.slice(0, 2_000)}`;
 }
 
+function selectedSkillText(cwd: string, names: readonly string[]): string {
+  const chunks: string[] = [];
+  for (const name of names.slice(0, 3)) {
+    // Skills are optional methodology. Missing packs are represented as a
+    // reference rather than silently turning the legacy project policy into a
+    // universal prompt dependency.
+    const path = join(cwd, "skills", "vendor", "mattpocock", name, "SKILL.md");
+    if (!existsSync(path)) {
+      chunks.push(`${name} (managed skill reference; content unavailable in this consumer)`);
+      continue;
+    }
+    chunks.push(`${name}:\n${stripFrontmatter(readFileSync(path, "utf8")).slice(0, 4_000)}`);
+  }
+  return chunks.length ? `Selected engineering methodology (non-authoritative):\n${chunks.join("\n\n")}` : "";
+}
+
 export function buildPiNextPrompt(
   cwd: string,
   args: string,
   extraInstructions?: string,
+  dispatchInput: WorkerDispatchInput = {},
 ): string {
   const config = loadPiNextConfig(cwd);
-  const skillPath = configuredPath(cwd, config.workflow.skillPath);
-  const skill = existsSync(skillPath)
-    ? stripFrontmatter(readFileSync(skillPath, "utf8"))
-    : "# pi-next\nFollow the repository pi-next workflow.";
+  const role = dispatchInput.phase || "planning";
+  const policy = createWorkerDispatch({
+    ...dispatchInput,
+    phase: role,
+    modelPolicy: dispatchInput.modelPolicy ?? config.workerDispatch.models[role as keyof typeof config.workerDispatch.models],
+  });
   const userArgs = args.trim() || "(no arguments)";
-  return [skill, WORK_LOG_INSTRUCTIONS, `User: ${userArgs}`, extraInstructions?.trim()]
+  const kernel = `${repositoryPolicyText(config)}\n${renderWorkerEnvelope(policy)}\n${WORK_LOG_INSTRUCTIONS}`;
+  return [kernel, selectedSkillText(cwd, policy.skills), `User: ${userArgs}`, extraInstructions?.trim()]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -99,6 +125,7 @@ export function buildLoopPrompt(input: {
   candidateShortlist?: string;
   candidateSearchExhausted?: boolean;
   planFreshness?: string;
+  dispatch?: WorkerDispatchPolicy;
 }): string {
   const policy = promptPolicy(input.cwd ? loadPiNextConfig(input.cwd) : undefined);
   const selection = input.hasPlan
@@ -118,6 +145,7 @@ export function buildLoopPrompt(input: {
 
   return [
     `${policy.repositoryPolicy} Pi-next unattended workflow step. The configured ${policy.authorityName} authority is the only autonomous backlog.`,
+    input.dispatch ? renderWorkerEnvelope(input.dispatch) : "",
     "Use the four pi_next_* tools for workflow state, checks, explicit-path commits, and loop reporting. Start with pi_next_inspect(action=\"state\").",
     WORK_LOG_INSTRUCTIONS,
     selection,

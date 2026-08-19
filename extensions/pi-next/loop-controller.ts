@@ -49,6 +49,7 @@ import {
   type LoopStatus,
 } from "./loop-state.ts";
 import type { WorkerTelemetryReport } from "./worker-telemetry.ts";
+import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
 
 const MAX_TRANSITIONS_PER_SESSION = 3;
 
@@ -520,6 +521,11 @@ async function runOneStep(
       buildLoopPrompt({
         cwd: ctx.cwd,
         mode: hasPlan ? "resume" : "auto",
+        dispatch: createWorkerDispatch({
+          phase: hasPlan ? "implementation" : "planning",
+          hasPlan,
+          issueNumber: state.activeIssueNumber,
+        }),
         runId: state.runId,
         step: state.step,
         maxSteps: state.maxSteps,
@@ -534,6 +540,11 @@ async function runOneStep(
         issueNumber: state.activeIssueNumber,
         runId: state.runId,
         phase: hasPlan ? "implementation" : "planning",
+        dispatch: createWorkerDispatch({
+          phase: hasPlan ? "implementation" : "planning",
+          hasPlan,
+          issueNumber: state.activeIssueNumber,
+        }),
       },
     );
     const result = await task;

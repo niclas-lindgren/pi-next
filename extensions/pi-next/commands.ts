@@ -59,6 +59,7 @@ import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
+import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
 
 /**
  * Delivers through the shared lifecycle-aware host boundary (#583) instead
@@ -113,7 +114,7 @@ async function executeIssueWorker(
   prompt: string,
   runner: IssueWorkerRunner = runIssueWorker,
   onProgress?: (elapsedMs: number) => void,
-  observer?: Pick<IssueWorkerOptions, "issueNumber" | "runId" | "phase" | "onActivity" | "onWorkerState" | "display">,
+  observer?: Pick<IssueWorkerOptions, "issueNumber" | "runId" | "phase" | "dispatch" | "onActivity" | "onWorkerState" | "display">,
 ): Promise<void> {
   const generation = currentGeneration();
   const task = runner(cwd, prompt, {
@@ -300,16 +301,22 @@ export async function runIssueScopedPrompt(
     // mode routes it straight to handleFatalRuntimeError -> exit(1), not
     // just this command), that assertion silently killed the whole CLI on
     // every worktree-scoped run. The worker receives executionCwd explicitly.
+    const phase = existsSync(planFile(executionCwd)) ? "implementation" : "planning";
+    const dispatch = createWorkerDispatch({
+      phase,
+      hasPlan: phase === "implementation",
+      issueNumber: claimedLease.issueNumber,
+    });
     if (authorityOverride && !workerOverride) {
       await ctx.newSession({
         withSession: async (next) => {
-          await next.sendUserMessage(buildPiNextPrompt(executionCwd, args));
+          await next.sendUserMessage(buildPiNextPrompt(executionCwd, args, undefined, dispatch));
         },
       });
     } else {
       await executeIssueWorker(
         executionCwd,
-        buildPiNextPrompt(executionCwd, args),
+        buildPiNextPrompt(executionCwd, args, undefined, dispatch),
         workerOverride,
         (elapsedMs) =>
           notifySafely(
@@ -320,7 +327,8 @@ export async function runIssueScopedPrompt(
         {
           issueNumber: claimedLease.issueNumber,
           runId: claimedLease.runId,
-          phase: existsSync(planFile(executionCwd)) ? "implementation" : "planning",
+          phase,
+          dispatch,
           display,
           onActivity: (event: WorkerWorkLogEvent) => {
             if (currentGeneration()?.isDisposed()) return;

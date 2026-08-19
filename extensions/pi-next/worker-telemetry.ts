@@ -1,4 +1,5 @@
 import type { LoopUsage } from "./loop-state.ts";
+import type { WorkerDispatchPolicy } from "../../src/coordination/worker-dispatch.ts";
 
 /** Aggregate model-round/tool-call activity for one issue-worker invocation. */
 export interface WorkerActivity {
@@ -22,6 +23,8 @@ export interface WorkerTelemetryReport {
   usage?: LoopUsage;
   activity?: WorkerActivity;
   model?: string;
+  /** Controller-selected metadata, never prompt text or transcript content. */
+  dispatch?: Pick<WorkerDispatchPolicy, "version" | "role" | "skills" | "capabilityProfile">;
 }
 
 const ZERO_USAGE: LoopUsage = {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add deterministic worker-role dispatch with selective skills, capability
+  profiles, candidate/authority binding, provider-neutral model routing, and
+  bounded role metadata in worker telemetry.
+
 All notable changes to pi-next are documented here. The project is pre-1.0;
 minor releases may change public behavior and breaking changes are called out.
 
