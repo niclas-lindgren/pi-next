@@ -1,9 +1,10 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 import {
   GitHubIssueLeaseAuthority,
+  issueWorkspaceIdentity,
   type IssueLeaseAuthority,
 } from "./issue-leases.ts";
 import {
@@ -175,15 +176,25 @@ export async function recoverableAbandonedAutoRun(
   authorityOverride?: Pick<IssueLeaseAuthority, "read">,
 ): Promise<LoopState | undefined> {
   const authority = authorityOverride ?? new GitHubIssueLeaseAuthority(cwd);
-  const candidates = listLoopStates(cwd).filter(
-    (state) =>
+  const candidates = listLoopStates(cwd).filter((state) => {
+    const issueNumber = state.activeIssueNumber;
+    const lease = state.activeLease;
+    const canonicalWorkspace =
+      typeof issueNumber === "number" && issueNumber > 0
+        ? resolve(cwd, issueWorkspaceIdentity(issueNumber).worktree)
+        : undefined;
+    return (
       ["running", "interrupted", "stopped"].includes(state.status) &&
       state.remainingIssues > 0 &&
-      Boolean(state.activeIssueNumber) &&
-      Boolean(state.activeWorkspace) &&
-      Boolean(state.activeLease) &&
-      state.activeLease?.agent === "pi-next",
-  );
+      typeof issueNumber === "number" &&
+      Number.isSafeInteger(issueNumber) &&
+      issueNumber > 0 &&
+      lease !== undefined &&
+      lease.issueNumber === issueNumber &&
+      lease.agent === "pi-next" &&
+      state.activeWorkspace === canonicalWorkspace
+    );
+  });
   const leases = new Map<number, Awaited<ReturnType<IssueLeaseAuthority["read"]>>>();
 
   for (const state of candidates) {
@@ -228,7 +239,22 @@ export async function prepareAbandonedAutoResume(
   if (state.step <= state.settledStep) return { ok: true };
   if (existsSync(loopResultFile(coordinationCwd, state.runId))) return { ok: true };
 
-  const executionCwd = state.activeWorkspace || coordinationCwd;
+  const issueNumber = state.activeIssueNumber;
+  const canonicalWorkspace =
+    typeof issueNumber === "number" && issueNumber > 0
+      ? resolve(coordinationCwd, issueWorkspaceIdentity(issueNumber).worktree)
+      : undefined;
+  if (
+    !Number.isSafeInteger(issueNumber) ||
+    !state.activeWorkspace ||
+    state.activeWorkspace !== canonicalWorkspace
+  ) {
+    return {
+      ok: false,
+      reason: "Cannot recover abandoned pi-next run: persisted issue workspace is not canonical",
+    };
+  }
+  const executionCwd = state.activeWorkspace;
   if (!existsSync(executionCwd)) {
     return {
       ok: false,

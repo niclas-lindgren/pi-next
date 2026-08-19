@@ -2,10 +2,14 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { relative } from "node:path";
 
 import { trackCrashLoggerCwd } from "./crash-log.ts";
+import {
+  validateCanonicalExecutionState,
+  validateWorkspacePlan,
+} from "./execution-boundary.ts";
 import { commitExplicitPaths } from "./commit-safety.ts";
 import { cleanupCompletedIssueWorktree } from "./main-refresh.ts";
 import { runLoopSteps } from "./loop-controller.ts";
@@ -18,6 +22,7 @@ import {
   ISSUE_LEASE_DURATION_MS,
   releaseIssueLease,
   reconcileIssueLeaseForResume,
+  parseLeaseFromAuthority,
   startIssueLeaseHeartbeat,
 } from "./issue-leases.ts";
 import {
@@ -108,13 +113,27 @@ export async function claimLoopIssue(
   state: LoopState,
   authorityOverride?: import("./issue-leases.ts").IssueLeaseAuthority,
 ): Promise<LoopState> {
-  if (state.activeIssueNumber && state.activeWorkspace && state.activeLease) {
-    if (state.activeLease.agent !== "pi-next") {
-      throw new PlanAuthorityError(
-        "unowned",
-        "Persisted loop state is not owned by pi-next; refusing resume",
-      );
-    }
+  const hasPersistedExecutionState =
+    state.activeIssueNumber !== undefined ||
+    state.activeWorkspace !== undefined ||
+    state.activeLease !== undefined;
+  const hasCompleteExecutionState =
+    typeof state.activeIssueNumber === "number" &&
+    Number.isSafeInteger(state.activeIssueNumber) &&
+    state.activeIssueNumber > 0 &&
+    Boolean(state.activeWorkspace) &&
+    Boolean(state.activeLease);
+  if (hasPersistedExecutionState && !hasCompleteExecutionState) {
+    throw new PlanAuthorityError(
+      "unowned",
+      "Persisted issue execution state is incomplete; refusing to infer ownership from a PLAN or partial loop state",
+    );
+  }
+  if (hasCompleteExecutionState) {
+    const activeIssueNumber = state.activeIssueNumber as number;
+    const activeWorkspace = state.activeWorkspace as string;
+    const activeLease = state.activeLease!;
+    validateCanonicalExecutionState(activeWorkspace, state);
     const authority =
       authorityOverride ?? new GitHubIssueLeaseAuthority(cwd);
     // Reconcile live ownership before ensureIssueWorktree(): recovery may
@@ -122,38 +141,21 @@ export async function claimLoopIssue(
     // foreign owner or a missing lease.
     const lease = await reconcileIssueLeaseForResume(
       authority,
-      state.activeLease as import("./issue-authority.ts").IssueLease,
+      parseLeaseFromAuthority(JSON.stringify(activeLease)),
       new Date(),
     );
     const workspace = await ensureIssueWorktree(
       cwd,
-      state.activeIssueNumber,
+      activeIssueNumber,
       recordLifecycleEvent,
     );
-    if (workspace !== state.activeWorkspace) {
+    if (workspace !== activeWorkspace) {
       throw new Error(
-        `Persisted issue workspace mismatch: expected ${workspace}, found ${state.activeWorkspace}`,
+        `Persisted issue workspace mismatch: expected ${workspace}, found ${activeWorkspace}`,
       );
     }
-    await quarantineInheritedArtifacts(cwd, workspace, state.activeIssueNumber);
-    const plan = resolvePlanIdentity(workspace);
-    if (plan.kind === "unresolved" || plan.kind === "ambiguous") {
-      throw new PlanAuthorityError(plan.kind, plan.reason, plan.paths);
-    }
-    if (plan.kind === "resolved" && plan.issueNumber !== state.activeIssueNumber) {
-      throw new PlanAuthorityError(
-        "unowned",
-        `Active workspace PLAN resolves to issue #${plan.issueNumber}, not #${state.activeIssueNumber}`,
-        [plan.path],
-      );
-    }
-    if (plan.kind === "resolved" && plan.provenance !== "canonical") {
-      throw new PlanAuthorityError(
-        "unowned",
-        "Legacy issue-scoped PLAN artifacts require explicit authority reconciliation before resume",
-        [plan.path],
-      );
-    }
+    await quarantineInheritedArtifacts(cwd, workspace, activeIssueNumber);
+    validateWorkspacePlan(workspace, activeIssueNumber);
     const next = {
       ...state,
       activeWorkspace: workspace,
@@ -223,6 +225,7 @@ export async function claimLoopIssue(
   try {
     workspace = await ensureIssueWorktree(cwd, issueNumber, recordLifecycleEvent);
     await quarantineInheritedArtifacts(cwd, workspace, issueNumber);
+    validateWorkspacePlan(workspace, issueNumber);
   } catch (error) {
     try {
       await releaseIssueLease(authority, lease, {

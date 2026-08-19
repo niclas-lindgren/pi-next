@@ -2,6 +2,10 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
+import {
+  validateCanonicalExecutionState,
+  validateWorkspacePlan,
+} from "./execution-boundary.ts";
 import { checkIssueFreshness, primeIssueFreshness } from "./issue-freshness.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
@@ -457,6 +461,8 @@ async function runOneStep(
     lastOutcome: undefined,
     lastReason: undefined,
   };
+  validateCanonicalExecutionState(ctx.cwd, state);
+  validateWorkspacePlan(ctx.cwd, state.activeIssueNumber as number);
   const runtimeCwd = runtimeCwdFor(ctx.cwd, state);
   writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), state);
   removeFile(loopResultFile(runtimeCwd, state.runId));
@@ -724,6 +730,8 @@ export async function runLoopSteps(
   runtime: SupervisorRuntime = createSupervisorRuntime(),
   observer?: WorkerObserver,
 ): Promise<void> {
+  validateCanonicalExecutionState(ctx.cwd, initial);
+  validateWorkspacePlan(ctx.cwd, initial.activeIssueNumber as number);
   // Callers may supply the owner-bound sink from their command context;
   // direct callers get a sink attached to this context. It is threaded through
   // every newSession() boundary instead of being routed through a singleton.
