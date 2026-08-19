@@ -5,9 +5,9 @@ Pi-next is an experimental autonomous issue-implementation loop for the
 is a Pi extension, not a model provider or a replacement for Pi's package
 manager.
 
-> **Experimental:** the first supported public release has not been cut yet.
-> Review the code and use a disposable repository before enabling autonomous
-> runs on valuable work.
+> **Experimental / pre-1.0:** v0.1.1 is the first migration-ready public
+> release. Review the code and use a disposable repository before enabling
+> autonomous runs on valuable work.
 
 ## Requirements
 
@@ -18,17 +18,19 @@ manager.
 
 ## Install as a native Pi package
 
-Use a release tag or commit, rather than floating `main`, for reproducible or
-autonomous use. For example, after a tagged release:
+Use an immutable release tag or commit, rather than floating `main`, for
+reproducible or autonomous use. The supported first release is:
 
 ```sh
-pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.0
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.1
 ```
 
-The `-l` form records the package in the consuming repository's
+The `-l` form records the exact package ref in the consuming repository's
 `.pi/settings.json`; commit that settings entry if other checkouts should
 install the same package automatically. Use `pi install` without `-l` for a
-user-global installation. Pi's native lifecycle commands manage the package:
+user-global installation. Pi's native lifecycle commands manage the package.
+Run `/pi-next-doctor` after installation to observe the loaded version and
+revision before enabling automation:
 
 ```sh
 pi list
@@ -45,8 +47,11 @@ rather than floating to `main`:
 pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.1
 ```
 
-A commit SHA may be used while developing. Updating or removing pi-next does
-not own or delete the consumer's workflow state, recovery data, or policy.
+A commit SHA may be used while developing. v0.1.1 uses package/config schema
+version 1 and supports Pi 0.84.2+ with Node 22.19+. It is pre-1.0: minor
+releases may change behavior, and consumers should review release notes before
+upgrading. Updating or removing pi-next does not own or delete the consumer's
+workflow state, recovery data, or policy.
 For local development, Pi also accepts a package directory directly:
 
 ```sh

@@ -1,8 +1,10 @@
 {
   "name": "pi-next",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Autonomous issue implementation loop extension for pi-coding-agent",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "type": "module",
   "private": false,
   "engines": {
@@ -37,7 +39,9 @@
     "./skills": "./src/skills/sync.ts"
   },
   "pi": {
-    "extensions": ["./extensions/pi-next.ts"]
+    "extensions": [
+      "./extensions/pi-next.ts"
+    ]
   },
   "scripts": {
     "build": "tsc --noEmit",
