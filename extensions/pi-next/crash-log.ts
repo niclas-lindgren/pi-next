@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { createFeedbackEvent, sanitizeFeedbackText } from "../../src/coordination/feedback.ts";
 import { runtimeDir, setHostCallDiagnosticsSink } from "./util-core.ts";
 
 /**
@@ -60,15 +61,20 @@ export function recordCrashDiagnostic(
     const dir = runtimeDir(cwd);
     mkdirSync(dir, { recursive: true });
     const file = crashLogFile(cwd);
-    const record = {
-      at: new Date().toISOString(),
-      pid: process.pid,
-      kind,
-      message: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
-      ...context,
-    };
-    appendFileSync(file, `${JSON.stringify(record)}\n`, "utf8");
+    const fatal = kind === "uncaughtException" || kind === "unhandledRejection";
+    const event = createFeedbackEvent({
+      harness: "pi-next",
+      stage: "process",
+      category: kind.startsWith("signal:") ? "external" : "runtime",
+      severity: fatal ? "fatal" : "warning",
+      outcome: "failed",
+      code: kind,
+      summary: error instanceof Error ? error.message : String(error),
+      error,
+      diagnosticRefs: context?.label ? [sanitizeFeedbackText(context.label)] : [],
+      attempt: 1,
+    });
+    appendFileSync(file, `${JSON.stringify(event)}\n`, "utf8");
     trimCrashLog(file);
   } catch {
     // Logging is diagnostic-only; a failure here must not mask or replace
