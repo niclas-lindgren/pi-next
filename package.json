@@ -28,6 +28,7 @@
     "./coordination": "./src/coordination/index.ts",
     "./config": "./src/coordination/config.ts",
     "./dispatch": "./src/coordination/worker-dispatch.ts",
+    "./review": "./src/coordination/adversarial-review.ts",
     "./authority": "./src/coordination/work-authority.ts",
     "./cli": "./src/coordination/cli.ts",
     "./version": "./src/version.ts",
