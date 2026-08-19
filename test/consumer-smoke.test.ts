@@ -114,7 +114,7 @@ test("fresh consumer installs a pinned package and completes a disposable transi
     await git(consumer, "commit", "-m", "pin pi-next package");
     assert.equal((await exec("find", [consumer, "-path", "*/.pi/extensions/pi-next*", "-print"], { encoding: "utf8" })).stdout.trim(), "");
     const host = await freshPiHostProbe(consumer, env, revision);
-    assert.match(host.doctor, /Pi-next version=0\.1\.1/);
+    assert.match(host.doctor, /Pi-next version=0\.1\.2/);
     assert.match(host.doctor, new RegExp(`revision=${revision}`));
     assert.match(host.status, /PLAN=absent/);
 
@@ -136,7 +136,7 @@ test("fresh consumer installs a pinned package and completes a disposable transi
     const activated = JSON.parse(activation.stdout.trim()) as { extension: string; origin: string; identity: { version: string; revision: string } };
     assert.equal(activated.origin, "package");
     assert.match(activated.extension, /extensions[\\/]pi-next\.ts$/);
-    assert.deepEqual(activated.identity, { version: "0.1.1", revision });
+    assert.deepEqual(activated.identity, { version: "0.1.2", revision});
 
     await writeFile(runner, `
       import { InMemoryWorkAuthority, claimIssueLease, ensureIssueWorktree, releaseIssueLease } from ${JSON.stringify(join(installed, "src", "coordination", "index.ts"))};
