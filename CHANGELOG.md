@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-08-19
 
 - Add deterministic worker-role dispatch with selective skills, capability
   profiles, candidate/authority binding, provider-neutral model routing, and
@@ -11,8 +11,6 @@
 
 All notable changes to pi-next are documented here. The project is pre-1.0;
 minor releases may change public behavior and breaking changes are called out.
-
-## Unreleased
 
 - Added the pinned, allowlisted Matt Pocock engineering skill packs with a
   deterministic non-interactive sync/check CLI, SHA-256 provenance, preserved
@@ -34,10 +32,8 @@ minor releases may change public behavior and breaking changes are called out.
 - Added `/pi-next-doctor` for package/configuration/workflow diagnostics.
 - Added contribution, support, and threat-model guidance.
 
-## 0.1.0 (planned)
+The release is tested with Pi 0.84.2+ and Node 22.19+. It is experimental;
+consumers must pin this tag and review the host-permission threat model.
 
-The first migration-ready pinned Pi package release will document the exact
-Pi host/API and Node compatibility tested for the release, configuration and
-authority contract versions, known limitations, and consumer migration steps.
-It will be tagged only after CI and a disposable fresh-consumer smoke test
-pass.
+Configuration and authority contracts are version 1. Migration from copied
+extensions requires removing the copy and installing the native package.
