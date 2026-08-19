@@ -27,6 +27,7 @@
     ".": "./extensions/pi-next.ts",
     "./coordination": "./src/coordination/index.ts",
     "./config": "./src/coordination/config.ts",
+    "./dispatch": "./src/coordination/worker-dispatch.ts",
     "./authority": "./src/coordination/work-authority.ts",
     "./cli": "./src/coordination/cli.ts",
     "./version": "./src/version.ts",

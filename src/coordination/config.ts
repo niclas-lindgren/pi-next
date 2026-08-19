@@ -8,6 +8,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
+import type { WorkerModelPolicy, WorkerRole } from "./worker-dispatch.ts";
 
 export const PI_NEXT_CONFIG_VERSION = 1 as const;
 export const PI_NEXT_CONFIG_PATH = ".pi-next/config.json" as const;
@@ -41,6 +42,11 @@ export interface PiNextConfig {
     tuningPath: string;
     helperDir: string;
   };
+  workerDispatch: {
+    version: 1;
+    models: Partial<Record<WorkerRole, WorkerModelPolicy>>;
+    maxEscalations: number;
+  };
 }
 
 /** Defaults contain no product name, domain policy, or hidden consumer path. */
@@ -66,6 +72,7 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
     tuningPath: ".pi-next/LOOP_TUNING.md",
     helperDir: ".pi-next/scripts",
   },
+  workerDispatch: { version: 1 as const, models: {}, maxEscalations: 2 },
 });
 
 export class PiNextConfigError extends Error {
@@ -113,7 +120,7 @@ function cloneDefaults(): PiNextConfig {
 
 export function validatePiNextConfig(value: unknown): PiNextConfig {
   const root = object(value, "config");
-  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow"], "config");
+  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
     throw new PiNextConfigError(`config.version must be ${PI_NEXT_CONFIG_VERSION}`);
   }
@@ -159,6 +166,29 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
   rejectUnknown(workflow, workflowKeys, "config.workflow");
   const paths = Object.fromEntries(workflowKeys.map((key) => [key, pathValue(workflow[key], `config.workflow.${key}`)])) as PiNextConfig["workflow"];
 
+  const dispatchValue = root.workerDispatch === undefined
+    ? DEFAULT_PI_NEXT_CONFIG.workerDispatch
+    : object(root.workerDispatch, "config.workerDispatch");
+  rejectUnknown(dispatchValue, ["version", "models", "maxEscalations"], "config.workerDispatch");
+  if (dispatchValue.version !== 1) throw new PiNextConfigError("config.workerDispatch.version must be 1");
+  const modelsValue = dispatchValue.models === undefined ? {} : object(dispatchValue.models, "config.workerDispatch.models");
+  const models: Partial<Record<WorkerRole, WorkerModelPolicy>> = {};
+  for (const [role, raw] of Object.entries(modelsValue)) {
+    if (!/^(controller|planning|implementation|repair|review-spec|review-standards|verification|maintenance)$/.test(role)) {
+      throw new PiNextConfigError(`config.workerDispatch.models.${role} is not a supported worker role`);
+    }
+    const model = object(raw, `config.workerDispatch.models.${role}`);
+    rejectUnknown(model, ["model", "thinking", "escalation"], `config.workerDispatch.models.${role}`);
+    if (model.model !== undefined && (typeof model.model !== "string" || !model.model.trim())) throw new PiNextConfigError(`config.workerDispatch.models.${role}.model must be a non-empty string`);
+    const thinking = model.thinking;
+    if (thinking !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(thinking))) throw new PiNextConfigError(`config.workerDispatch.models.${role}.thinking is unsupported`);
+    if (model.escalation !== undefined && (!Number.isInteger(model.escalation) || Number(model.escalation) < 0 || Number(model.escalation) > 3)) throw new PiNextConfigError(`config.workerDispatch.models.${role}.escalation must be between 0 and 3`);
+    models[role as WorkerRole] = { ...(model.model === undefined ? {} : { model: String(model.model).trim() }), ...(thinking === undefined ? {} : { thinking: thinking as WorkerModelPolicy["thinking"] }), ...(model.escalation === undefined ? {} : { escalation: Number(model.escalation) }) };
+  }
+  const maxEscalationsRaw = dispatchValue.maxEscalations === undefined ? 2 : dispatchValue.maxEscalations;
+  if (typeof maxEscalationsRaw !== "number" || !Number.isInteger(maxEscalationsRaw) || maxEscalationsRaw < 0 || maxEscalationsRaw > 3) throw new PiNextConfigError("config.workerDispatch.maxEscalations must be between 0 and 3");
+  const maxEscalations = maxEscalationsRaw;
+
   return {
     version: PI_NEXT_CONFIG_VERSION,
     authority: {
@@ -170,6 +200,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     selection: { priorities, readyStates, blockedStates },
     repositoryPolicy: { entrypoints },
     workflow: paths,
+    workerDispatch: { version: 1, models, maxEscalations: Number(maxEscalations) },
   };
 }
 
