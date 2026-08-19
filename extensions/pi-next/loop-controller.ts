@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { join, relative } from "node:path";
 
 import { checkIssueFreshness, primeIssueFreshness } from "./issue-freshness.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
@@ -24,7 +24,7 @@ import {
   type IssueWorkerOptions,
   type IssueWorkerRunner,
 } from "./util-core.ts";
-import { git, planFile, removeFile, writeJsonAtomic } from "./util.ts";
+import { git, planFile, removeFile, workflowPath, writeJsonAtomic } from "./util.ts";
 import {
   acquireControllerLock,
   addIssuePromptMetrics,
@@ -113,14 +113,15 @@ async function parkDeferredPlan(
     );
   }
 
-  mkdirSync(`${cwd}/.ps-next/deferred`, { recursive: true });
-  const target = `.ps-next/deferred/issue-${issueNumber}.md`;
+  const deferredDirectory = workflowPath(cwd, "deferredDir");
+  mkdirSync(deferredDirectory, { recursive: true });
+  const target = join(deferredDirectory, `issue-${issueNumber}.md`);
   await git(cwd, [
     "mv",
     "-f",
     "--",
-    `.ps-next/${basename(planFile(cwd))}`,
-    target,
+    relative(cwd, planFile(cwd)),
+    relative(cwd, target),
   ]);
   await git(cwd, [
     "commit",

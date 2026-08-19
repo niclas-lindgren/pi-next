@@ -2,9 +2,8 @@
  * Harness-neutral issue lease claim/renew/heartbeat/release orchestration
  * and canonical worktree attach/recreate logic.
  *
- * Extracted from `.pi/extensions/pi-next/issue-leases.ts` (#588) so any
- * agent harness can share the same lease lifecycle and worktree derivation
- * instead of re-implementing it. Behavior (CAS via
+ * Shared by compatible agent harnesses so they use the same lease lifecycle
+ * and worktree derivation. Behavior (CAS via
  * `refs/leases/issues/<N>`, branch `agent/issue-<N>`, worktree
  * `.worktrees/issue-<N>`) is preserved exactly.
  *

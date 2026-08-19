@@ -1,12 +1,13 @@
-import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
+import { loadPiNextConfig } from "../../src/coordination/config.ts";
+import {
+  createWorkAuthority,
+  requireAuthorityCapability,
+  type WorkAuthorityAdapter,
+} from "../../src/coordination/work-authority.ts";
 import { runtimeDir, writeJsonAtomic } from "./util-core";
-
-const execFileAsync = promisify(execFile);
 const MAX_RECORDS = 100;
 
 interface FreshnessRecord {
@@ -60,47 +61,6 @@ function persistRecord(cwd: string, record: FreshnessRecord): void {
   });
 }
 
-function normalizeIssue(raw: Record<string, unknown>): Record<string, unknown> {
-  const labels = Array.isArray(raw.labels)
-    ? raw.labels
-        .map((label) =>
-          label && typeof label === "object"
-            ? String((label as Record<string, unknown>).name || "")
-            : "",
-        )
-        .filter(Boolean)
-        .sort()
-    : [];
-  const comments = Array.isArray(raw.comments)
-    ? raw.comments.map((comment) => {
-        const item =
-          comment && typeof comment === "object"
-            ? (comment as Record<string, unknown>)
-            : {};
-        const author =
-          item.author && typeof item.author === "object"
-            ? String((item.author as Record<string, unknown>).login || "")
-            : "";
-        return {
-          id: String(item.id || item.url || ""),
-          author,
-          body: String(item.body || ""),
-          createdAt: String(item.createdAt || ""),
-          updatedAt: String(item.updatedAt || ""),
-        };
-      })
-    : [];
-  return {
-    number: Number(raw.number || 0),
-    state: String(raw.state || ""),
-    title: String(raw.title || ""),
-    body: String(raw.body || ""),
-    updatedAt: String(raw.updatedAt || ""),
-    labels,
-    comments,
-  };
-}
-
 function checkboxLines(markdown: string): string[] {
   return markdown
     .split(/\r?\n/)
@@ -139,24 +99,16 @@ export function extractIssueAcceptanceCriteria(body: string): string[] {
 export async function getLiveIssueFingerprint(
   cwd: string,
   issueNumber: number,
+  authority?: WorkAuthorityAdapter,
 ): Promise<LiveIssueFingerprint> {
-  const { stdout } = await execFileAsync(
-    "gh",
-    [
-      "issue",
-      "view",
-      String(issueNumber),
-      "--json",
-      "number,state,title,body,updatedAt,labels,comments",
-    ],
-    { cwd, maxBuffer: 2 * 1024 * 1024 },
-  );
-  const normalized = normalizeIssue(JSON.parse(stdout) as Record<string, unknown>);
-  const body = String(normalized.body || "");
+  const config = loadPiNextConfig(cwd);
+  const adapter = authority ?? createWorkAuthority(cwd, config);
+  requireAuthorityCapability(adapter, "freshness");
+  const item = await adapter.get(String(issueNumber));
   return {
-    fingerprint: createHash("sha256").update(JSON.stringify(normalized)).digest("hex"),
-    githubUpdatedAt: String(normalized.updatedAt || "") || undefined,
-    acceptanceCriteria: extractIssueAcceptanceCriteria(body),
+    fingerprint: adapter.fingerprint(item),
+    githubUpdatedAt: item.updatedAt,
+    acceptanceCriteria: extractIssueAcceptanceCriteria(item.body),
   };
 }
 

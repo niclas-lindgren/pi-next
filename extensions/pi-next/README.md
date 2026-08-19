@@ -5,6 +5,20 @@ pi-coding-agent host. The foreground supervisor owns one auto run and its
 isolated disposable workers; durable recovery remains lease- and worktree-
 authority-first.
 
+## Project-neutral configuration
+
+Consumers may commit `.pi-next/config.json` with the version-1 schema exported
+from `src/coordination/config.ts`. It selects the authority adapter, priority,
+readiness and blocked-state names, repository-policy entrypoints, and workflow
+artifact paths. The file is validated before mutation; unsupported adapters and
+repository-escaping paths fail closed. With no file, only the documented generic
+GitHub/P0-P3 defaults apply—no `AGENTS.md` or `.agents/skills` tree is inferred.
+
+Authority discovery and freshness use the injected adapter contract from
+`src/coordination/work-authority.ts`. The lease CAS remains a separate ownership
+boundary, so an adapter that cannot provide atomic ownership cannot be treated
+as if it did.
+
 ## Supervisor-scoped worker lifecycle
 
 An `ExtensionGeneration` (`util-core.ts`) is the unit of lifecycle ownership

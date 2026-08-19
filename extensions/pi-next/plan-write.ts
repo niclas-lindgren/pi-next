@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { workflowArtifacts, type WorkflowArtifact } from "./plan-read";
+import { workflowPath } from "./util-core.ts";
 
 export function markDone(plan: string, prefix: string, log: string): string {
   const tasksStart = plan.indexOf("## Tasks");
@@ -75,7 +76,7 @@ export function quarantineInheritedWorkflowArtifacts(
     if (!source) continue;
 
     const suffix = artifact.kind === "plan" ? "PLAN.md" : "VERIFY.md";
-    const targetDirectory = join(workspaceCwd, ".ps-next", "deferred");
+    const targetDirectory = workflowPath(workspaceCwd, "deferredDir");
     mkdirSync(targetDirectory, { recursive: true });
     let target = join(
       targetDirectory,

@@ -8,6 +8,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+
+import { configuredPath, loadPiNextConfig } from "../../src/coordination/config.ts";
 import { promisify } from "node:util";
 
 import {
@@ -694,10 +696,16 @@ export function formatUnreachableCommitDetails(
 }
 
 export function psDir(cwd: string): string {
-  const local = join(cwd, ".ps-next");
-  return existsSync(local)
-    ? local
-    : resolve(process.env.HOME || "~", ".ps-next", "projects", basename(cwd));
+  const config = loadPiNextConfig(cwd);
+  return configuredPath(cwd, config.workflow.stateDir);
+}
+
+export function workflowPath(
+  cwd: string,
+  key: "stateDir" | "planPath" | "verifyPath" | "archiveDir" | "deferredDir" | "skillPath" | "tuningPath" | "helperDir",
+): string {
+  const config = loadPiNextConfig(cwd);
+  return configuredPath(cwd, config.workflow[key]);
 }
 
 export type PlanResolution =
@@ -742,7 +750,8 @@ function issueNumberFromPlan(path: string): number | undefined {
 
 /** Return only the canonical PLAN.md path; discovery is not ownership. */
 export function planFile(cwd: string): string {
-  return join(psDir(cwd), "PLAN.md");
+  const config = loadPiNextConfig(cwd);
+  return configuredPath(cwd, config.workflow.planPath);
 }
 
 /**
@@ -752,7 +761,7 @@ export function planFile(cwd: string): string {
  */
 export function resolvePlanIdentity(cwd: string): PlanResolution {
   const directory = psDir(cwd);
-  const canonical = join(directory, "PLAN.md");
+  const canonical = planFile(cwd);
   if (existsSync(canonical)) {
     const issueNumber = issueNumberFromPlan(canonical);
     return issueNumber
@@ -800,7 +809,8 @@ export function resolvePlanIdentity(cwd: string): PlanResolution {
 }
 
 export function verifyFile(cwd: string): string {
-  return join(psDir(cwd), "VERIFY.md");
+  const config = loadPiNextConfig(cwd);
+  return configuredPath(cwd, config.workflow.verifyPath);
 }
 
 export function lockFile(cwd: string): string {
@@ -828,7 +838,8 @@ export async function runHelper(
   name: string,
   args: string[] = [],
 ) {
-  const path = join(cwd, ".agents", "skills", "pi-next", "scripts", name);
+  const config = loadPiNextConfig(cwd);
+  const path = join(configuredPath(cwd, config.workflow.helperDir), name);
   const { stdout, stderr } = await execFileAsync(path, args, {
     cwd,
     maxBuffer: 1024 * 1024,

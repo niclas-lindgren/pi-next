@@ -7,9 +7,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { cpus } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 
+import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { sessionModel } from "./auto-telemetry.ts";
 import { commitExplicitPaths, readQualityEvidence } from "./commit-safety.ts";
 import type { LoopIssueMetrics, LoopState, LoopUsage } from "./loop-state.ts";
@@ -94,18 +95,19 @@ async function archivedPlanForIssue(
   ]).catch(() => "");
   if (!archiveCommit) return null;
 
+  const archiveDir = relative(cwd, resolveWorkflowPath(cwd, "archiveDir")).replace(/\\/g, "/");
   const names = await gitRaw(cwd, [
     "show",
     "--pretty=format:",
     "--name-only",
     archiveCommit,
     "--",
-    ".ps-next/ARCHIVED",
+    archiveDir,
   ]).catch(() => "");
   const planPath = names
     .split(/\r?\n/)
     .map((value) => value.trim())
-    .find((value) => value.startsWith(".ps-next/ARCHIVED/PLAN-") && value.endsWith(".md"));
+    .find((value) => value.startsWith(`${archiveDir}/PLAN-`) && value.endsWith(".md"));
   if (!planPath) return null;
 
   const markdown = await gitRaw(cwd, ["show", `${archiveCommit}:${planPath}`]).catch(() => "");
@@ -116,6 +118,11 @@ function candidateCommitHashes(markdown: string): string[] {
   const log = section(markdown, "Log");
   const matches = log.match(/\b[0-9a-f]{7,40}\b/gi) || [];
   return [...new Set(matches.map((value) => value.toLowerCase()))];
+}
+
+function resolveWorkflowPath(cwd: string, key: "archiveDir" | "stateDir"): string {
+  const config = loadPiNextConfig(cwd);
+  return join(cwd, config.workflow[key]);
 }
 
 function classifyPath(path: string): "source" | "test" | "docs" | "migration" | "other" {
@@ -161,7 +168,7 @@ async function complexityMetrics(cwd: string, issueNumber: number): Promise<Comp
       commit,
       "--",
       ".",
-      ":(exclude).ps-next/**",
+      `:(exclude)${relative(cwd, resolveWorkflowPath(cwd, "stateDir"))}/**`,
       ":(exclude).agents/diagnostics/**",
       ":(exclude).pi/runtime/**",
       ":(exclude).pi/logs/**",

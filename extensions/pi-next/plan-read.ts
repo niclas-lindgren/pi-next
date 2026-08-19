@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { planFile, verifyFile, workflowPath } from "./util-core.ts";
+
 export interface CurrentTask {
   task: string;
   prefix: string;
@@ -34,14 +36,16 @@ export function workflowArtifactIssue(path: string): number | undefined {
 }
 
 export function workflowArtifacts(cwd: string): WorkflowArtifact[] {
-  const directory = join(cwd, ".ps-next");
+  const directory = workflowPath(cwd, "stateDir");
   if (!existsSync(directory)) return [];
-  const planPaths = readdirSync(directory)
-    .filter((name) => name === "PLAN.md" || /^PLAN-[^/]+\.md$/.test(name))
+  const canonicalPlan = planFile(cwd);
+  const issuePlans = readdirSync(directory)
+    .filter((name) => /^PLAN-[^/]+\.md$/.test(name))
     .map((name) => join(directory, name));
+  const planPaths = [canonicalPlan, ...issuePlans].filter((path, index, all) => all.indexOf(path) === index);
   const paths = [
     ...planPaths.map((path) => ({ kind: "plan" as const, path })),
-    { kind: "verify" as const, path: join(directory, "VERIFY.md") },
+    { kind: "verify" as const, path: verifyFile(cwd) },
   ];
   return paths
     .filter(({ path }) => existsSync(path))

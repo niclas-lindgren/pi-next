@@ -3,6 +3,7 @@ import type {
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { existsSync, unlinkSync } from "node:fs";
+import { relative } from "node:path";
 
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import { commitExplicitPaths } from "./commit-safety.ts";
@@ -36,6 +37,7 @@ import {
   PlanAuthorityError,
   resolvePlanIdentity,
   safeNotify,
+  verifyFile,
   writeJsonAtomic,
 } from "./util.ts";
 import {
@@ -291,7 +293,7 @@ export async function removeCompletedWorkflowArtifacts(
   unlinkSync(verify.path);
   await commitExplicitPaths(
     workspaceCwd,
-    [".ps-next/VERIFY.md"],
+    [relative(workspaceCwd, verifyFile(workspaceCwd))],
     `chore(agent): remove completed issue #${issueNumber} verification artifact`,
     { issueNumber, kind: "lifecycle" },
   );

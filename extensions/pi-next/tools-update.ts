@@ -7,7 +7,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename } from "node:path";
+import { join, relative } from "node:path";
 
 import { writeLoopResult } from "./loop.ts";
 import { safeLoopBoundary } from "./loop-state.ts";
@@ -21,6 +21,7 @@ import {
   psDir,
   required,
   today,
+  workflowPath,
 } from "./util.ts";
 
 function readPlan(cwd: string): string {
@@ -50,14 +51,15 @@ async function deferActivePlan(
     );
   }
 
-  mkdirSync(`${cwd}/.ps-next/deferred`, { recursive: true });
-  const target = `.ps-next/deferred/issue-${expectedIssue}.md`;
+  const deferredDirectory = workflowPath(cwd, "deferredDir");
+  mkdirSync(deferredDirectory, { recursive: true });
+  const target = join(deferredDirectory, `issue-${expectedIssue}.md`);
   const boundedReason = reason.trim().replace(/\s+/g, " ").slice(0, 800);
   writeFileSync(
     file,
     `${plan.trimEnd()}\n\n## Deferred workflow state\n\n- Deferred-At: ${new Date().toISOString()}\n- Reason: ${boundedReason}\n- Semantic status: unresolved; this deferral is not acceptance or archive evidence.\n`,
   );
-  await git(cwd, ["mv", "-f", "--", `.ps-next/${basename(file)}`, target]);
+  await git(cwd, ["mv", "-f", "--", relative(cwd, file), relative(cwd, target)]);
   await git(cwd, ["commit", "-m", `chore(agent): defer issue #${expectedIssue} plan`]);
 
   const after = await safeLoopBoundary(cwd, true);

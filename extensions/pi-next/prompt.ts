@@ -1,15 +1,35 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { configuredPath, loadPiNextConfig, repositoryPolicyText, type PiNextConfig } from "../../src/coordination/config.ts";
+
 function stripFrontmatter(markdown: string): string {
   return markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
 }
 
 const WORK_LOG_INSTRUCTIONS = `Worker visibility contract: this is an isolated child worker. Your ordinary visible assistant text and tool activity (reads, edits, searches, tests) are streamed live to the human supervisor as you work, with no separate reporting tool required. Keep visible text concise and free of prompts, secrets, credentials, or environment values; hidden reasoning/thinking is never shown to the supervisor.`;
 
+interface PromptPolicy {
+  authorityName: string;
+  priorities: string[];
+  repositoryPolicy: string;
+  workflow: PiNextConfig["workflow"];
+}
+
+function promptPolicy(config?: PiNextConfig): PromptPolicy {
+  const value = config ?? loadPiNextConfig(process.cwd());
+  return {
+    authorityName: value.authority.adapter,
+    priorities: value.selection.priorities,
+    repositoryPolicy: repositoryPolicyText(value),
+    workflow: value.workflow,
+  };
+}
+
 function loopTuningOverlay(cwd?: string): string {
   if (!cwd) return "";
-  const path = join(cwd, ".agents", "skills", "pi-next", "LOOP_TUNING.md");
+  const config = loadPiNextConfig(cwd);
+  const path = configuredPath(cwd, config.workflow.tuningPath);
   if (!existsSync(path)) return "";
   const text = readFileSync(path, "utf8").trim();
   if (!text) return "";
@@ -21,7 +41,8 @@ export function buildPiNextPrompt(
   args: string,
   extraInstructions?: string,
 ): string {
-  const skillPath = join(cwd, ".agents", "skills", "pi-next", "SKILL.md");
+  const config = loadPiNextConfig(cwd);
+  const skillPath = configuredPath(cwd, config.workflow.skillPath);
   const skill = existsSync(skillPath)
     ? stripFrontmatter(readFileSync(skillPath, "utf8"))
     : "# pi-next\nFollow the repository pi-next workflow.";
@@ -34,19 +55,21 @@ export function buildPiNextPrompt(
 export function buildAutoPrompt(input?: {
   candidateShortlist?: string;
   candidateSearchExhausted?: boolean;
+  config?: PiNextConfig;
 }): string {
+  const policy = promptPolicy(input?.config);
   const shortlist = input?.candidateShortlist?.trim()
     ? `\n\nController candidate shortlist (bounded P0/P1/P2/P3 buckets; verify canonical priority, readiness, dependencies, comments, and semantic fit before selection):\n${input.candidateShortlist.trim()}`
     : input?.candidateSearchExhausted
       ? "\n\nController shortlist is intentionally empty after querying all autonomous priority buckets. If no PLAN.md exists, report that no actionable issue remains instead of rediscovering excluded issues."
       : "";
 
-  return `Campsty managed pi-next auto transition. AGENTS.md and the canonical docs it references are authoritative. GitHub Issues are the autonomous backlog. Use the four pi_next_* tools and start with pi_next_inspect(action="state").
+  const prompt = `Pi-next managed auto transition. ${policy.repositoryPolicy} The configured ${policy.authorityName} authority is the autonomous work backlog. Use the four pi_next_* tools and start with pi_next_inspect(action="state").
 
 Route from live state and complete exactly one bounded workflow unit:
 - Active PLAN.md with unchecked tasks: implement only the first unchecked task, run the narrowest relevant tests/checks, commit source changes with explicit paths, mark the task done, commit PLAN.md progress, and leave a clean handoff.
 - Active PLAN.md with no unchecked tasks: act as a fresh adversarial final verifier. Re-fetch the live issue and authoritative comments/decisions before judging completion; compare them with PLAN.md and current code/tests; try to disprove each criterion and inspect non-happy/legacy paths. Never narrow, rewrite, or reinterpret a requirement merely because available evidence is weaker. A checked PLAN checkbox is not evidence. Call pi_next_check(action="verify", reviews=[...]) with concrete evidence for ordinary semantic criteria only; omit run:/grep: entries because the verifier evaluates them mechanically; external: criteria can never self-pass. For a FAIL review, set failureDisposition=repair only for a concrete defect in the selected/current slice; set failureDisposition=defer_issue only when an authoritative live GitHub issue/comment explicitly defers or separately owns that unmet remainder, and include the concrete authority reference; set failureDisposition=reconcile when authoritative requirements are contradictory or materially changed, again with the concrete authority reference. Missing disposition fails safe to REPAIR. Semantic FAIL always remains FAIL: FAIL_DISPOSITION=REPAIR may append only its concrete bounded repair; FAIL_DISPOSITION=DEFER_ISSUE must not invent a repair or archive—commit the FAIL VERIFY.md, then use pi_next_update(action="defer_plan", issueNumber=..., reason=...) to park the unresolved plan so the next auto invocation reapplies live priority; FAIL_DISPOSITION=RECONCILE means reconcile authority/PLAN before implementation rather than guessing a solution. EXTERNAL/UNPROVEN means do not archive and leave/defer the issue as appropriate.
-- No PLAN.md: select the highest-priority actionable live GitHub issue (P0→P3; never autonomous P4), preferring the controller shortlist when provided; verify comments/dependencies/readiness, then create and commit PLAN.md only. PLAN tasks are implementation or bounded repair work only—never add final verification, issue evidence/status update, archive, or handoff as a task. Locally deferred issues remain excluded only while their authoritative GitHub version has not changed; a later GitHub update makes them eligible for fresh reconciliation.
+- No PLAN.md: select the highest-priority actionable live work item (${policy.priorities.join("→")}), preferring the controller shortlist when provided; verify comments/dependencies/readiness, then create and commit PLAN.md only. PLAN tasks are implementation or bounded repair work only—never add final verification, issue evidence/status update, archive, or handoff as a task. Locally deferred items remain excluded only while their authoritative version has not changed; a later authority update makes them eligible for fresh reconciliation.
 - Quality/dirty-boundary recovery is mandatory: if a required quality gate fails after semantic PASS, first determine whether the failure is introduced by the current issue or already present on the committed baseline. A confirmed baseline failure is repository work, not a reason to report \`failed\`: preserve semantic evidence, repair it in the current bounded task when appropriate, or use an existing/created owning GitHub issue and report defer_issue with concrete authority so auto can continue. Rerun the failed gate; never waive it.
 - Before any lifecycle result, inspect pi_next_inspect(action="drift", scope="all") and classify every dirty path as current work, generated/ephemeral residue, clearly stale agent-owned residue, or ambiguous human/other-agent work. Safely remove only reproducible generated/stale agent-owned residue, commit legitimate work, and leave ambiguous changes untouched; after bounded cleanup attempts, use \`blocked\` with the concrete reason.
 - Unsafe state or a blocker requiring human/global intervention: stop and report it rather than inventing work.
@@ -62,6 +85,7 @@ Efficiency and safety:
 - Do not start a second issue or a second implementation task in this invocation.
 
 Return a concise status and the durable progress made.${shortlist}`;
+  return prompt.replaceAll("GitHub", policy.authorityName).replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy);
 }
 
 export function buildLoopPrompt(input: {
@@ -76,23 +100,24 @@ export function buildLoopPrompt(input: {
   candidateSearchExhausted?: boolean;
   planFreshness?: string;
 }): string {
+  const policy = promptPolicy(input.cwd ? loadPiNextConfig(input.cwd) : undefined);
   const selection = input.hasPlan
-    ? "Resume only the live PLAN.md issue and perform the next durable transition."
+    ? "Resume only the live PLAN.md work item and perform the next durable transition."
     : input.candidateSearchExhausted
       ? "The controller successfully queried all autonomous priority buckets and found no remaining candidates after this run's completed/deferred exclusions. Do not rediscover excluded issues; report idle."
-      : "No PLAN.md exists. Select the best actionable live issue from the controller shortlist when available, read that issue and its comments, then create and commit PLAN.md only. PLAN tasks are implementation or bounded repair work only; final verification, issue updates, archive, and handoff are lifecycle steps after tasks are complete.";
+      : `No PLAN.md exists. Select the best actionable live work item from the controller shortlist when available, read that item and its comments, then create and commit PLAN.md only. PLAN tasks are implementation or bounded repair work only; final verification, issue updates, archive, and handoff are lifecycle steps after tasks are complete. Priority order: ${policy.priorities.join("→")}.`;
   const shortlist = input.candidateShortlist?.trim()
     ? `Controller candidate shortlist (fresh for this no-plan transition; bounded P0/P1/P2/P3 buckets; verify canonical priority, readiness, dependencies, comments, and semantic fit before selection):\n${input.candidateShortlist.trim()}`
     : input.candidateSearchExhausted
       ? "Controller shortlist is intentionally empty for this run."
-      : "Controller shortlist unavailable because GitHub preselection could not be completed; query live GitHub Issues according to canonical priority policy.";
+      : `Controller shortlist unavailable because ${policy.authorityName} preselection could not be completed; query the live authority according to configured priority policy.`;
   const freshness = input.planFreshness?.trim()
     ? `Active-plan GitHub freshness gate:\n${input.planFreshness.trim()}`
     : "";
   const overlay = loopTuningOverlay(input.cwd);
 
   return [
-    "Campsty unattended Pi workflow step. AGENTS.md and the canonical docs it references are authoritative. GitHub Issues are the only autonomous backlog.",
+    `${policy.repositoryPolicy} Pi-next unattended workflow step. The configured ${policy.authorityName} authority is the only autonomous backlog.`,
     "Use the four pi_next_* tools for workflow state, checks, explicit-path commits, and loop reporting. Start with pi_next_inspect(action=\"state\").",
     WORK_LOG_INSTRUCTIONS,
     selection,
@@ -102,6 +127,7 @@ export function buildLoopPrompt(input: {
     tokenSafeStepInstructions(input),
   ]
     .filter(Boolean)
+    .map((part) => part.replaceAll("GitHub", policy.authorityName).replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy))
     .join("\n\n");
 }
 
@@ -114,10 +140,11 @@ export function buildLoopMaintenancePrompt(
     summary: string;
   },
 ): string {
-  const overlayPath = join(cwd, ".agents", "skills", "pi-next", "LOOP_TUNING.md");
+  const policy = promptPolicy(loadPiNextConfig(cwd));
+  const overlayPath = configuredPath(cwd, policy.workflow.tuningPath);
   const resultPath = join(cwd, ".pi", "runtime", "pi-next-loop-maintenance-result.json");
   const diagnosticsDir = join(cwd, ".agents", "diagnostics", "pi-next", "assessments");
-  return `Campsty pi-next issue-boundary maintenance checkpoint after archived issue #${input.issueNumber} (completed issue ${input.completedCount} in this loop).
+  const prompt = `Pi-next issue-boundary maintenance checkpoint after archived issue #${input.issueNumber} (completed issue ${input.completedCount} in this loop).
 
 This is NOT product work. The repository is at a clean no-PLAN issue boundary and the next issue will run in a separate fresh parentless session.
 
@@ -159,6 +186,7 @@ Perform an evidence-based Pi performance/tuning review:
 Use action.changed=false when no Pi behavior changed; the diagnostic commit itself is audit metadata and should still be placed in action.commit after remote verification. Keep every string concise and every array small. The controller validates/bounds this result and will later compare subsequent completed-issue telemetry against the triggering issue; that directional comparison is an audit signal, not proof of causality.
 
 Return only a concise maintenance result after the tracked diagnostic is committed, pushed, verified on the remote branch, and the runtime JSON file has been written.`;
+  return prompt.replaceAll("GitHub", policy.authorityName).replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy);
 }
 
 export function tokenSafeStepInstructions(input: {

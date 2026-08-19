@@ -1,16 +1,19 @@
-import { execFile } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
+import { loadPiNextConfig, type PiNextConfig } from "../../src/coordination/config.ts";
+import {
+  createWorkAuthority,
+  requireAuthorityCapability,
+  type AuthorityWorkItem,
+  type WorkAuthorityAdapter,
+} from "../../src/coordination/work-authority.ts";
 import { psDir } from "./util.ts";
 import type { IssueLeaseAuthority } from "./issue-leases.ts";
 import { isIssueLeaseFresh } from "./issue-authority.ts";
 import { refreshMainAtIssueBoundary } from "./main-refresh.ts";
 
-const execFileAsync = promisify(execFile);
 const PRIORITY_BUCKET_LIMITS = [3, 5, 3, 2] as const;
-const PRIORITY_QUERY_LIMIT = 100;
 const ARCHIVED_SCAN_LIMIT = 200;
 const DEFERRED_SCAN_LIMIT = 100;
 
@@ -33,22 +36,50 @@ export interface CandidateShortlistOptions {
   /** Shared authority used to refresh ownership immediately before selection. */
   leaseAuthority?: IssueLeaseAuthority;
   now?: Date;
-  /** Reports slow GitHub/refresh phases to the interactive command UI. */
+  /** Reports slow authority/refresh phases to the interactive command UI. */
   onStatus?: (message: string) => void;
+  /** Inject a project adapter; production resolves it from validated config. */
+  authority?: WorkAuthorityAdapter;
+  /** Use a validated configuration supplied by a host or test. */
+  config?: PiNextConfig;
   /** Skip refreshing the shared coordination checkout when another agent owns its dirty state. */
   refreshMain?: boolean;
 }
 
-function labelNames(issue: CandidateIssue): string[] {
+function labelNames(issue: Pick<CandidateIssue, "labels">): string[] {
   return (issue.labels || [])
     .map((label) => label.name || "")
     .filter(Boolean);
 }
 
+function stateMatches(states: string[], wanted: string): boolean {
+  const normalized = wanted.trim().toLowerCase();
+  return states.some((state) => {
+    const value = state.trim().toLowerCase();
+    return value === normalized || value.replace(/^status:/, "") === normalized.replace(/^status:/, "");
+  });
+}
+
+function candidateFromAuthority(item: AuthorityWorkItem): CandidateIssue | undefined {
+  if (!Number.isSafeInteger(item.number) || (item.number || 0) < 1) return undefined;
+  return {
+    number: item.number!,
+    title: item.title,
+    updatedAt: item.updatedAt,
+    labels: [
+      ...item.states.map((name) => ({ name })),
+      ...(item.priority ? [{ name: `priority: ${item.priority}` }] : []),
+    ],
+  };
+}
+
 /** Blocked issues require an explicit recovery/decision and are never an
  * autonomous candidate, even when they carry a higher priority label. */
-export function isBlockedCandidate(issue: Pick<CandidateIssue, "labels">): boolean {
-  return (issue.labels || []).some((label) => label.name === "status:blocked");
+export function isBlockedCandidate(
+  issue: Pick<CandidateIssue, "labels">,
+  blockedStates: readonly string[] = ["blocked"],
+): boolean {
+  return blockedStates.some((state) => stateMatches(labelNames(issue), state));
 }
 
 function archivedIssueNumbers(cwd: string): Set<number> {
@@ -120,18 +151,22 @@ export async function candidateShortlist(
   cwd: string,
   options: CandidateShortlistOptions = {},
 ): Promise<CandidateShortlist> {
+  const config = options.config ?? loadPiNextConfig(cwd);
+  const authority = options.authority ?? createWorkAuthority(cwd, config);
+  requireAuthorityCapability(authority, "discovery");
+
   // No PLAN means this is an issue boundary. Refresh the production checkout
   // before reading the shared backlog so every new worker starts from other
   // agents' already-published work. A dirty coordination checkout is allowed:
   // another agent may be using it, and the selected issue gets its own
   // worktree before the model session starts.
-  options.onStatus?.("Checking GitHub for actionable issues (P0–P3)");
+  options.onStatus?.(`Checking ${authority.name} for actionable work (${config.selection.priorities.join(", ")})`);
   if (options.refreshMain !== false) {
     await refreshMainAtIssueBoundary(cwd, options.onStatus);
   } else {
     options.onStatus?.("Skipping shared main refresh; another agent owns the coordination checkout");
   }
-  options.onStatus?.("GitHub issue selection is in progress");
+  options.onStatus?.(`${authority.name} work-item selection is in progress`);
 
   const localArchived =
     options.includeLocalArchiveExclusions === false
@@ -147,79 +182,53 @@ export async function candidateShortlist(
   const groups: string[] = [];
   const excludedOpen: number[] = [];
   const deferredOpen: number[] = [];
-  let successfulQueries = 0;
-
-  for (let priority = 0; priority <= 3; priority += 1) {
-    const wanted = PRIORITY_BUCKET_LIMITS[priority];
-    try {
-      options.onStatus?.(`Querying GitHub issues for priority P${priority}`);
-      const { stdout } = await execFileAsync(
-        "gh",
-        [
-          "issue",
-          "list",
-          "--state",
-          "open",
-          "--label",
-          `priority: P${priority}`,
-          "--limit",
-          String(PRIORITY_QUERY_LIMIT),
-          "--json",
-          "number,title,labels,updatedAt",
-        ],
-        { cwd, maxBuffer: 1024 * 1024 },
-      );
-      successfulQueries += 1;
-      const queried = JSON.parse(stdout) as CandidateIssue[];
-      for (const issue of queried) {
-        if (localArchived.has(issue.number)) excludedOpen.push(issue.number);
-        if (deferredIssueStillUnchanged(issue, localDeferred)) {
-          deferredOpen.push(issue.number);
-        }
-      }
-      options.onStatus?.(`Checking ownership leases for priority P${priority}`);
-      const liveLeases = options.leaseAuthority
-        ? await Promise.all(queried.map(async (issue) => [issue.number, await options.leaseAuthority!.read(issue.number)] as const))
-        : [];
-      const leasedElsewhere = new Set(
-        liveLeases
-          .filter(([, lease]) => lease && isIssueLeaseFresh(lease, options.now || new Date()))
-          .map(([issue]) => issue),
-      );
+  try {
+    options.onStatus?.(`Querying ${authority.name} work items`);
+    const queried = (await authority.listCandidates(config))
+      .map(candidateFromAuthority)
+      .filter((issue): issue is CandidateIssue => Boolean(issue));
+    for (const issue of queried) {
+      if (localArchived.has(issue.number)) excludedOpen.push(issue.number);
+      if (deferredIssueStillUnchanged(issue, localDeferred)) deferredOpen.push(issue.number);
+    }
+    options.onStatus?.("Checking ownership leases");
+    const liveLeases = options.leaseAuthority
+      ? await Promise.all(queried.map(async (issue) => [issue.number, await options.leaseAuthority!.read(issue.number)] as const))
+      : [];
+    const leasedElsewhere = new Set(
+      liveLeases
+        .filter(([, lease]) => lease && isIssueLeaseFresh(lease, options.now || new Date()))
+        .map(([issue]) => issue),
+    );
+    for (let priority = 0; priority < config.selection.priorities.length; priority += 1) {
+      const priorityName = config.selection.priorities[priority];
+      const wanted = PRIORITY_BUCKET_LIMITS[Math.min(priority, PRIORITY_BUCKET_LIMITS.length - 1)] ?? 2;
       const issues = queried
         .filter(
           (issue) =>
+            (issue.labels || []).some((label) => label.name === `priority: ${priorityName}` || label.name === `priority:${priorityName}` || label.name === priorityName) &&
             !excluded.has(issue.number) &&
             !deferredIssueStillUnchanged(issue, localDeferred) &&
-            !isBlockedCandidate(issue) &&
+            !isBlockedCandidate(issue, config.selection.blockedStates) &&
             !leasedElsewhere.has(issue.number),
         )
         .sort((left, right) => {
-          const leftReady = labelNames(left).includes("status:ready") ? 1 : 0;
-          const rightReady = labelNames(right).includes("status:ready") ? 1 : 0;
+          const leftReady = config.selection.readyStates.some((state) => stateMatches(labelNames(left), state)) ? 1 : 0;
+          const rightReady = config.selection.readyStates.some((state) => stateMatches(labelNames(right), state)) ? 1 : 0;
           if (leftReady !== rightReady) return rightReady - leftReady;
-          return String(right.updatedAt || "").localeCompare(
-            String(left.updatedAt || ""),
-          );
+          return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
         })
         .slice(0, wanted);
       if (!issues.length) continue;
       groups.push(
-        `P${priority}:\n${issues
-          .map((issue) => {
-            const labels = labelNames(issue)
-              .filter((label) => /^(status:|type:)/.test(label))
-              .join(", ");
-            return `- #${issue.number} ${issue.title}${labels ? ` [${labels}]` : ""}`;
-          })
-          .join("\n")}`,
+        `${priorityName}:\n${issues.map((issue) => {
+          const labels = labelNames(issue).filter((label) => /^(status:|type:)/.test(label)).join(", ");
+          return `- #${issue.number} ${issue.title}${labels ? ` [${labels}]` : ""}`;
+        }).join("\n")}`,
       );
-    } catch {
-      // Never trust a partial priority view: a failed P0 query could otherwise hide urgent work.
     }
-  }
-
-  if (successfulQueries !== PRIORITY_BUCKET_LIMITS.length) {
+  } catch {
+    // Never trust a partial authority view: a failed query could otherwise hide urgent work.
     return { exhausted: false };
   }
 

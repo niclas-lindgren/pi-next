@@ -187,13 +187,13 @@ export async function commitExplicitPaths(
   options: { issueNumber?: number; kind?: CommitKind } = {},
 ): Promise<string> {
   const normalized = [...new Set(paths.map(normalizeRepoPath))];
-  const kind = options.kind || classifyCommitPaths(normalized);
+  const kind = options.kind || classifyCommitPaths(normalized, cwd);
   const issue = options.issueNumber || issueNumber(readFileSync(planFile(cwd), "utf8")) || undefined;
   if (kind === "workflow-only") assertWorkflowCommitAllowed(cwd, issue);
   if (!normalized.length) {
     throw new Error("At least one explicit commit path is required");
   }
-  const forbidden = normalized.filter(isEphemeralPath);
+  const forbidden = normalized.filter((path) => isEphemeralPath(path, cwd));
   if (forbidden.length) {
     throw new Error(
       `Ephemeral workflow paths cannot be committed:\n${forbidden.join("\n")}`,
@@ -217,7 +217,7 @@ export async function commitExplicitPaths(
     normalized.some((path) => pathMatches(path, file)),
   );
   if (!selected.length) return "";
-  const selectedForbidden = selected.filter(isEphemeralPath);
+  const selectedForbidden = selected.filter((path) => isEphemeralPath(path, cwd));
   if (selectedForbidden.length) {
     throw new Error(
       `Selected changes contain ephemeral paths:\n${selectedForbidden.join("\n")}`,
@@ -233,7 +233,7 @@ export async function commitExplicitPaths(
     if (outside.length) {
       throw new Error(`Staging escaped the explicit path set:\n${outside.join("\n")}`);
     }
-    const stagedForbidden = staged.filter(isEphemeralPath);
+    const stagedForbidden = staged.filter((path) => isEphemeralPath(path, cwd));
     if (stagedForbidden.length) {
       throw new Error(
         `Staged changes contain ephemeral paths:\n${stagedForbidden.join("\n")}`,

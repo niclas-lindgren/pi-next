@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import { git } from "./util.ts";
+import { git, planFile, verifyFile } from "./util.ts";
 
 export interface MainRefreshResult {
   branch: string;
@@ -274,10 +274,7 @@ export async function cleanupCompletedIssueWorktree(
     );
   }
 
-  const activeArtifacts = [
-    join(actualPath, ".ps-next", "PLAN.md"),
-    join(actualPath, ".ps-next", "VERIFY.md"),
-  ].filter((path) => existsSync(path));
+  const activeArtifacts = [planFile(actualPath), verifyFile(actualPath)].filter((path) => existsSync(path));
   if (activeArtifacts.length) {
     throw new IssueWorkspaceCleanupError(
       `issue #${issueNumber} still has active workflow artifacts: ${activeArtifacts.join(", ")}`,

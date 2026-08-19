@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
+import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import {
   git,
   gitRaw,
@@ -116,18 +117,28 @@ export function pathMatches(requested: string, actual: string): boolean {
   return actual === requested || actual.startsWith(`${requested}/`);
 }
 
-export function isEphemeralPath(path: string): boolean {
+function configuredWorkflowPrefix(cwd: string): string {
+  return loadPiNextConfig(cwd).workflow.stateDir.replace(/\\/g, "/").replace(/\/$/, "");
+}
+
+export function isEphemeralPath(path: string, cwd = process.cwd()): boolean {
+  const prefix = configuredWorkflowPrefix(cwd);
   return (
     EPHEMERAL_PATHS.has(path) ||
+    path === `${prefix}/.lock` ||
+    path === `${prefix}/.continue-here.md` ||
     path.startsWith(".pi/runtime/") ||
     path.startsWith(".pi/logs/")
   );
 }
 
-export function isWorkflowMetaPath(path: string): boolean {
+export function isWorkflowMetaPath(path: string, cwd = process.cwd()): boolean {
+  const prefix = configuredWorkflowPrefix(cwd);
   return (
-    (WORKFLOW_META_FILES.has(path) || /^\.ps-next\/PLAN-[^/]+\.md$/.test(path)) ||
-    WORKFLOW_META_PREFIXES.some((prefix) => path.startsWith(prefix))
+    (WORKFLOW_META_FILES.has(path) || path === `${prefix}/PLAN.md` || path === `${prefix}/VERIFY.md` || path === `${prefix}/HISTORY.md` || (path.startsWith(`${prefix}/PLAN-`) && path.endsWith(".md"))) ||
+    WORKFLOW_META_PREFIXES.some((value) => path.startsWith(value)) ||
+    path.startsWith(`${prefix}/ARCHIVED/`) ||
+    path.startsWith(`${prefix}/deferred/`)
   );
 }
 
@@ -270,7 +281,7 @@ export async function workingFingerprint(cwd: string): Promise<string> {
   for (const entry of tracked.sort()) {
     const tab = entry.indexOf("\t");
     const path = tab >= 0 ? entry.slice(tab + 1) : "";
-    if (!path || isWorkflowMetaPath(path)) continue;
+    if (!path || isWorkflowMetaPath(path, cwd)) continue;
     hash.update(entry);
     hash.update("\0");
   }
@@ -278,7 +289,7 @@ export async function workingFingerprint(cwd: string): Promise<string> {
   const pathspec = [
     "--",
     ".",
-    ":(exclude).ps-next/**",
+    `:(exclude)${loadPiNextConfig(cwd).workflow.stateDir}/**`,
     ":(exclude).pi/runtime/**",
     ":(exclude).pi/logs/**",
   ];
@@ -294,7 +305,7 @@ export async function workingFingerprint(cwd: string): Promise<string> {
   );
 
   for (const file of (await untrackedFiles(cwd))
-    .filter((path) => !isWorkflowMetaPath(path))
+    .filter((path) => !isWorkflowMetaPath(path, cwd))
     .sort()) {
     hash.update(file);
     hash.update("\0");

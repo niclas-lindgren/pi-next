@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { existsSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { relative } from "node:path";
 
 import { currentTask, validatePlan } from "./plan.ts";
 import {
@@ -120,7 +120,7 @@ export function registerInspectTool(pi: ExtensionAPI) {
 
       const scope = params.scope || "all";
       const changed = (await changeFiles(ctx.cwd, scope)).filter(
-        (name) => name !== `.ps-next/${basename(planFile(ctx.cwd))}`,
+        (name) => name !== relative(ctx.cwd, planFile(ctx.cwd)).replace(/\\/g, "/"),
       );
       const planned = task.files.map((name) =>
         name.replace(/^\.\//, "").replace(/\/$/, ""),

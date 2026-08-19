@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { runtimeDir, writeJsonAtomic } from "./util-core.ts";
 
 export const WORKFLOW_ONLY_COMMIT_LIMIT = 2;
@@ -76,13 +77,14 @@ function issueState(state: CommitTelemetry, issue: number): IssueCommitTelemetry
   return current;
 }
 
-export function classifyCommitPaths(paths: string[]): CommitKind {
+export function classifyCommitPaths(paths: string[], cwd = process.cwd()): CommitKind {
+  const stateDir = loadPiNextConfig(cwd).workflow.stateDir.replace(/\\/g, "/").replace(/\/$/, "");
   const workflowOnly = paths.length > 0 && paths.every((path) =>
-    (path === ".ps-next/PLAN.md" || /^\.ps-next\/PLAN-[^/]+\.md$/.test(path)) ||
-    path === ".ps-next/VERIFY.md" ||
-    path === ".ps-next/HISTORY.md" ||
-    path.startsWith(".ps-next/ARCHIVED/") ||
-    path.startsWith(".ps-next/deferred/") ||
+    (path === `${stateDir}/PLAN.md` || (path.startsWith(`${stateDir}/PLAN-`) && path.endsWith(".md"))) ||
+    path === `${stateDir}/VERIFY.md` ||
+    path === `${stateDir}/HISTORY.md` ||
+    path.startsWith(`${stateDir}/ARCHIVED/`) ||
+    path.startsWith(`${stateDir}/deferred/`) ||
     path.startsWith(".agents/diagnostics/pi-next/"),
   );
   return workflowOnly ? "workflow-only" : "substantive";

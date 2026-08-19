@@ -1,11 +1,9 @@
 /**
  * Harness-neutral issue lease compare-and-swap primitives.
  *
- * Extracted from `.pi/extensions/pi-next/issue-authority.ts` (#588) so any
- * agent harness (pi-next, Claude/PS-next, future harnesses) can derive
- * canonical branch/worktree identity and validate lease freshness/shape
- * without depending on the pi-next extension host. Behavior is preserved
- * exactly; do not change derivation, validation, or serialization rules
+ * Shared by compatible agent harnesses to derive canonical branch/worktree
+ * identity and validate lease freshness/shape without depending on a specific
+ * extension host. Do not change derivation, validation, or serialization rules
  * here without updating every harness that depends on them.
  */
 

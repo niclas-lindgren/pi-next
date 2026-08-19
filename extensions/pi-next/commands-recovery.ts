@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import {
   GitHubIssueLeaseAuthority,
@@ -239,7 +239,7 @@ export async function prepareAbandonedAutoResume(
   let dirty: string[];
   try {
     dirty = (await changeFiles(executionCwd, "all")).filter(
-      (path) => path !== ".ps-next/.continue-here.md",
+      (path) => path !== relative(executionCwd, markerFile(executionCwd)).replace(/\\/g, "/"),
     );
   } catch (error) {
     return {
