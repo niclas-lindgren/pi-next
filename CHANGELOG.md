@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.2 - 2026-08-19
+
+Fresh-host migration gate completion release.
+
+- Integrated bounded adversarial review into high-risk semantic verification;
+  configured candidates are reviewed by independent read-only Pi workers before
+  final verification and concrete findings block until a new candidate exists.
+- Wired typed worker/controller/crash failures through a bounded runtime
+  reporter and local sanitized JSONL sink with recurrence escalation and
+  deduplication.
+- Added actual fresh Pi RPC-host consumer coverage for command registration,
+  doctor/status, package-origin activation, exact revision reporting, and the
+  disposable memory-adapter lease/worktree transition.
+
 ## 0.1.1 - 2026-08-19
 
 Migration-ready pinned package release.
