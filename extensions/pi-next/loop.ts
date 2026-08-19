@@ -1,0 +1,683 @@
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
+import { existsSync, unlinkSync } from "node:fs";
+
+import { trackCrashLoggerCwd } from "./crash-log.ts";
+import { commitExplicitPaths } from "./commit-safety.ts";
+import { cleanupCompletedIssueWorktree } from "./main-refresh.ts";
+import { runLoopSteps } from "./loop-controller.ts";
+import { candidateShortlist } from "./issue-candidates.ts";
+import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
+import {
+  claimIssueLease,
+  ensureIssueWorktree,
+  GitHubIssueLeaseAuthority,
+  ISSUE_LEASE_DURATION_MS,
+  releaseIssueLease,
+  reconcileIssueLeaseForResume,
+  startIssueLeaseHeartbeat,
+} from "../../../.agents/coordination/issue-leases.ts";
+import {
+  emptyLoopMetrics,
+  loopNow,
+  listLoopStates,
+  loopResultFile,
+  loopStateFile,
+  MAX_STEPS,
+  notifyLoopState,
+  parseLoopLimit,
+  readLoopState,
+  safeLoopBoundary,
+  type LoopState,
+} from "./loop-state.ts";
+import {
+  PlanAuthorityError,
+  resolvePlanIdentity,
+  safeNotify,
+  writeJsonAtomic,
+} from "./util.ts";
+import {
+  quarantineInheritedWorkflowArtifacts,
+  relativeWorkflowPaths,
+} from "./plan-write.ts";
+import { workflowArtifacts } from "./plan-read.ts";
+import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
+import type { WorkerWorkLogEvent } from "./worker-activity.ts";
+import { appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
+import { attachWorkerDisplay } from "./worker-display.ts";
+import { getLiveCtx } from "./live-ctx.ts";
+import {
+  createSupervisorRuntime,
+  type SupervisorRuntime,
+} from "./supervisor-runtime.ts";
+import { ForegroundSupervisor } from "./foreground-supervisor.ts";
+
+export { MAX_ISSUES, readLoopState, writeLoopResult } from "./loop-state.ts";
+export { ForegroundSupervisor } from "./foreground-supervisor.ts";
+export type { LoopOutcome, LoopResult, LoopState } from "./loop-state.ts";
+
+/**
+ * Delivers through the shared lifecycle-aware host boundary (#583) instead
+ * of duplicating the try/catch-rejection contract locally. Not gated on the
+ * supervisor runtime: these notifications (claim/worktree failures,
+ * lease-renewal errors) can fire outside a worker lifetime, so checking an
+ * unrelated run's disposal state would be incorrect here.
+ */
+function notifySafely(
+  ctx: ExtensionCommandContext,
+  message: string,
+  level: "info" | "warning" | "error" = "info",
+): void {
+  safeNotify(ctx, message, level);
+}
+
+/**
+ * For callbacks that can fire well after the ctx they closed over was
+ * created — worker progress/activity timers, lease-heartbeat notifications
+ * — a captured `ctx` is not safe to use directly (#616): `driveLoop`
+ * replaces the live ctx via `ctx.newSession()` on essentially every step,
+ * and the old one throws "stale" the next time `ctx.ui` is touched. These
+ * callbacks resolve the actually-live ctx through the single registry in
+ * `live-ctx.ts` instead, so they always target whichever session the host
+ * has replaced it with. A missing live ctx (no command has attached one
+ * yet, or the run has no UI) is a silent no-op, matching `safeNotify`'s
+ * existing "diagnostic only" contract.
+ */
+function notifyLive(
+  message: string,
+  level: "info" | "warning" | "error" = "info",
+): void {
+  const ctx = getLiveCtx();
+  if (!ctx) return;
+  safeNotify(ctx, message, level);
+}
+
+function workerActivityText(event: WorkerWorkLogEvent): string {
+  const issue = event.issueNumber ? `#${event.issueNumber}` : "#?";
+  const run = event.runId ? ` · ${event.runId.slice(0, 12)}` : "";
+  const paths = event.relatedPaths?.length ? ` · ${event.relatedPaths.join(", ")}` : "";
+  return `pi-next ${issue}${run} · ${event.phase} · ${event.kind} · ${event.summary}${paths}`;
+}
+
+export async function claimLoopIssue(
+  cwd: string,
+  state: LoopState,
+  authorityOverride?: import("../../../.agents/coordination/issue-leases.ts").IssueLeaseAuthority,
+): Promise<LoopState> {
+  if (state.activeIssueNumber && state.activeWorkspace && state.activeLease) {
+    if (state.activeLease.agent !== "pi-next") {
+      throw new PlanAuthorityError(
+        "unowned",
+        "Persisted loop state is not owned by pi-next; refusing resume",
+      );
+    }
+    const authority =
+      authorityOverride ?? new GitHubIssueLeaseAuthority(cwd);
+    // Reconcile live ownership before ensureIssueWorktree(): recovery may
+    // create/repair the canonical worktree and must never happen for a fresh
+    // foreign owner or a missing lease.
+    const lease = await reconcileIssueLeaseForResume(
+      authority,
+      state.activeLease as import("../../../.agents/coordination/issue-authority.ts").IssueLease,
+      new Date(),
+    );
+    const workspace = await ensureIssueWorktree(
+      cwd,
+      state.activeIssueNumber,
+      recordLifecycleEvent,
+    );
+    if (workspace !== state.activeWorkspace) {
+      throw new Error(
+        `Persisted issue workspace mismatch: expected ${workspace}, found ${state.activeWorkspace}`,
+      );
+    }
+    await quarantineInheritedArtifacts(cwd, workspace, state.activeIssueNumber);
+    const plan = resolvePlanIdentity(workspace);
+    if (plan.kind === "unresolved" || plan.kind === "ambiguous") {
+      throw new PlanAuthorityError(plan.kind, plan.reason, plan.paths);
+    }
+    if (plan.kind === "resolved" && plan.issueNumber !== state.activeIssueNumber) {
+      throw new PlanAuthorityError(
+        "unowned",
+        `Active workspace PLAN resolves to issue #${plan.issueNumber}, not #${state.activeIssueNumber}`,
+        [plan.path],
+      );
+    }
+    if (plan.kind === "resolved" && plan.provenance !== "canonical") {
+      throw new PlanAuthorityError(
+        "unowned",
+        "Legacy issue-scoped PLAN artifacts require explicit authority reconciliation before resume",
+        [plan.path],
+      );
+    }
+    const next = {
+      ...state,
+      activeWorkspace: workspace,
+      activeLease: lease,
+      coordinationCwd: cwd,
+      updatedAt: loopNow(),
+    };
+    writeJsonAtomic(loopStateFile(cwd, state.runId), next);
+    return next;
+  }
+
+  // Production always uses the shared GitHub-backed authority; tests may
+  // inject an in-memory authority to exercise this exact handoff sequence
+  // without a live GitHub dependency.
+  const authority = authorityOverride ?? new GitHubIssueLeaseAuthority(cwd);
+  let issueNumber = state.activeIssueNumber;
+  if (!issueNumber) {
+    const plan = resolvePlanIdentity(cwd);
+    if (plan.kind === "unresolved" || plan.kind === "ambiguous") {
+      throw new PlanAuthorityError(plan.kind, plan.reason, plan.paths);
+    }
+    if (plan.kind === "resolved") {
+      if (plan.provenance !== "canonical") {
+        throw new PlanAuthorityError(
+          "unowned",
+          "Legacy issue-scoped PLAN artifacts require explicit authority reconciliation before resume",
+          [plan.path],
+        );
+      }
+      issueNumber = plan.issueNumber;
+    } else {
+      const shortlist = await candidateShortlist(cwd, {
+        completedIssues: state.completedIssues,
+        deferredIssues: state.deferredIssues.map((item) => item.issueNumber),
+        leaseAuthority: authority,
+      });
+      issueNumber = Number.parseInt(
+        shortlist.text?.match(/#(\d+)/)?.[1] || "",
+        10,
+      );
+    }
+  }
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
+    throw new PlanAuthorityError(
+      "unowned",
+      "No issue identity was resolved before loop execution",
+    );
+  }
+
+  const now = new Date();
+  const lease = await claimIssueLease(
+    authority,
+    {
+      issueNumber,
+      agent: "pi-next",
+      runId: state.runId,
+      sessionId: `${state.runId}-loop`,
+      acquiredAt: now.toISOString(),
+      expiresAt: new Date(
+        now.getTime() + ISSUE_LEASE_DURATION_MS,
+      ).toISOString(),
+    },
+    now,
+    { cwd, recordEvent: recordLifecycleEvent },
+  );
+  let workspace: string;
+  try {
+    workspace = await ensureIssueWorktree(cwd, issueNumber, recordLifecycleEvent);
+    await quarantineInheritedArtifacts(cwd, workspace, issueNumber);
+  } catch (error) {
+    try {
+      await releaseIssueLease(authority, lease, {
+        cwd,
+        recordEvent: recordLifecycleEvent,
+      });
+    } catch (releaseError) {
+      throw new Error(
+        `Issue #${issueNumber} worktree handoff failed: ${error instanceof Error ? error.message : String(error)}; ` +
+          `lease release also failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+      );
+    }
+    throw new Error(
+      `Issue #${issueNumber} worktree handoff failed: ${error instanceof Error ? error.message : String(error)}; lease released`,
+    );
+  }
+  const next: LoopState = {
+    ...state,
+    coordinationCwd: cwd,
+    activeIssueNumber: issueNumber,
+    activeWorkspace: workspace,
+    activeLease: lease,
+    updatedAt: loopNow(),
+  };
+  writeJsonAtomic(loopStateFile(cwd, state.runId), next);
+  return next;
+}
+
+export async function removeCompletedCoordinationArtifacts(
+  coordinationCwd: string,
+  issueNumber: number,
+): Promise<void> {
+  const artifacts = workflowArtifacts(coordinationCwd).filter(
+    (artifact) => artifact.issueNumber === issueNumber,
+  );
+  if (!artifacts.length) return;
+  for (const artifact of artifacts) unlinkSync(artifact.path);
+  await commitExplicitPaths(
+    coordinationCwd,
+    artifacts.map((artifact) => artifact.path.replace(`${coordinationCwd}/`, "")),
+    `chore(agent): remove issue #${issueNumber} artifacts from coordination main`,
+    { issueNumber, kind: "lifecycle" },
+  );
+}
+
+export async function removeCompletedWorkflowArtifacts(
+  workspaceCwd: string,
+  issueNumber: number,
+): Promise<void> {
+  const artifacts = workflowArtifacts(workspaceCwd);
+  const plan = artifacts.find((artifact) => artifact.kind === "plan");
+  if (plan) {
+    throw new PlanAuthorityError(
+      "unowned",
+      `Cannot clean completed issue #${issueNumber} while PLAN remains active`,
+      [plan.path],
+    );
+  }
+  const verify = artifacts.find((artifact) => artifact.kind === "verify");
+  if (!verify) return;
+  if (verify.issueNumber !== issueNumber) {
+    throw new PlanAuthorityError(
+      "unowned",
+      `Cannot clean issue #${issueNumber}: VERIFY.md belongs to #${verify.issueNumber || "unknown"}`,
+      [verify.path],
+    );
+  }
+  unlinkSync(verify.path);
+  await commitExplicitPaths(
+    workspaceCwd,
+    [".ps-next/VERIFY.md"],
+    `chore(agent): remove completed issue #${issueNumber} verification artifact`,
+    { issueNumber, kind: "lifecycle" },
+  );
+}
+
+export async function quarantineInheritedArtifacts(
+  coordinationCwd: string,
+  workspaceCwd: string,
+  issueNumber: number,
+): Promise<void> {
+  const artifacts = quarantineInheritedWorkflowArtifacts(
+    coordinationCwd,
+    workspaceCwd,
+    issueNumber,
+  );
+  if (!artifacts.length) return;
+  await commitExplicitPaths(
+    workspaceCwd,
+    relativeWorkflowPaths(workspaceCwd, artifacts),
+    `chore(agent): quarantine inherited workflow artifacts for issue #${issueNumber}`,
+    { issueNumber, kind: "lifecycle" },
+  );
+}
+
+export async function runOwnedIssueCycle(
+  ctx: ExtensionCommandContext,
+  initial: LoopState,
+  runtime: SupervisorRuntime = createSupervisorRuntime(),
+  onWorkLog?: WorkerWorkLogSink,
+  onWorkerState?: (runtime: import("./util-core.ts").IssueWorkerRuntime) => void,
+): Promise<LoopState> {
+  const coordinationCwd = initial.coordinationCwd || ctx.cwd;
+  const display = attachWorkerDisplay(ctx);
+  let state = initial;
+  {
+      const prepared = await claimLoopIssue(coordinationCwd, state);
+      const heartbeat = prepared.activeLease
+        ? startIssueLeaseHeartbeat(
+            new GitHubIssueLeaseAuthority(coordinationCwd),
+            prepared.activeLease as import("../../../.agents/coordination/issue-authority.ts").IssueLease,
+            {
+              onRenew: (lease) => {
+                const latest =
+                  readLoopState(coordinationCwd, prepared.runId) || prepared;
+                writeJsonAtomic(
+                  loopStateFile(coordinationCwd, prepared.runId),
+                  {
+                    ...latest,
+                    activeLease: lease,
+                    updatedAt: loopNow(),
+                  },
+                );
+              },
+              onError: (error) =>
+                notifyLive(
+                  `Issue #${prepared.activeIssueNumber} lease renewal stopped: ${error instanceof Error ? error.message : String(error)}`,
+                  "warning",
+                ),
+            },
+          )
+        : undefined;
+      try {
+        const targetCwd = prepared.activeWorkspace || coordinationCwd;
+        if (prepared.activeWorkspace) {
+          trackCrashLoggerCwd(prepared.activeWorkspace);
+        }
+        // Preserve child-process cwd isolation, but make every auto/resume/
+        // maintenance model turn visibly alive in the interactive host.
+        // `coordinationCwd` is threaded explicitly (#603) so the isolated
+        // child's registered loop_result tool can resolve/validate the real
+        // run authority via PI_NEXT_COORDINATION_CWD instead of depending on
+        // a worktree-relative `.pi/runtime` path or symlink.
+        const visibleWorker: IssueWorkerRunner = (
+          workerCwd,
+          prompt,
+          options = {},
+        ) =>
+          runIssueWorker(workerCwd, prompt, {
+            ...options,
+            coordinationCwd: options.coordinationCwd ?? coordinationCwd,
+            onActivity:
+              options.onActivity ??
+              ((event) => {
+                if (runtime.currentGeneration()?.isDisposed()) return;
+                display?.event(event);
+                if (onWorkLog) onWorkLog(event);
+                else notifyLive(workerActivityText(event), "info");
+              }),
+            onWorkerState: options.onWorkerState ?? onWorkerState,
+            display: options.display ?? display,
+            onProgress:
+              options.onProgress ??
+              ((elapsedMs) =>
+                notifyLive(
+                  `pi-next #${prepared.activeIssueNumber ?? "?"} worker still running (${Math.round(elapsedMs / 1_000)}s)`,
+                  "info",
+                )),
+            progressIntervalMs: options.progressIntervalMs ?? 10_000,
+          });
+        await runLoopSteps(
+          { ...ctx, cwd: targetCwd } as ExtensionCommandContext,
+          prepared,
+          visibleWorker,
+          runtime,
+          { onWorkerState, display },
+        );
+      } catch (error) {
+        // runLoopSteps() acquires the controller lock as its first
+        // synchronous action and truthfully interrupts/fails LoopState for
+        // any error it observes afterward (see interruptLoop() in
+        // loop-controller.ts). A failure before that point — e.g.
+        // acquireControllerLock() itself throwing, or setup above it —
+        // would otherwise never reach that handling and could leave the
+        // just-claimed run stuck at status="running" forever (#603). Detect
+        // exactly that gap (state still "running" after the throw) and
+        // unwind it truthfully without touching the canonical worktree or
+        // its issue-local runtime data; leave any state runLoopSteps already
+        // made truthful untouched.
+        const latest = readLoopState(coordinationCwd, prepared.runId);
+        if (latest && latest.status === "running") {
+          writeJsonAtomic(loopStateFile(coordinationCwd, prepared.runId), {
+            ...latest,
+            status: "interrupted",
+            updatedAt: loopNow(),
+            lastReason:
+              `pi-next controller failed to start for issue ` +
+              `#${prepared.activeIssueNumber ?? "?"}: ` +
+              `${error instanceof Error ? error.message : String(error)}. ` +
+              `Durable claim/worktree state was preserved; use ` +
+              `/pi-next-loop resume once the underlying failure is resolved.`,
+          });
+        }
+        throw error;
+      } finally {
+        await heartbeat?.stop();
+        if (heartbeat && prepared.activeIssueNumber) {
+          try {
+            await releaseIssueLease(
+              new GitHubIssueLeaseAuthority(coordinationCwd),
+              heartbeat.getLease(),
+              { cwd: coordinationCwd, recordEvent: recordLifecycleEvent },
+            );
+          } catch (error) {
+            notifyLive(
+              `Issue #${prepared.activeIssueNumber} lease release failed: ${error instanceof Error ? error.message : String(error)}`,
+              "warning",
+            );
+          }
+        }
+        trackCrashLoggerCwd(coordinationCwd);
+      }
+
+      state = readLoopState(coordinationCwd, prepared.runId) || prepared;
+      if (
+        state.lastOutcome === "archived" &&
+        prepared.activeIssueNumber &&
+        prepared.activeWorkspace
+      ) {
+        try {
+          await removeCompletedWorkflowArtifacts(
+            prepared.activeWorkspace,
+            prepared.activeIssueNumber,
+          );
+          await removeCompletedCoordinationArtifacts(
+            coordinationCwd,
+            prepared.activeIssueNumber,
+          );
+          await cleanupCompletedIssueWorktree(
+            coordinationCwd,
+            prepared.activeWorkspace,
+            prepared.activeIssueNumber,
+          );
+        } catch (error) {
+          const blocked: LoopState = {
+            ...state,
+            status: "blocked",
+            updatedAt: loopNow(),
+            lastReason:
+              error instanceof Error
+                ? error.message
+                : String(error),
+          };
+          writeJsonAtomic(loopStateFile(coordinationCwd, prepared.runId), blocked);
+          // Fires after runLoopSteps() has returned, i.e. after any internal
+          // ctx.newSession() transitions already invalidated the outer `ctx`
+          // this function was called with (#616) — resolve live ctx instead.
+          notifyLive(blocked.lastReason || "Issue workspace cleanup failed", "warning");
+          return blocked;
+        }
+      }
+      if (state.status !== "running" || state.remainingIssues <= 0) return state;
+      // The issue boundary is now clean and coordination-only. Do not let the
+      // next candidate inherit the completed issue's lease or workspace.
+      state = {
+        ...state,
+        activeIssueNumber: undefined,
+        activeWorkspace: undefined,
+        activeLease: undefined,
+        updatedAt: loopNow(),
+      };
+      writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), state);
+      return state;
+  }
+}
+
+/**
+ * Compatibility wrapper for callers that still need to run the complete
+ * issue-selection loop. ForegroundSupervisor owns this progression in auto;
+ * this wrapper remains for direct loop-controller tests and integrations.
+ */
+export async function runOwnedLoopSteps(
+  ctx: ExtensionCommandContext,
+  initial: LoopState,
+  runtime: SupervisorRuntime = createSupervisorRuntime(),
+): Promise<void> {
+  let state = initial;
+  while (true) {
+    state = await runOwnedIssueCycle(ctx, state, runtime);
+    if (state.status !== "running" || state.remainingIssues <= 0) return;
+  }
+}
+
+/**
+ * The loop controller keeps coordination state in the parent process/session
+ * (durable loop-state, lease, and worktree bookkeeping); each bounded auto
+ * step still runs in an isolated issue worker — a dedicated child process
+ * spawned by `runIssueWorker` (util-core.ts) — never inline in the parent.
+ * `/pi-next auto`/`resume` drive this through `ForegroundSupervisor.launch`
+ * (#612), which owns that isolated-worker cycle end to end.
+ */
+export async function runPiNextLoop(
+  args: string,
+  ctx: ExtensionCommandContext,
+  onWorkLog?: WorkerWorkLogSink,
+  onWorkerState?: (runtime: import("./util-core.ts").IssueWorkerRuntime) => void,
+): Promise<void> {
+  const [command, requestedRunId] = args.trim().split(/\s+/, 2);
+  const input = (command || "").toLowerCase();
+  const runs = listLoopStates(ctx.cwd);
+  const selectRun = (
+    predicate: (state: LoopState) => boolean,
+  ): LoopState | null => {
+    const matches = runs.filter(predicate);
+    if (requestedRunId) return readLoopState(ctx.cwd, requestedRunId);
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      notifySafely(
+        ctx,
+        `Multiple pi-next runs are eligible; specify a run ID: ${matches.map((run) => run.runId).join(", ")}`,
+        "warning",
+      );
+    }
+    return null;
+  };
+  if (input === "status") {
+    if (requestedRunId)
+      notifyLoopState(ctx, readLoopState(ctx.cwd, requestedRunId));
+    else if (runs.length)
+      notifySafely(
+        ctx,
+        runs
+          .map(
+            (run) =>
+              `${run.runId}: ${run.status}, issue progress ${run.completedIssues.length}/${run.requestedIssues}`,
+          )
+          .join("\n"),
+        "info",
+      );
+    else notifySafely(ctx, "No pi-next loop runs found.", "info");
+    return;
+  }
+  if (input === "stop") {
+    const current = selectRun((state) => state.status === "running");
+    if (!current || current.status !== "running") {
+      notifySafely(
+        ctx,
+        "No uniquely selected running pi-next loop; specify its run ID when multiple runs exist.",
+        "info",
+      );
+      return;
+    }
+    const next: LoopState = {
+      ...current,
+      stopRequested: true,
+      updatedAt: loopNow(),
+      lastReason: "Stop requested by user",
+    };
+    writeJsonAtomic(loopStateFile(ctx.cwd, current.runId), next);
+    notifySafely(
+      ctx,
+      "Pi loop will stop at the next clean step boundary.",
+      "info",
+    );
+    return;
+  }
+
+  await ctx.waitForIdle();
+  if (input === "resume") {
+    const current = requestedRunId
+      ? readLoopState(ctx.cwd, requestedRunId)
+      : selectRun((state) => ["interrupted", "stopped"].includes(state.status));
+    if (
+      !current ||
+      current.remainingIssues <= 0 ||
+      !["interrupted", "stopped"].includes(current.status)
+    ) {
+      notifySafely(
+        ctx,
+        "No interrupted or stopped pi-next loop is available.",
+        "warning",
+      );
+      return;
+    }
+
+    const pendingResult = existsSync(loopResultFile(ctx.cwd, current.runId));
+    let settledStep = current.settledStep;
+    if (!pendingResult && current.step > current.settledStep) {
+      const boundary = await safeLoopBoundary(ctx.cwd, false);
+      if (!boundary.safe) {
+        notifySafely(
+          ctx,
+          `Cannot resume unattended loop from unsafe state: ${boundary.reason}`,
+          "warning",
+        );
+        return;
+      }
+      settledStep = current.step;
+    }
+
+    const resumed: LoopState = {
+      ...current,
+      settledStep,
+      status: "running",
+      stopRequested: false,
+      updatedAt: loopNow(),
+      lastReason: "Resumed by user from a clean boundary",
+    };
+    writeJsonAtomic(loopStateFile(ctx.cwd, resumed.runId), resumed);
+    await new ForegroundSupervisor(ctx, onWorkLog, onWorkerState).launch(resumed);
+    return;
+  }
+
+  const requestedIssues = parseLoopLimit(input);
+  const createdAt = loopNow();
+  const state: LoopState = {
+    version: 1,
+    runId: `${createdAt.replace(/[:.]/g, "-")}-${process.pid}`,
+    requestedIssues,
+    remainingIssues: requestedIssues,
+    step: 0,
+    settledStep: 0,
+    maxSteps: Math.min(MAX_STEPS, Math.max(10, requestedIssues * 20)),
+    completedIssues: [],
+    deferredIssues: [],
+    issueMetrics: [],
+    status: "running",
+    stopRequested: false,
+    createdAt,
+    updatedAt: createdAt,
+    metrics: emptyLoopMetrics(),
+    coordinationCwd: ctx.cwd,
+  };
+  writeJsonAtomic(loopStateFile(ctx.cwd, state.runId), state);
+  await new ForegroundSupervisor(ctx, onWorkLog, onWorkerState).launch(state);
+}
+
+export function registerPiNextLoopCommand(
+  pi: ExtensionAPI,
+  onWorkLog: WorkerWorkLogSink = (event) => appendWorkerWorkLog(pi, event),
+): void {
+  pi.registerCommand("pi-next-loop", {
+    description:
+      "Run token-bounded GitHub issue work with iterative fresh-session batches, issue deferral, reload recovery, and bounded same-issue reuse",
+    handler: async (args, ctx) => {
+      try {
+        await runPiNextLoop(args, ctx, onWorkLog);
+      } catch (error) {
+        // Loop startup runs in the extension host. Keep failures such as
+        // stale controller locks, malformed persisted state, or worktree
+        // setup errors from becoming unhandled rejections that unload pi.
+        notifySafely(
+          ctx,
+          `pi-next loop failed: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      }
+    },
+  });
+}
