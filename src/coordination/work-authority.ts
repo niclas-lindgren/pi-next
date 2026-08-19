@@ -49,6 +49,8 @@ export interface WorkAuthorityAdapter {
   listCandidates(config: PiNextConfig): Promise<AuthorityWorkItem[]>;
   get(id: string): Promise<AuthorityWorkItem>;
   fingerprint(item: AuthorityWorkItem): string;
+  /** Terminal completion: mark a work item done and record the closing comment. Requires `capabilities.completion`. */
+  close(id: string, comment: string): Promise<void>;
 }
 
 export class AuthorityCapabilityError extends Error {
@@ -180,6 +182,11 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
   fingerprint(item: AuthorityWorkItem): string {
     return authorityFingerprint(item);
   }
+
+  async close(id: string, comment: string): Promise<void> {
+    await this.gh(["issue", "close", id, "--comment", comment]);
+    this.cache.delete(id);
+  }
 }
 
 /** A minimal non-GitHub adapter for consumer and core lifecycle tests. */
@@ -211,6 +218,17 @@ export class InMemoryWorkAuthority implements WorkAuthorityAdapter {
 
   fingerprint(item: AuthorityWorkItem): string {
     return authorityFingerprint(item);
+  }
+
+  async close(id: string, comment: string): Promise<void> {
+    const item = this.items.get(id);
+    if (!item) throw new Error(`Unknown work item: ${id}`);
+    const now = new Date().toISOString();
+    item.state = "closed";
+    item.comments = [
+      ...item.comments,
+      { id: `close-${id}-${item.comments.length}`, author: "system", body: comment, createdAt: now, updatedAt: now },
+    ];
   }
 
   upsert(item: AuthorityWorkItem): void {

@@ -28,6 +28,20 @@ verification sequencing, guarded completion, and bounded telemetry. A lease
 is the ownership authority. A plan is a durable execution/recovery artifact
 that must be reconciled with a fresh live authority lease before execution.
 
+Guarded completion (`src/coordination/finalize.ts`, exposed by the
+`finalize` command in `src/coordination/cli.ts`) integrates one verified
+`agent/issue-N` candidate commit into `main` and closes the work item only
+if the lease is still freshly owned, the candidate is still the branch tip,
+the merge/push lands without a force-push, the pushed candidate is provably
+reachable from `origin/main`, and the live work item is unchanged since
+verification. The close/comment step goes through the injected
+`WorkAuthorityAdapter` (`capabilities.completion`), so this stays
+authority-adapter-agnostic; git integration has no GitHub dependency.
+Integration can land durably even when closure is withheld
+(`requiresReverification`, `authorityChanged`, `leaseLostAfterMerge`) --
+main is never held hostage by a stale verification snapshot, but a stale
+worker can never silently mark stale-authority work "Done".
+
 ### Workers
 
 Planning, implementation, and repair workers are mutable only inside the

@@ -27,6 +27,7 @@
     "./coordination": "./src/coordination/index.ts",
     "./config": "./src/coordination/config.ts",
     "./authority": "./src/coordination/work-authority.ts",
+    "./cli": "./src/coordination/cli.ts",
     "./version": "./src/version.ts"
   },
   "pi": {
@@ -36,7 +37,8 @@
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "coordination-cli": "tsx src/coordination/bin.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
