@@ -5,6 +5,17 @@ minor releases may change public behavior and breaking changes are called out.
 
 ## Unreleased
 
+- Ported the guarded terminal-completion primitive (`finalize`) and the
+  `status`/`claim`/`renew`/`release`/`workspace`/`prepare`/`finalize` JSON
+  coordination CLI from a consumer's local copy (#19). `finalize`'s
+  close/comment step goes through the `WorkAuthorityAdapter` boundary
+  instead of being hardcoded to GitHub.
+- Fixed a terminal-safety defect where a `finalize` retry with nothing new
+  to integrate could close on a live main tree that was never actually
+  reverified (#20). Retrying after a `requiresReverification: true` result
+  now requires the caller to pass back that result's `mergeSha` as
+  `verifiedIntegratedMain`; a mismatch (another commit landed since)
+  returns `requiresReverification: true` again instead of closing.
 - Added public quick-start, command, architecture, recovery, and security
   documentation.
 - Added `/pi-next-doctor` for package/configuration/workflow diagnostics.

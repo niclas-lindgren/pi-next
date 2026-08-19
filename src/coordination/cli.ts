@@ -102,6 +102,7 @@ interface ParsedFlags {
   durationMs?: number;
   candidate?: string;
   issueUpdatedAt?: string;
+  verifiedIntegratedMain?: string;
   closeComment?: string;
 }
 
@@ -155,6 +156,9 @@ function parseFlags(args: string[]): ParsedFlags {
         break;
       case "--issue-updated-at":
         flags.issueUpdatedAt = next();
+        break;
+      case "--verified-integrated-main":
+        flags.verifiedIntegratedMain = next();
         break;
       case "--close-comment":
         flags.closeComment = next();
@@ -381,6 +385,7 @@ async function runFinalize(flags: ParsedFlags): Promise<CoordinationCliSuccess> 
       sessionId: session,
       candidateSha: flags.candidate,
       issueUpdatedAt: flags.issueUpdatedAt,
+      verifiedIntegratedMain: flags.verifiedIntegratedMain,
       closeComment: flags.closeComment,
     });
     return { ...result, command: "finalize" };

@@ -80,6 +80,19 @@ export interface FinalizeInput {
   candidateSha: string;
   /** The live work item's `updatedAt` at the moment verification was performed. */
   issueUpdatedAt: string;
+  /**
+   * Required to close a retry after a prior `requiresReverification: true`
+   * result (#20): the exact integrated `main` SHA that result reported as
+   * `mergeSha`, which the caller re-ran verification against. When this
+   * call finds nothing new to integrate (the candidate is already
+   * reachable from `origin/main`), candidate reachability alone never
+   * proves the *current* `origin/main` tree is the one that was
+   * reverified -- another commit may have landed since. If omitted, or if
+   * it no longer matches the live integrated main this call observes,
+   * closure is refused and `requiresReverification: true` is returned
+   * again with the new state to verify.
+   */
+  verifiedIntegratedMain?: string;
   closeComment?: string;
 }
 
@@ -321,7 +334,17 @@ export async function finalizeIssue(
       );
     }
 
-    requiresReverification = verifiedBase !== undefined && integrationBase !== verifiedBase;
+    // #20: when there was nothing new to integrate this call (the candidate
+    // was already reachable from origin/main before we started), candidate
+    // reachability alone never proves the *current* integrated main tree is
+    // the one the caller actually reverified -- another commit may have
+    // landed since. Require an exact match against the caller's proof
+    // (the `mergeSha` from the `requiresReverification: true` result they
+    // verified) rather than treating "nothing to merge" as "nothing to
+    // reverify".
+    requiresReverification = candidateAlreadyOnMain
+      ? input.verifiedIntegratedMain !== mergeSha
+      : verifiedBase !== undefined && integrationBase !== verifiedBase;
   } finally {
     release();
   }

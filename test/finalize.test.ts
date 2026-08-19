@@ -350,10 +350,11 @@ describe("finalizeIssue", () => {
       execFileSync("git", ["-C", origin, "merge-base", "--is-ancestor", candidateSha, "main"]),
     );
 
-    // A same-candidate retry (standing in for the caller having re-run the
-    // repository's required verification against the now-integrated tree)
-    // finds nothing new to integrate and closes normally.
-    const retry = await finalizeIssue(leaseAuthority, workAuthority, {
+    // #20: a same-candidate retry with no proof of which integrated main
+    // tree was actually reverified finds nothing new to merge, but must NOT
+    // treat that as "nothing to reverify" -- candidate reachability alone
+    // is not proof the live tree was reverified.
+    const retryWithoutProof = await finalizeIssue(leaseAuthority, workAuthority, {
       cwd: root,
       issueNumber: 608,
       agent: "claude",
@@ -362,8 +363,99 @@ describe("finalizeIssue", () => {
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
     });
+    assert.equal(retryWithoutProof.requiresReverification, true);
+    assert.equal(retryWithoutProof.closed, false);
+    assert.equal(retryWithoutProof.mergeSha, result.mergeSha);
+
+    // A retry that supplies the exact integrated main SHA (`mergeSha`) the
+    // caller actually reverified closes normally.
+    const retry = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 608,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedIntegratedMain: result.mergeSha,
+    });
     assert.equal(retry.requiresReverification, false);
     assert.equal(retry.closed, true);
+  });
+
+  test("#20: refuses to close when another commit lands on main after the caller's verified integrated-main proof", async () => {
+    const { origin, root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 620, "feature.txt");
+
+    // B lands on main before the candidate is ever integrated.
+    const otherClone = mktemp("finalize-other-clone-");
+    execFileSync("git", ["clone", "-q", origin, otherClone]);
+    git(otherClone, ["config", "user.name", "Other Issue"]);
+    git(otherClone, ["config", "user.email", "other@example.invalid"]);
+    writeFileSync(join(otherClone, "unrelated-b.txt"), "b\n");
+    git(otherClone, ["add", "unrelated-b.txt"]);
+    git(otherClone, ["commit", "-qm", "feat: B lands"]);
+    git(otherClone, ["push", "-q", "origin", "main"]);
+
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(620));
+    const workAuthority = new InMemoryWorkAuthority([workItem(620, "2026-08-19T00:00:00Z")]);
+
+    // First finalize integrates A+B+C and reports the exact tree (M1) that
+    // must be reverified.
+    const first = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 620,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+    });
+    assert.equal(first.requiresReverification, true);
+    const m1 = first.mergeSha;
+
+    // The caller verifies M1 -- but before it retries, an independent D
+    // lands on main, so origin/main advances to M2 != M1.
+    git(otherClone, ["fetch", "-q", "origin", "main"]);
+    git(otherClone, ["merge", "-q", "--ff-only", "origin/main"]);
+    writeFileSync(join(otherClone, "unrelated-d.txt"), "d\n");
+    git(otherClone, ["add", "unrelated-d.txt"]);
+    git(otherClone, ["commit", "-qm", "feat: D lands after M1 was verified"]);
+    git(otherClone, ["push", "-q", "origin", "main"]);
+
+    // Retrying with proof of the now-stale M1 must NOT close: the live
+    // integrated main tree (M2) was never reverified.
+    const retry = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 620,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedIntegratedMain: m1,
+    });
+    assert.equal(retry.closed, false);
+    assert.equal(retry.requiresReverification, true);
+    assert.notEqual(retry.mergeSha, m1);
+
+    const item = await workAuthority.get("620");
+    assert.equal(item.state, "open");
+
+    // Retrying again with proof of the new tree (M2) closes normally.
+    const finalRetry = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 620,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedIntegratedMain: retry.mergeSha,
+    });
+    assert.equal(finalRetry.requiresReverification, false);
+    assert.equal(finalRetry.closed, true);
   });
 
   test("does not close the issue when the lease was lost after a successful merge", async () => {

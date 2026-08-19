@@ -42,6 +42,16 @@ Integration can land durably even when closure is withheld
 main is never held hostage by a stale verification snapshot, but a stale
 worker can never silently mark stale-authority work "Done".
 
+A `requiresReverification: true` result's `mergeSha` is the exact integrated
+main revision the caller must reverify before retrying. The retry must pass
+that same SHA back as `verifiedIntegratedMain` (#20): candidate reachability
+from `origin/main` alone is never sufficient proof the *current* integrated
+tree is the one that was reverified, since an unrelated commit can land
+between the caller's verification and the retry. A retry whose proof no
+longer matches the live integrated main returns `requiresReverification:
+true` again with the new state to verify, rather than closing on stale
+evidence.
+
 ### Workers
 
 Planning, implementation, and repair workers are mutable only inside the
