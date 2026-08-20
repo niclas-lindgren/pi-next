@@ -16,6 +16,7 @@ import {
   currentSupervisorStatus,
   ForegroundSupervisor,
 } from "./foreground-supervisor.ts";
+import { getLiveCtx, setLiveCtx } from "./live-ctx.ts";
 import {
   listLoopStates,
   loopResultFile,
@@ -152,7 +153,10 @@ export function startAutoStatusHeartbeat(
   preferredRunId: () => string | undefined,
 ): () => void {
   // Read cwd before any session replacement. It is plain data and remains
-  // valid after the command context becomes stale.
+  // valid after the command context becomes stale. UI writes resolve the
+  // current context at call time; the captured context is only a fallback for
+  // direct/test callers that have not installed the registry.
+  setLiveCtx(ctx);
   const cwd = ctx.cwd;
   const startedAt = Date.now();
   const version = piNextRuntimeIdentity().version;
@@ -178,7 +182,10 @@ export function startAutoStatusHeartbeat(
     // session_shutdown cancels the timer before the replacement context is
     // disposed. This guard also handles an already queued timer callback.
     if (!active) return;
-    setAutoStatusSafely(ctx, autoStatusText(cwd, startedAt, preferredRunId(), version));
+    const liveCtx = getLiveCtx();
+    if (liveCtx) {
+      setAutoStatusSafely(liveCtx, autoStatusText(cwd, startedAt, preferredRunId(), version));
+    }
   };
   const timer = setInterval(update, AUTO_STATUS_INTERVAL_MS);
   timer.unref?.();
@@ -340,6 +347,7 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
   // Pi has installed the replacement session. Terminal states need one paint;
   // a live local controller also gets a fresh heartbeat.
   pi.on("session_start", (_event, ctx) => {
+    setLiveCtx(ctx);
     const state = activeAutoStatusRun(ctx.cwd);
     if (!state) return;
     setAutoStatusSafely(ctx, autoStatusText(ctx.cwd, Date.now(), state.runId, piNextRuntimeIdentity().version));
@@ -353,6 +361,7 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
     return pi.registerCommand(name, {
       ...command,
       handler: async (args, ctx) => {
+        setLiveCtx(ctx);
         const auto = args.trim() === "auto";
         let preferredRunId: string | undefined;
         const stopStatus = auto

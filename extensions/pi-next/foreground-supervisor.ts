@@ -1,5 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
+import { getLiveCtx } from "./live-ctx.ts";
 import {
   prepareAbandonedAutoResume,
   recoverableAbandonedAutoRun,
@@ -225,6 +226,12 @@ export function formatSupervisorStatus(status: SupervisorStatus): string {
 export class ForegroundSupervisor {
   private phase: SupervisorPhase = "idle";
   private runId: string | null = null;
+  /**
+   * `ExtensionCommandContext` is session-scoped and becomes stale after
+   * `newSession()`.  Keep only its immutable data for status/lifecycle
+   * bookkeeping; host calls use the live-context registry at the boundary.
+   */
+  private readonly cwd: string;
 
   private readonly runtime: SupervisorRuntime;
   private workerRuntime: IssueWorkerRuntime | null = null;
@@ -235,6 +242,7 @@ export class ForegroundSupervisor {
     private readonly onWorkLog?: WorkerWorkLogSink,
     private readonly onWorkerState?: (runtime: IssueWorkerRuntime) => void,
   ) {
+    this.cwd = ctx.cwd;
     this.runtime = createSupervisorRuntime();
   }
 
@@ -286,14 +294,14 @@ export class ForegroundSupervisor {
     issueNumber?: number,
   ): Promise<ExtensionGeneration> {
     return this.runtime.beginGeneration(reason, this.runId
-      ? { cwd: this.ctx.cwd, runId: this.runId, issueNumber }
+      ? { cwd: this.cwd, runId: this.runId, issueNumber }
       : undefined);
   }
 
   /** Combined supervisor + durable loop-state snapshot for status surfaces. */
   status(): SupervisorStatus {
     return buildSupervisorStatus(
-      this.ctx.cwd,
+      this.cwd,
       this.runId,
       this.phase,
       this.runtime.currentGeneration(),
@@ -312,7 +320,7 @@ export class ForegroundSupervisor {
    */
   async launch(initial: LoopState): Promise<LoopState | null> {
     this.runId = initial.runId;
-    liveSupervisors.set(supervisorKey(this.ctx.cwd, this.runId), this);
+    liveSupervisors.set(supervisorKey(this.cwd, this.runId), this);
     this.phase = "launching";
     try {
       this.phase = "running";
@@ -321,8 +329,12 @@ export class ForegroundSupervisor {
         while (state.status === "running" && state.remainingIssues > 0) {
           this.workerPhase = undefined;
           this.workerRuntime = null;
+          // A worker/session transition may have invalidated the context
+          // passed to the constructor. The cycle itself performs host calls,
+          // so hand it the current live context while status remains data-only.
+          const liveCtx = getLiveCtx() ?? this.ctx;
           state = await runOwnedIssueCycle(
-            this.ctx,
+            liveCtx,
             state,
             this.runtime,
             (event: WorkerWorkLogEvent) => {
@@ -339,9 +351,9 @@ export class ForegroundSupervisor {
       // The issue-cycle returns at the queue boundary, before another
       // controller turn can normalize a zero remaining count. Persist the
       // terminal state here so the footer and later status queries agree.
-      const settled = readLoopState(this.ctx.cwd, this.runId);
+      const settled = readLoopState(this.cwd, this.runId);
       if (settled?.status === "running" && settled.remainingIssues <= 0) {
-        writeJsonAtomic(loopStateFile(this.ctx.cwd, this.runId), {
+        writeJsonAtomic(loopStateFile(this.cwd, this.runId), {
           ...settled,
           status: "completed",
           activeIssueNumber: undefined,
@@ -356,7 +368,7 @@ export class ForegroundSupervisor {
       this.phase = "aborted";
       throw error;
     } finally {
-      liveSupervisors.delete(supervisorKey(this.ctx.cwd, this.runId));
+      liveSupervisors.delete(supervisorKey(this.cwd, this.runId));
     }
     return this.reconcile();
   }
@@ -375,11 +387,11 @@ export class ForegroundSupervisor {
     const generation = this.runtime.currentGeneration();
     if (generation && !generation.isDisposed()) {
       await this.runtime.teardown(generation, reason, this.runId
-        ? { cwd: this.ctx.cwd, runId: this.runId }
+        ? { cwd: this.cwd, runId: this.runId }
         : undefined);
     }
     if (!this.runId) return null;
-    const current = readLoopState(this.ctx.cwd, this.runId);
+    const current = readLoopState(this.cwd, this.runId);
     if (!current) return null;
     const next: LoopState = {
       ...current,
@@ -387,7 +399,7 @@ export class ForegroundSupervisor {
       lastReason: reason,
       updatedAt: loopNow(),
     };
-    writeJsonAtomic(loopStateFile(this.ctx.cwd, this.runId), next);
+    writeJsonAtomic(loopStateFile(this.cwd, this.runId), next);
     this.phase = "aborted";
     return next;
   }
@@ -395,6 +407,6 @@ export class ForegroundSupervisor {
   /** Explicit accessor for the durable result of the run this instance owns. */
   reconcile(): LoopState | null {
     if (!this.runId) return null;
-    return readLoopState(this.ctx.cwd, this.runId);
+    return readLoopState(this.cwd, this.runId);
   }
 }
