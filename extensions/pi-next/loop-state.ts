@@ -14,6 +14,7 @@ import {
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { piNextRuntimeIdentity } from "../../src/version.ts";
 import { extractCommitEvidenceShas } from "./acceptance-verification.ts";
 import {
   changeFiles,
@@ -409,7 +410,10 @@ export function safeLoopNotify(
   level: "info" | "warning" | "error" = "info",
 ): void {
   try {
-    void Promise.resolve(ctx.ui.notify(message, level)).catch(() => undefined);
+    const identity = piNextRuntimeIdentity();
+    void Promise.resolve(
+      ctx.ui.notify(`Pi-next version=${identity.version}\n${message}`, level),
+    ).catch(() => undefined);
   } catch {
     // The host can tear down the UI while an unattended loop is unwinding.
     // Notifications are diagnostic only and must never become an unhandled
