@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { getLiveCtx } from "./live-ctx.ts";
+import { getLiveCtx, sessionIdentity } from "./live-ctx.ts";
 import {
   prepareAbandonedAutoResume,
   recoverableAbandonedAutoRun,
@@ -173,10 +173,10 @@ function buildSupervisorStatus(
  * Baseline status for a run, for status surfaces (e.g. the `pi-next-status`
  * command's auto-heartbeat) that have no live `ForegroundSupervisor`
  * instance in hand, only a `cwd`. With `preferredRunId`, reports on exactly
- * that run (present or not); otherwise selects the most recently updated
- * loop-state record still marked `running`. This is a display convenience
- * only and never an ownership decision (that remains the fresh GitHub
- * lease, per `recoverOnStart`).
+ * that run (present or not); otherwise requires the caller's session identity
+ * and selects only that session's running record. This is a display
+ * convenience only and never an ownership decision (that remains the fresh
+ * GitHub lease, per `recoverOnStart`).
  */
 const liveSupervisors = new Map<string, ForegroundSupervisor>();
 
@@ -187,6 +187,7 @@ function supervisorKey(cwd: string, runId: string): string {
 export function currentSupervisorStatus(
   cwd: string,
   preferredRunId?: string,
+  ownerSessionId?: string,
 ): SupervisorStatus | null {
   if (preferredRunId) {
     const live = liveSupervisors.get(supervisorKey(cwd, preferredRunId));
@@ -194,12 +195,13 @@ export function currentSupervisorStatus(
       ? live.status()
       : buildSupervisorStatus(cwd, preferredRunId, "running");
   }
-  const running = listLoopStates(cwd).find((state) => state.status === "running");
-  if (!running) {
-    return currentGeneration() != null
-      ? buildSupervisorStatus(cwd, null, "running")
-      : null;
-  }
+  // Never infer a display owner from the repository's newest running record.
+  // A caller without an explicit run must first provide its session identity.
+  if (!ownerSessionId) return null;
+  const running = listLoopStates(cwd)
+    .filter((state) => state.status === "running" && state.sessionId === ownerSessionId)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  if (!running) return null;
   const live = liveSupervisors.get(supervisorKey(cwd, running.runId));
   return live
     ? live.status()
@@ -282,7 +284,11 @@ export class ForegroundSupervisor {
   ): Promise<RecoveryOutcome> {
     const abandoned = await recoverableAbandonedAutoRun(ctx.cwd);
     if (!abandoned) return { recovered: false };
-    const prepared = await prepareAbandonedAutoResume(ctx.cwd, abandoned);
+    const prepared = await prepareAbandonedAutoResume(
+      ctx.cwd,
+      abandoned,
+      sessionIdentity(ctx),
+    );
     if (!prepared.ok) {
       return { recovered: false, blockedReason: prepared.reason };
     }

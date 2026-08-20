@@ -41,13 +41,15 @@ function state(runId: string, updatedAt: string, overrides: Partial<LoopState> =
       modelDurationMs: 0,
       telemetryUnavailable: 0,
     },
+    sessionId: "session-a",
     ...overrides,
   };
 }
 
-function context(cwd: string, statuses: Array<[string, string | undefined]>): ExtensionCommandContext {
+function context(cwd: string, statuses: Array<[string, string | undefined]>, sessionId = "session-a"): ExtensionCommandContext {
   return {
     cwd,
+    sessionManager: { getSessionId: () => sessionId },
     ui: {
       setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
     },
@@ -123,7 +125,7 @@ test("a new auto run replaces an older terminal footer immediately", async () =>
       { replaceExisting: true },
     );
     try {
-      assert.match(statuses[0]?.[1] || "", /starting/);
+      assert.match(statuses[0]?.[1] || "", /no issue attached/);
       assert.doesNotMatch(statuses[0]?.[1] || "", /complete/);
     } finally {
       stop();
@@ -153,18 +155,20 @@ test("terminal durable state fences stale worker liveness", async () => {
   }
 });
 
-test("newer durable runs win over an older heartbeat", async () => {
+test("independent session status never falls back to another session's newer run", async () => {
   const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-order-"));
   try {
     for (const current of [
-      state("old-run", "2026-01-01T00:00:00.000Z"),
-      state("new-run", "2026-01-01T00:00:01.000Z", { status: "completed", remainingIssues: 0 }),
+      state("old-run", "2026-01-01T00:00:00.000Z", { sessionId: "session-a" }),
+      state("new-run", "2026-01-01T00:00:01.000Z", { status: "completed", remainingIssues: 0, sessionId: "session-b" }),
     ]) {
       const dir = join(cwd, ".pi", "runtime", "pi-next-loops", current.runId);
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "state.json"), JSON.stringify(current));
     }
-    assert.equal(activeAutoStatusRun(cwd, "old-run")?.runId, "new-run");
+    assert.equal(activeAutoStatusRun(cwd, undefined, "session-a")?.runId, "old-run");
+    assert.equal(activeAutoStatusRun(cwd, undefined, "session-b")?.runId, "new-run");
+    assert.equal(activeAutoStatusRun(cwd)?.runId, undefined);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -190,7 +194,7 @@ test("session replacement rebinds durable status and shutdown only cancels old w
     registerPiNextCommands(pi);
 
     const statuses: Array<[string, string | undefined]> = [];
-    events.get("session_start")?.({}, context(cwd, statuses));
+    events.get("session_start")?.({}, context(cwd, statuses, "session-a"));
     assert.match(statuses.at(-1)?.[1] || "", /blocked/);
 
     // A live state gets a replacement heartbeat, but shutdown must cancel it
@@ -198,7 +202,7 @@ test("session replacement rebinds durable status and shutdown only cancels old w
     await writeFile(join(runDir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:01.000Z")));
     await writeFile(join(runDir, "controller.lock"), `run_id=${runId}\npid=${process.pid}\n`);
     const liveStatuses: Array<[string, string | undefined]> = [];
-    const liveCtx = context(cwd, liveStatuses);
+    const liveCtx = context(cwd, liveStatuses, "session-a");
     events.get("session_start")?.({}, liveCtx);
     const beforeShutdown = liveStatuses.length;
     events.get("session_shutdown")?.({}, liveCtx);
