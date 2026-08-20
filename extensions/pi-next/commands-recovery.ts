@@ -37,9 +37,10 @@ import {
 const AUTO_STATUS_KEY = "pi-next-auto";
 const AUTO_STATUS_INTERVAL_MS = 2_500;
 
-// Session replacement tears down the ExtensionContext that owns a command.
-// Keep only cancellation callbacks here so shutdown never has to touch the
-// old context. A replacement session rebinds the status from durable state.
+// Heartbeats resolve the live context at write time, so they survive Pi's
+// session replacement. Keep cancellation callbacks for explicit command
+// completion, but do not cancel an active run merely because its UI context
+// was replaced.
 const autoStatusHeartbeatCancellations = new Set<() => void>();
 
 function processAlive(pid: number): boolean {
@@ -370,9 +371,10 @@ export function clearAutoStatus(ctx: ExtensionCommandContext): void {
 
 export function registerPiNextCommands(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
-    // Do not clear UI state here: this callback runs as the old session is
-    // being torn down. Only stop callbacks that are safe across replacement.
-    for (const cancel of [...autoStatusHeartbeatCancellations]) cancel();
+    // Do not clear or cancel status here. The heartbeat resolves getLiveCtx()
+    // when it writes, and therefore follows the replacement session. Cancelling
+    // at this boundary made a live run lose its footer permanently as soon as
+    // it selected an issue and crossed its first session transition.
   });
 
   // Status entries belong to the current UI context, not to the disposed
@@ -391,7 +393,11 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
       ownerSessionId,
       piNextRuntimeIdentity().version,
     ));
-    if (state.status === "running" && controllerPid(ctx.cwd, state.runId) === process.pid) {
+    if (
+      state.status === "running" &&
+      controllerPid(ctx.cwd, state.runId) === process.pid &&
+      autoStatusHeartbeatCancellations.size === 0
+    ) {
       startAutoStatusHeartbeat(ctx, () => state.runId);
     }
   });
