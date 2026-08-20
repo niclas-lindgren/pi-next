@@ -17,7 +17,7 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -816,6 +816,152 @@ function preservationPath(path: string, tip: string): string {
   return candidate;
 }
 
+async function salvageDivergentLegacyWorktree(
+  cwd: string,
+  issueNumber: number,
+  path: string,
+  legacyBranch: string,
+  canonicalBranch: string,
+  legacyTip: string,
+  mainTip: string,
+  recordEvent?: IssueLifecycleRecorder,
+): Promise<string> {
+  const mergeBase = await git(cwd, ["merge-base", mainTip, legacyTip]).catch(() => undefined);
+  if (!mergeBase) {
+    throw new WorktreeRecoveryError(issueNumber, "migrate", new Error("legacy branch has no common ancestor with authoritative main"), {
+      reason: "legacy_salvage_no_common_ancestor",
+      legacyBranch,
+      legacyTip,
+      mainTip,
+    });
+  }
+  const commits = (await git(cwd, ["rev-list", "--reverse", `${mainTip}..${legacyTip}`])).split("\n").filter(Boolean);
+  if (!commits.length) {
+    throw new WorktreeRecoveryError(issueNumber, "migrate", new Error("legacy branch has no replayable commits"), {
+      reason: "legacy_salvage_no_commits",
+      legacyBranch,
+      legacyTip,
+      mainTip,
+    });
+  }
+  for (const commit of commits) {
+    const message = await git(cwd, ["show", "-s", "--format=%B", commit]);
+    if (!new RegExp(`(?:^|\\W)#${issueNumber}(?:\\D|$)`, "m").test(message)) {
+      throw new WorktreeRecoveryError(issueNumber, "migrate", new Error(`commit ${commit.slice(0, 12)} is not clearly attributable to issue #${issueNumber}`), {
+        reason: "legacy_salvage_ambiguous_commit",
+        legacyBranch,
+        legacyTip,
+        mainTip,
+        commit,
+      });
+    }
+  }
+
+  const canonicalTip = await refTip(cwd, `refs/heads/${canonicalBranch}`);
+  if (canonicalTip) {
+    throw new WorktreeRecoveryError(issueNumber, "migrate", new Error(`canonical branch ${canonicalBranch} already exists; refusing to overwrite it`), {
+      reason: "legacy_salvage_canonical_exists",
+      legacyBranch,
+      legacyTip,
+      canonicalBranch,
+      canonicalTip,
+      mainTip,
+    });
+  }
+
+  const token = `${Date.now()}-${process.pid}`;
+  const recoveryBranch = `pi-next/recovery/issue-${issueNumber}-${token}`;
+  const recoveryPath = join(dirname(path), `.recovery-issue-${issueNumber}-${token}`);
+  recordEvent?.(cwd, {
+    event: "legacy_worktree_salvage_started",
+    issueNumber,
+    runId: `salvage-${token}`,
+    branch: canonicalBranch,
+    worktree: `.worktrees/issue-${issueNumber}`,
+    outcome: "success",
+    reasonCode: `commits=${commits.length}`,
+  });
+
+  let recoveryCreated = false;
+  try {
+    await git(cwd, ["branch", recoveryBranch, mainTip]);
+    await git(cwd, ["worktree", "add", "--quiet", recoveryPath, recoveryBranch]);
+    recoveryCreated = true;
+    for (const commit of commits) {
+      try {
+        await git(recoveryPath, ["cherry-pick", commit]);
+      } catch (error) {
+        await git(recoveryPath, ["cherry-pick", "--abort"]).catch(() => undefined);
+        throw new WorktreeRecoveryError(issueNumber, "migrate", error, {
+          reason: "legacy_salvage_conflict",
+          legacyBranch,
+          legacyTip,
+          mainTip,
+          recoveryBranch,
+          commit,
+        });
+      }
+    }
+    const recoveredTip = await refTip(cwd, `refs/heads/${recoveryBranch}`);
+    if (!recoveredTip || !(await isAncestor(cwd, mainTip, recoveredTip))) {
+      throw new WorktreeRecoveryError(issueNumber, "migrate", new Error("recovered branch failed authoritative-main validation"), {
+        reason: "legacy_salvage_validation_failed",
+        legacyBranch,
+        legacyTip,
+        mainTip,
+        recoveryBranch,
+      });
+    }
+
+    // The replay is fully validated before the legacy checkout is moved. The
+    // old branch remains intact; its clean worktree is retained as evidence at
+    // a deterministic preservation path while the canonical path is rebuilt.
+    const preserved = preservationPath(path, legacyTip);
+    await git(cwd, ["worktree", "move", path, preserved]);
+    await git(cwd, ["branch", canonicalBranch, recoveredTip]);
+    await git(cwd, ["worktree", "remove", recoveryPath]);
+    recoveryCreated = false;
+    await git(cwd, ["branch", "-D", recoveryBranch]);
+    await git(cwd, ["worktree", "add", "--quiet", path, canonicalBranch]);
+    const attached = await git(path, ["branch", "--show-current"]);
+    if (attached !== canonicalBranch) throw new Error(`recovered path is attached to ${attached}; expected ${canonicalBranch}`);
+    recordEvent?.(cwd, {
+      event: "legacy_worktree_salvaged",
+      issueNumber,
+      runId: `salvage-${token}`,
+      branch: canonicalBranch,
+      worktree: `.worktrees/issue-${issueNumber}`,
+      outcome: "recovered",
+      reasonCode: `replayed_commits=${commits.length}`,
+    });
+    return path;
+  } catch (error) {
+    recordEvent?.(cwd, {
+      event: "legacy_worktree_salvaged",
+      issueNumber,
+      runId: `salvage-${token}`,
+      branch: canonicalBranch,
+      worktree: `.worktrees/issue-${issueNumber}`,
+      outcome: "failure",
+      reasonCode: error instanceof WorktreeRecoveryError
+        ? error.details.reason || error.code
+        : "legacy_salvage_adoption_failed",
+    });
+    if (recoveryCreated) {
+      await git(cwd, ["worktree", "remove", "--force", recoveryPath]).catch(() => undefined);
+    }
+    await git(cwd, ["branch", "-D", recoveryBranch]).catch(() => undefined);
+    if (error instanceof WorktreeRecoveryError) throw error;
+    throw new WorktreeRecoveryError(issueNumber, "migrate", error, {
+      reason: "legacy_salvage_adoption_failed",
+      legacyBranch,
+      legacyTip,
+      mainTip,
+      recoveryBranch,
+    });
+  }
+}
+
 async function migrateAttachedLegacyWorktree(
   cwd: string,
   issueNumber: number,
@@ -863,6 +1009,21 @@ async function migrateAttachedLegacyWorktree(
     dirty: String(dirty),
   };
   if (!legacyBasedOnMain) {
+    // Only clean, explicitly issue-attributed commits qualify for automatic
+    // salvage. Dirty work and ambiguous history retain the existing safe
+    // containment behavior without touching the legacy checkout.
+    if (!dirty && mainTip) {
+      return salvageDivergentLegacyWorktree(
+        cwd,
+        issueNumber,
+        path,
+        legacyBranch,
+        canonicalBranch,
+        legacyTip,
+        mainTip,
+        recordEvent,
+      );
+    }
     throw new WorktreeRecoveryError(
       issueNumber,
       "migrate",
