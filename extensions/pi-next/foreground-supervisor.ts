@@ -127,20 +127,30 @@ function buildSupervisorStatus(
   workerPhase?: WorkerWorkLogPhase,
 ): SupervisorStatus {
   const persisted = runId ? readLoopState(cwd, runId) : null;
+  const effectivePhase: SupervisorPhase = persisted && persisted.status !== "running"
+    ? persisted.status === "interrupted" || persisted.status === "failed"
+      ? "aborted"
+      : "settled"
+    : phase;
   // A generation is only a lifecycle boundary. It is not evidence that a
   // child PID exists; workerRuntime is the sole source for worker liveness.
   void ownedGeneration;
+  // A terminal durable state is itself a lifecycle fence: once persisted,
+  // absence of a live runtime must render as not-running, never as an
+  // unknown/stale worker inherited from the preceding generation.
   const workerLiveness = workerRuntime
     ? workerRuntime.alive
       ? "alive"
       : "not-running"
-    : "unknown";
+    : persisted && persisted.status !== "running"
+      ? "not-running"
+      : "unknown";
   const workerAlive = workerLiveness === "alive";
   const workerStartedAt = workerRuntime?.startedAt ?? persisted?.stepStartedAt ?? null;
   const startedMs = workerStartedAt ? Date.parse(workerStartedAt) : NaN;
   return {
     runId,
-    phase,
+    phase: effectivePhase,
     issueNumber: persisted?.activeIssueNumber ?? null,
     workspace: persisted?.activeWorkspace ?? null,
     step: persisted?.step ?? 0,
@@ -206,7 +216,9 @@ export function formatSupervisorStatus(status: SupervisorStatus): string {
   const issue = status.issueNumber ? `#${status.issueNumber}` : "no active issue";
   const step = status.step > 0 ? `step ${status.step}` : "starting";
   const worker = status.workerLiveness === "alive"
-    ? `worker alive${status.elapsedMs != null ? ` · ${Math.round(status.elapsedMs / 1_000)}s` : ""}`
+    ? ["settled", "aborted"].includes(status.phase)
+      ? `worker orphaned (still alive)${status.lastReason ? ` (${status.lastReason})` : ""}`
+      : `worker alive${status.elapsedMs != null ? ` · ${Math.round(status.elapsedMs / 1_000)}s` : ""}`
     : status.workerLiveness === "unknown"
       ? "worker liveness unknown"
       : `worker not running${status.lastReason ? ` (${status.lastReason})` : ""}`;
@@ -363,11 +375,32 @@ export class ForegroundSupervisor {
           lastReason: "Requested issue count completed",
         });
       }
+      // The worker callback reports its final PID state before its promise
+      // settles. Clear the per-generation snapshot before terminal status is
+      // exposed so a prior issue cannot make a later footer say "worker
+      // alive". A genuinely surviving child is abnormal and remains visible
+      // as an explicit orphan/teardown failure instead of a normal terminal
+      // state.
+      const terminal = readLoopState(this.cwd, this.runId);
+      if (terminal?.status !== "running" && this.workerRuntime?.alive) {
+        writeJsonAtomic(loopStateFile(this.cwd, this.runId), {
+          ...terminal,
+          status: "failed",
+          updatedAt: loopNow(),
+          lastReason: "Worker teardown failed: an owned worker survived terminal transition (orphaned worker)",
+        });
+      }
+      this.workerRuntime = null;
+      this.workerPhase = undefined;
       this.phase = "settled";
     } catch (error) {
       this.phase = "aborted";
       throw error;
     } finally {
+      // Also clear on exceptional launch paths; durable interrupted/failed
+      // state is rendered without mutable runtime data from the old issue.
+      this.workerRuntime = null;
+      this.workerPhase = undefined;
       liveSupervisors.delete(supervisorKey(this.cwd, this.runId));
     }
     return this.reconcile();
@@ -385,21 +418,29 @@ export class ForegroundSupervisor {
    */
   async abort(reason: string): Promise<LoopState | null> {
     const generation = this.runtime.currentGeneration();
-    if (generation && !generation.isDisposed()) {
-      await this.runtime.teardown(generation, reason, this.runId
-        ? { cwd: this.cwd, runId: this.runId }
-        : undefined);
-    }
+    const teardown = generation && !generation.isDisposed()
+      ? await this.runtime.teardown(generation, reason, this.runId
+          ? { cwd: this.cwd, runId: this.runId }
+          : undefined)
+      : undefined;
     if (!this.runId) return null;
     const current = readLoopState(this.cwd, this.runId);
     if (!current) return null;
+    const orphaned = Boolean(teardown?.timedOut || this.workerRuntime?.alive);
     const next: LoopState = {
       ...current,
+      status: orphaned ? "failed" : "stopped",
       stopRequested: true,
-      lastReason: reason,
+      lastReason: orphaned
+        ? `${reason}; worker teardown failed (orphaned worker)`
+        : reason,
       updatedAt: loopNow(),
     };
     writeJsonAtomic(loopStateFile(this.cwd, this.runId), next);
+    if (!orphaned) {
+      this.workerRuntime = null;
+      this.workerPhase = undefined;
+    }
     this.phase = "aborted";
     return next;
   }

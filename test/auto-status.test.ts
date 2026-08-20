@@ -11,6 +11,7 @@ import {
   startAutoStatusHeartbeat,
 } from "../extensions/pi-next/commands-recovery.ts";
 import { type LoopState } from "../extensions/pi-next/loop-state.ts";
+import { currentSupervisorStatus, formatSupervisorStatus } from "../extensions/pi-next/foreground-supervisor.ts";
 
 function state(runId: string, updatedAt: string, overrides: Partial<LoopState> = {}): LoopState {
   return {
@@ -127,6 +128,26 @@ test("a new auto run replaces an older terminal footer immediately", async () =>
     } finally {
       stop();
     }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("terminal durable state fences stale worker liveness", async () => {
+  const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-terminal-"));
+  try {
+    const runId = "terminal-run";
+    const dir = join(cwd, ".pi", "runtime", "pi-next-loops", runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:00.000Z", {
+      status: "interrupted",
+      lastReason: "worker exited",
+      activeIssueNumber: 32,
+    })));
+    const status = currentSupervisorStatus(cwd, runId);
+    assert.equal(status?.phase, "aborted");
+    assert.equal(status?.workerLiveness, "not-running");
+    assert.doesNotMatch(formatSupervisorStatus(status!), /worker alive/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
