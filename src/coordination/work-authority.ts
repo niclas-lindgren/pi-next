@@ -13,6 +13,11 @@ import type { PiNextConfig } from "./config.ts";
 import type { SelfAssessmentFinding } from "./self-assessment.ts";
 
 const execFileAsync = promisify(execFile);
+const PENDING_VERIFICATION_MARKER = "<!-- pi-next-pending-verification -->";
+
+function pendingVerificationComment(record: PendingVerificationRecord): string {
+  return `${PENDING_VERIFICATION_MARKER}\n${JSON.stringify(record)}`;
+}
 
 export interface AuthorityComment {
   id: string;
@@ -40,8 +45,24 @@ export interface AuthorityCapabilities {
   discovery: boolean;
   freshness: boolean;
   completion: boolean;
+  /** Optional capability for recording an open, post-integration verification state. */
+  pendingVerification?: boolean;
   atomicOwnership: boolean;
   projectStatus: boolean;
+}
+
+export interface PendingVerificationCriterion {
+  /** Consumer-defined stable identity for this pending check. */
+  id: string;
+  /** Human-readable, explicit criterion retained by the authority adapter. */
+  description: string;
+}
+
+export interface PendingVerificationRecord {
+  version: 1;
+  criteria: readonly PendingVerificationCriterion[];
+  /** Exact origin/main revision that was integrated and reachability-proven. */
+  integratedMainSha: string;
 }
 
 export interface WorkAuthorityAdapter {
@@ -52,6 +73,8 @@ export interface WorkAuthorityAdapter {
   fingerprint(item: AuthorityWorkItem): string;
   /** Terminal completion: mark a work item done and record the closing comment. Requires `capabilities.completion`. */
   close(id: string, comment: string): Promise<void>;
+  /** Record structured post-integration checks while leaving the work item open. Requires `capabilities.pendingVerification`. */
+  markPendingVerification?(id: string, record: PendingVerificationRecord): Promise<void>;
   /** Optional, thresholded governance surface. Never required for scheduling. */
   publishFinding?(finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
   updateFinding?(id: string, finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
@@ -178,6 +201,7 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
     discovery: true,
     freshness: true,
     completion: true,
+    pendingVerification: true,
     // Ownership is provided by the separate lease CAS authority.
     atomicOwnership: false,
     projectStatus: false,
@@ -235,6 +259,14 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
 
   async close(id: string, comment: string): Promise<void> {
     await this.gh(["issue", "close", id, "--comment", comment]);
+    this.cache.delete(id);
+  }
+
+  async markPendingVerification(id: string, record: PendingVerificationRecord): Promise<void> {
+    const comment = pendingVerificationComment(record);
+    const item = await this.get(id);
+    if (item.comments.some((entry) => entry.body === comment)) return;
+    await this.gh(["issue", "comment", id, "--body", comment]);
     this.cache.delete(id);
   }
 
@@ -341,6 +373,7 @@ export class InMemoryWorkAuthority implements WorkAuthorityAdapter {
     discovery: true,
     freshness: true,
     completion: true,
+    pendingVerification: true,
     atomicOwnership: false,
     projectStatus: false,
   });
@@ -373,6 +406,18 @@ export class InMemoryWorkAuthority implements WorkAuthorityAdapter {
     item.comments = [
       ...item.comments,
       { id: `close-${id}-${item.comments.length}`, author: "system", body: comment, createdAt: now, updatedAt: now },
+    ];
+  }
+
+  async markPendingVerification(id: string, record: PendingVerificationRecord): Promise<void> {
+    const item = this.items.get(id);
+    if (!item) throw new Error(`Unknown work item: ${id}`);
+    const body = pendingVerificationComment(record);
+    if (item.comments.some((comment) => comment.body === body)) return;
+    const now = new Date().toISOString();
+    item.comments = [
+      ...item.comments,
+      { id: `pending-verification-${id}-${item.comments.length}`, author: "system", body, createdAt: now, updatedAt: now },
     ];
   }
 

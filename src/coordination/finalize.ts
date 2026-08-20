@@ -49,6 +49,8 @@ import type { IssueLeaseAuthority } from "./issue-leases.ts";
 import {
   requireAuthorityCapability,
   type AuthorityWorkItem,
+  type PendingVerificationCriterion,
+  type PendingVerificationRecord,
   type WorkAuthorityAdapter,
 } from "./work-authority.ts";
 
@@ -61,7 +63,9 @@ export type FinalizeErrorCode =
   | "ROOT_BUSY"
   | "PROMOTION_RACE"
   | "STALE_AUTHORITY"
-  | "MISSING_AUTHORITY_EVIDENCE";
+  | "MISSING_AUTHORITY_EVIDENCE"
+  | "INVALID_PENDING_VERIFICATION"
+  | "PENDING_VERIFICATION_FAILED";
 
 export class FinalizeError extends Error {
   constructor(
@@ -72,6 +76,11 @@ export class FinalizeError extends Error {
     super(message);
     this.name = "FinalizeError";
   }
+}
+
+export interface PendingVerificationRequest {
+  /** Explicit consumer-classified checks; the kernel does not infer policy from authority data. */
+  criteria: readonly PendingVerificationCriterion[];
 }
 
 export interface FinalizeInput {
@@ -105,6 +114,8 @@ export interface FinalizeInput {
    */
   verifiedIntegratedMain?: string;
   closeComment?: string;
+  /** When supplied, integrate and record these checks while leaving authority open. */
+  pendingVerification?: PendingVerificationRequest;
 }
 
 export interface FinalizeResult {
@@ -128,6 +139,8 @@ export interface FinalizeResult {
    * candidate) before the issue can close.
    */
   requiresReverification: boolean;
+  /** Exact pending criteria and the integrated, reachability-proven main revision. */
+  pendingVerification?: PendingVerificationRecord;
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -210,12 +223,50 @@ function assertOwnedFreshLease(
 
 const MAX_PROMOTION_ATTEMPTS = 3;
 
+function validatePendingVerification(input: PendingVerificationRequest | undefined): PendingVerificationRecord | undefined {
+  if (input === undefined) return undefined;
+  if (!input || typeof input !== "object" || !Array.isArray(input.criteria) || input.criteria.length === 0) {
+    throw new FinalizeError(
+      "INVALID_PENDING_VERIFICATION",
+      "Pending verification requires at least one explicit criterion",
+    );
+  }
+  const seen = new Set<string>();
+  const criteria = input.criteria.map((criterion) => {
+    if (!criterion || typeof criterion !== "object") {
+      throw new FinalizeError("INVALID_PENDING_VERIFICATION", "Pending verification criteria must be structured objects");
+    }
+    const id = typeof criterion.id === "string" ? criterion.id.trim() : "";
+    const description = typeof criterion.description === "string" ? criterion.description.trim() : "";
+    if (!id || !description || seen.has(id)) {
+      throw new FinalizeError(
+        "INVALID_PENDING_VERIFICATION",
+        "Pending verification criteria require unique non-empty id and description fields",
+      );
+    }
+    seen.add(id);
+    return { id, description };
+  });
+  return { version: 1, criteria, integratedMainSha: "" };
+}
+
 export async function finalizeIssue(
   leaseAuthority: IssueLeaseAuthority,
   workAuthority: WorkAuthorityAdapter,
   input: FinalizeInput,
 ): Promise<FinalizeResult> {
-  requireAuthorityCapability(workAuthority, "completion");
+  const pendingTemplate = validatePendingVerification(input.pendingVerification);
+  if (pendingTemplate) {
+    requireAuthorityCapability(workAuthority, "pendingVerification");
+    if (!workAuthority.markPendingVerification) {
+      throw new FinalizeError(
+        "PENDING_VERIFICATION_FAILED",
+        `Authority adapter ${workAuthority.name} advertises pending verification but cannot record it`,
+      );
+    }
+  } else {
+    requireAuthorityCapability(workAuthority, "completion");
+  }
 
   if (!input.verifiedAuthorityFingerprint?.trim()) {
     throw new FinalizeError(
@@ -372,7 +423,7 @@ export async function finalizeIssue(
   // undo it. Whether the work item actually closes depends on whether the
   // integrated tree has fresh verification evidence and the lease/authority
   // are still exactly what was verified.
-  if (requiresReverification) {
+  if (requiresReverification && !pendingTemplate) {
     return {
       ok: true,
       issueNumber: input.issueNumber,
@@ -430,6 +481,32 @@ export async function finalizeIssue(
       authorityChanged: true,
       leaseLostAfterMerge: false,
       requiresReverification: false,
+    };
+  }
+
+  if (pendingTemplate) {
+    const pendingVerification: PendingVerificationRecord = {
+      ...pendingTemplate,
+      integratedMainSha: mergeSha,
+    };
+    try {
+      await workAuthority.markPendingVerification!(String(input.issueNumber), pendingVerification);
+    } catch (error) {
+      throw new FinalizeError(
+        "PENDING_VERIFICATION_FAILED",
+        `Integrated issue #${input.issueNumber}, but could not durably record pending verification: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return {
+      ok: true,
+      issueNumber: input.issueNumber,
+      branch,
+      mergeSha,
+      closed: false,
+      authorityChanged: false,
+      leaseLostAfterMerge: false,
+      requiresReverification,
+      pendingVerification,
     };
   }
 

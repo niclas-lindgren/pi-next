@@ -37,6 +37,9 @@ reachable from `origin/main`, and the live work item is unchanged since
 verification. The close/comment step goes through the injected
 `WorkAuthorityAdapter` (`capabilities.completion`), so this stays
 authority-adapter-agnostic; git integration has no GitHub dependency.
+Consumers may instead supply explicit structured pending-verification criteria;
+adapters that advertise `capabilities.pendingVerification` durably record those
+criteria and the exact integrated main revision while leaving the work item open.
 Integration can land durably even when closure is withheld
 (`requiresReverification`, `authorityChanged`, `leaseLostAfterMerge`) --
 main is never held hostage by a stale verification snapshot, but a stale
