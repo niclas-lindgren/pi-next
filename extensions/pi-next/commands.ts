@@ -8,7 +8,11 @@ import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import { LocalIssueLeaseAuthority } from "./local-lease.ts";
-import { candidateShortlist } from "./issue-candidates.ts";
+import {
+  CandidateDiscoveryError,
+  candidateShortlist,
+  type CandidateShortlist,
+} from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import {
   currentGeneration,
@@ -185,9 +189,12 @@ async function claimAndAttachIssueWorkspace(
   // selection uses the requested number; otherwise consult live authority,
   // never a historical PLAN/VERIFY left in the root checkout.
   const argsIssueMatch = args.trim().match(/#?(\d+)/);
-  let shortlist: { text?: string; exhausted: boolean } = argsIssueMatch
-    ? { exhausted: false }
+  let shortlist: CandidateShortlist = argsIssueMatch
+    ? { exhausted: false, outcome: "candidate" }
     : await candidateShortlist(coordinationCwd, { leaseAuthority });
+  if (shortlist.outcome === "unavailable") {
+    throw new CandidateDiscoveryError(shortlist.reason || "authority query failed");
+  }
   let claimedLease: IssueLease | undefined;
   let claimedCandidate = false;
   for (let attempt = 0; attempt < 3 && !claimedCandidate; attempt += 1) {
@@ -215,6 +222,9 @@ async function claimAndAttachIssueWorkspace(
       // means the caller wants that exact issue, so a conflict is terminal.
       if (argsIssueMatch) throw error;
       shortlist = await candidateShortlist(coordinationCwd, { leaseAuthority });
+      if (shortlist.outcome === "unavailable") {
+        throw new CandidateDiscoveryError(shortlist.reason || "authority query failed");
+      }
     }
   }
   if (!claimedCandidate || !claimedLease) return undefined;

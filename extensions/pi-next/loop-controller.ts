@@ -795,7 +795,7 @@ async function runOneStep(
     : undefined;
   const shortlist =
     hasPlan || state.activeIssueNumber
-      ? { exhausted: false }
+      ? { exhausted: false, text: undefined }
       : await candidateShortlist(ctx.cwd, {
           completedIssues: state.completedIssues,
           deferredIssues: state.deferredIssues.map((item) => item.issueNumber),
