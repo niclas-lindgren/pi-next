@@ -54,6 +54,11 @@ export function readSelfAssessmentFindings(cwd: string): SelfAssessmentFinding[]
   return Array.isArray(value?.findings) ? value!.findings.slice(-MAX_FINDINGS) : [];
 }
 
+/** Persist a held finding produced by deterministic maintenance evaluation. */
+export function persistSelfAssessmentFinding(cwd: string, finding: SelfAssessmentFinding): void {
+  saveFindings(cwd, mergeSelfAssessmentFinding(readSelfAssessmentFindings(cwd), finding));
+}
+
 function saveHealth(cwd: string, state: HealthState): void {
   // Failure and command maps are recurrence indexes, not logs. Keep their
   // cardinality bounded so a long-running process cannot grow this file.

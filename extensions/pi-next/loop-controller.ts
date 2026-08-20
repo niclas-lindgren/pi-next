@@ -15,7 +15,7 @@ import {
   type SupervisorRuntime,
 } from "./supervisor-runtime.ts";
 import {
-  maintenanceDecision,
+  issueBoundaryMaintenanceDecision,
   maintenanceOwed,
   runIssueBoundaryMaintenance,
 } from "./loop-maintenance.ts";
@@ -717,7 +717,7 @@ async function driveLoop(
     }
 
     if (maintenanceOwed(ctx.cwd, state)) {
-      const decision = maintenanceDecision(state);
+      const decision = await issueBoundaryMaintenanceDecision(ctx.cwd, state);
       if (!decision) continue;
       safeLoopNotify(
         ctx,
