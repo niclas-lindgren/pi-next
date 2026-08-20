@@ -214,10 +214,12 @@ export async function refreshMainAtIssueBoundary(
 }
 
 /**
- * Remove only a completed issue's disposable local checkout. The canonical
- * branch remains remote/recoverable; local removal is allowed only after the
- * expected path, branch identity, clean boundary, and absence of active
- * PLAN/VERIFY artifacts have all been proven.
+ * Remove only a completed issue's disposable local checkout. The remote
+ * branch remains recoverable; local removal is allowed only after the
+ * expected path, branch identity, clean boundary, absence of active
+ * PLAN/VERIFY artifacts, and integration into authoritative main have all
+ * been proven. A lifecycle-only verification-artifact cleanup commit is also
+ * allowed when its parent is already integrated.
  */
 export async function cleanupCompletedIssueWorktree(
   coordinationCwd: string,
@@ -281,6 +283,47 @@ export async function cleanupCompletedIssueWorktree(
     );
   }
 
+  // The worker may commit removal of VERIFY.md after promotion. Do not mistake
+  // that generated lifecycle commit for unique implementation work, but never
+  // delete a branch whose product commits are not reachable from authoritative
+  // main. This check is deliberately against the remote-tracking ref: a stale
+  // local main must not satisfy the integration proof.
+  const authoritativeMain = "refs/remotes/origin/main";
+  await git(coordinationCwd, ["rev-parse", "--verify", authoritativeMain]);
+  let integrated = true;
+  try {
+    await git(coordinationCwd, ["merge-base", "--is-ancestor", expectedBranch, authoritativeMain]);
+  } catch {
+    integrated = false;
+    const subject = await git(actualPath, ["log", "-1", "--format=%s"]);
+    const cleanupSubject = `chore(agent): remove completed issue #${issueNumber} verification artifact`;
+    if (subject !== cleanupSubject) {
+      throw new IssueWorkspaceCleanupError(
+        `refusing cleanup of issue #${issueNumber}: branch ${expectedBranch} is not reachable from authoritative main`,
+      );
+    }
+    const parent = await git(actualPath, ["rev-parse", "HEAD^"]);
+    try {
+      await git(coordinationCwd, ["merge-base", "--is-ancestor", parent, authoritativeMain]);
+      integrated = true;
+    } catch {
+      throw new IssueWorkspaceCleanupError(
+        `refusing cleanup of issue #${issueNumber}: lifecycle cleanup commit has an unintegrated parent`,
+      );
+    }
+  }
+  if (!integrated) {
+    throw new IssueWorkspaceCleanupError(
+      `refusing cleanup of issue #${issueNumber}: integration into authoritative main was not proven`,
+    );
+  }
+
   await git(coordinationCwd, ["worktree", "remove", expectedPath]);
   await git(coordinationCwd, ["worktree", "prune"]);
+  // The remote branch is intentionally retained for configured recovery and
+  // audit history. The explicit ancestry proof above is the safety fence for
+  // forced local deletion: a lifecycle-only cleanup commit is not an ancestor
+  // of main, so Git's ordinary `-d` check would reject an otherwise safe
+  // cleanup.
+  await git(coordinationCwd, ["branch", "-D", expectedBranch]);
 }
