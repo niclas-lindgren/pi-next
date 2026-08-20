@@ -88,6 +88,67 @@ test("a non-GitHub authority can provide configurable candidates", async () => {
   assert.doesNotMatch(result.text || "", /paused work item/);
 });
 
+test("current-run deferred issues are excluded and authoritative exhaustion is explicit", async () => {
+  const authority = new InMemoryWorkAuthority([
+    {
+      id: "contained-465",
+      number: 465,
+      title: "contained issue",
+      body: "",
+      state: "open",
+      updatedAt: "2026-01-01T00:00:00Z",
+      priority: "urgent",
+      states: ["prepared"],
+      comments: [],
+    },
+    {
+      id: "next-466",
+      number: 466,
+      title: "next eligible issue",
+      body: "",
+      state: "open",
+      updatedAt: "2026-01-02T00:00:00Z",
+      priority: "normal",
+      states: ["prepared"],
+      comments: [],
+    },
+  ]);
+  const continued = await candidateShortlist("/tmp", {
+    authority,
+    config: validatedConfig,
+    deferredIssues: [465],
+    refreshMain: false,
+  });
+  assert.equal(continued.outcome, "candidate");
+  assert.equal(continued.candidateIssueNumber, 466);
+  assert.doesNotMatch(continued.text || "", /contained issue/);
+
+  const exhausted = await candidateShortlist("/tmp", {
+    authority,
+    config: validatedConfig,
+    deferredIssues: [465, 466],
+    refreshMain: false,
+  });
+  assert.equal(exhausted.outcome, "exhausted");
+  assert.equal(exhausted.exhausted, true);
+  assert.match(exhausted.text || "", /contained earlier in this run/);
+});
+
+test("authority discovery failure is distinct from candidate exhaustion", async () => {
+  const authority = new InMemoryWorkAuthority();
+  authority.listCandidates = async () => {
+    throw new Error("transport unavailable");
+  };
+  const result = await candidateShortlist("/tmp", {
+    authority,
+    config: validatedConfig,
+    refreshMain: false,
+  });
+  assert.equal(result.outcome, "unavailable");
+  assert.equal(result.exhausted, false);
+  assert.match(result.reason || "", /transport unavailable/);
+});
+
 test("self-assessment findings use configured held and approval states", async () => {
   const governedConfig = validatePiNextConfig({
     ...config,

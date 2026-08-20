@@ -17,7 +17,10 @@ import {
   reconcileMissingLoopResult,
   runLoopSteps,
 } from "./loop-controller.ts";
-import { candidateShortlist } from "./issue-candidates.ts";
+import {
+  CandidateDiscoveryError,
+  candidateShortlist,
+} from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import {
@@ -144,6 +147,10 @@ export async function containIssueLocalFailure(
     throw new Error("Issue containment requires an attributed issue-local failure");
   }
 
+  // Containment is a durable, idempotent transition. A retry after the first
+  // write must not consume another requested slot or notify the operator again.
+  const alreadyContained = state.deferredIssues.find((item) => item.issueNumber === issueNumber);
+
   let leaseReleased = options.leaseReleased === true;
   const authority = options.authority ?? new GitHubIssueLeaseAuthority(coordinationCwd);
   const lease = options.lease ?? (state.activeLease
@@ -174,18 +181,27 @@ export async function containIssueLocalFailure(
     throw new Error(`Cannot safely release issue #${issueNumber} lease; preserving ownership evidence and stopping globally`);
   }
 
+  if (alreadyContained && !state.activeLease && !state.activeIssueNumber && !state.activeWorkspace) {
+    return state;
+  }
+
+  const newContainment = !alreadyContained;
   const paths = failure.paths.length ? ` Paths: ${failure.paths.join(", ")}.` : "";
-  const reason = `Issue #${issueNumber} blocked for this run: ${failure.reason}.${paths} Workspace preserved; lease ${leaseReleased ? "released" : "not held"}.`;
+  const reason = alreadyContained?.reason || `Issue #${issueNumber} blocked for this run: ${failure.reason}.${paths} Workspace preserved; lease ${leaseReleased ? "released" : "not held"}.`;
   const deferredAt = loopNow();
   const disposition: LoopState = {
     ...state,
     status: "running",
     workerResultMissing: undefined,
-    remainingIssues: Math.max(0, state.remainingIssues - 1),
-    deferredIssues: [
-      ...state.deferredIssues.filter((item) => item.issueNumber !== issueNumber),
-      { issueNumber, reason, deferredAt, kind: "blocked" },
-    ],
+    remainingIssues: newContainment
+      ? Math.max(0, state.remainingIssues - 1)
+      : state.remainingIssues,
+    deferredIssues: newContainment
+      ? [
+          ...state.deferredIssues.filter((item) => item.issueNumber !== issueNumber),
+          { issueNumber, reason, deferredAt, kind: "blocked" },
+        ]
+      : state.deferredIssues,
     issueMetrics: markIssueDisposition(state.issueMetrics, issueNumber, "blocked", reason),
     lastOutcome: "block_issue",
     lastReason: reason,
@@ -203,34 +219,36 @@ export async function containIssueLocalFailure(
     updatedAt: loopNow(),
   };
   writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), cleared);
-  recordLifecycleEvent(coordinationCwd, {
-    event: "issue_contained",
-    issueNumber,
-    runId: state.runId,
-    outcome: "recovered",
-    reasonCode: failure.code,
-    worktree: state.activeWorkspace,
-    containment: {
-      scope: "issue-local",
-      stage: failure.stage,
-      code: failure.code,
-      paths: failure.paths,
-      leaseReleased,
-    },
-  });
-  await reportRuntimeFailure(coordinationCwd, {
-    stage: `issue-containment:${failure.stage}`,
-    category: "integrity",
-    severity: "error",
-    outcome: "recovered",
-    code: "issue_contained",
-    summary: reason,
-    issueNumber,
-    runId: state.runId,
-    diagnosticRefs: failure.paths,
-    diagnostic: { phase: failure.stage },
-  });
-  notifyLive(reason + " Continuing with the next eligible issue.", "warning");
+  if (newContainment) {
+    recordLifecycleEvent(coordinationCwd, {
+      event: "issue_contained",
+      issueNumber,
+      runId: state.runId,
+      outcome: "recovered",
+      reasonCode: failure.code,
+      worktree: state.activeWorkspace,
+      containment: {
+        scope: "issue-local",
+        stage: failure.stage,
+        code: failure.code,
+        paths: failure.paths,
+        leaseReleased,
+      },
+    });
+    await reportRuntimeFailure(coordinationCwd, {
+      stage: `issue-containment:${failure.stage}`,
+      category: "integrity",
+      severity: "error",
+      outcome: "recovered",
+      code: "issue_contained",
+      summary: reason,
+      issueNumber,
+      runId: state.runId,
+      diagnosticRefs: failure.paths,
+      diagnostic: { phase: failure.stage },
+    });
+    notifyLive(reason + " Continuing with the next eligible issue.", "warning");
+  }
   return cleared;
 }
 
@@ -325,23 +343,35 @@ export async function claimLoopIssue(
       deferredIssues: state.deferredIssues.map((item) => item.issueNumber),
       leaseAuthority: authority,
     });
-    issueNumber = Number.parseInt(
-      shortlist.text?.match(/#(\d+)/)?.[1] || "",
-      10,
-    );
+    if (shortlist.outcome === "unavailable") {
+      throw new CandidateDiscoveryError(shortlist.reason || "authority query failed");
+    }
+    if (shortlist.outcome === "exhausted") {
+      const exhausted: LoopState = {
+        ...state,
+        status: "idle",
+        activeIssueNumber: undefined,
+        activeWorkspace: undefined,
+        activeLease: undefined,
+        updatedAt: loopNow(),
+        lastOutcome: "idle",
+        lastReason: "No eligible autonomous issues remain after current-run exclusions.",
+      };
+      writeJsonAtomic(loopStateFile(cwd, state.runId), exhausted);
+      return exhausted;
+    }
+    issueNumber = shortlist.candidateIssueNumber;
   }
-  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
-    throw new PlanAuthorityError(
-      "unowned",
-      "No issue identity was resolved before loop execution",
-    );
+  if (typeof issueNumber !== "number" || !Number.isSafeInteger(issueNumber) || issueNumber < 1) {
+    throw new CandidateDiscoveryError("authoritative shortlist did not include a valid issue identity");
   }
+  const resolvedIssueNumber = issueNumber;
 
   const now = new Date();
   const lease = await claimIssueLease(
     authority,
     {
-      issueNumber,
+      issueNumber: resolvedIssueNumber,
       agent: "pi-next",
       runId: state.runId,
       sessionId: `${state.runId}-loop`,
@@ -355,14 +385,14 @@ export async function claimLoopIssue(
   );
   let workspace: string;
   try {
-    workspace = await ensureIssueWorktree(cwd, issueNumber, recordLifecycleEvent);
-    await quarantineInheritedArtifacts(cwd, workspace, issueNumber, state.runId);
+    workspace = await ensureIssueWorktree(cwd, resolvedIssueNumber, recordLifecycleEvent);
+    await quarantineInheritedArtifacts(cwd, workspace, resolvedIssueNumber, state.runId);
     await quarantineLegacyRootArtifacts(cwd, state.runId);
-    await reconcileWorkspacePlan(workspace, issueNumber, {
+    await reconcileWorkspacePlan(workspace, resolvedIssueNumber, {
       runId: state.runId,
       authority: workAuthorityOverride,
     });
-    validateWorkspacePlan(workspace, issueNumber, { runId: state.runId });
+    validateWorkspacePlan(workspace, resolvedIssueNumber, { runId: state.runId });
   } catch (error) {
     try {
       await releaseIssueLease(authority, lease, {
@@ -371,7 +401,7 @@ export async function claimLoopIssue(
       });
     } catch (releaseError) {
       throw new IssueHandoffError({
-        issueNumber,
+        issueNumber: resolvedIssueNumber,
         stage: "worktree-handoff",
         lease,
         leaseReleased: false,
@@ -383,7 +413,7 @@ export async function claimLoopIssue(
       });
     }
     throw new IssueHandoffError({
-      issueNumber,
+      issueNumber: resolvedIssueNumber,
       stage: "worktree-handoff",
       lease,
       leaseReleased: true,
@@ -394,7 +424,7 @@ export async function claimLoopIssue(
   const next: LoopState = {
     ...state,
     coordinationCwd: cwd,
-    activeIssueNumber: issueNumber,
+    activeIssueNumber: resolvedIssueNumber,
     activeWorkspace: workspace,
     activeLease: lease,
     updatedAt: loopNow(),
@@ -534,6 +564,9 @@ export async function runOwnedIssueCycle(
     throw error;
   }
   state = prepared;
+  // Candidate exhaustion is a normal terminal queue state. Do not enter the
+  // worker controller after claim has durably settled the run as idle.
+  if (prepared.status !== "running") return prepared;
   {
       const heartbeat = prepared.activeLease
         ? startIssueLeaseHeartbeat(

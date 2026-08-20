@@ -79,7 +79,12 @@ function boundedWidth(width: number | undefined): number {
 
 /** Keep terminal reasons useful without copying the full diagnostic transcript. */
 function terminalReason(state: LoopState): string | undefined {
-  if (state.status === "completed" || state.status === "idle") return undefined;
+  if (state.status === "completed") return undefined;
+  if (state.status === "idle") {
+    return /no eligible|exhaust/i.test(state.lastReason || "")
+      ? "no eligible candidates"
+      : undefined;
+  }
   const raw = state.lastReason?.replace(/\s+/g, " ").trim();
   if (!raw) {
     if (state.status === "interrupted" || state.status === "stopped") return "resume available";
@@ -136,7 +141,9 @@ export function renderAutoProgress(
   const barSlots = width < 128 ? 8 : 18;
   const primary = `Pi-next ${version}auto ${progressBar(percent, barSlots)} ${settled}/${requested} settled ${percent}%`;
   const current = (issue ? ` · ${issue} · ${phase}` : ` · ${phase}`) + (reason ? ` · ${reason}` : "");
-  const counts = ` · ✓${completed} ↷${deferred} · ${remaining} remaining`;
+  const counts = state.status === "idle"
+    ? ` · ✓${completed} ↷${deferred} · ${remaining} capacity remaining`
+    : ` · ✓${completed} ↷${deferred} · ${remaining} remaining`;
   const diagnostics = [recovery, retry, session, step, elapsed]
     .filter(Boolean).join(" · ");
   const full = primary + current + counts + (diagnostics ? ` · ${diagnostics}` : "");

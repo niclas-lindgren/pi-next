@@ -84,6 +84,10 @@ test("issue-local plan authority failure is contained without deleting the workt
     assert.equal(readLoopState(root, initial.runId)?.remainingIssues, 1);
     assert.match(readLoopState(root, initial.runId)?.lastReason || "", /#609 blocked/);
     assert.equal(await readFile(loopStateFile(root, initial.runId), "utf8").then((text) => text.includes('"activeLease"')), false);
+
+    const repeated = await containIssueLocalFailure(root, contained, classification, { authority });
+    assert.equal(repeated.remainingIssues, contained.remainingIssues);
+    assert.deepEqual(repeated.deferredIssues, contained.deferredIssues);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -24,9 +24,26 @@ interface CandidateIssue {
   labels?: Array<{ name?: string }>;
 }
 
+export type CandidateShortlistOutcome = "candidate" | "exhausted" | "unavailable";
+
 export interface CandidateShortlist {
   text?: string;
   exhausted: boolean;
+  /** Explicitly distinguishes a verified empty queue from an unsafe query. */
+  outcome: CandidateShortlistOutcome;
+  /** The first candidate in configured priority order, when one exists. */
+  candidateIssueNumber?: number;
+  reason?: string;
+}
+
+/** Discovery failures must not be mistaken for an empty authoritative queue. */
+export class CandidateDiscoveryError extends Error {
+  readonly code = "candidate_discovery_unavailable";
+
+  constructor(readonly reason: string) {
+    super(`Candidate discovery unavailable: ${reason}`);
+    this.name = "CandidateDiscoveryError";
+  }
 }
 
 export interface CandidateShortlistOptions {
@@ -192,13 +209,20 @@ export async function candidateShortlist(
   const localDeferred = deferredIssueVersions(cwd);
   // Deferred freshness is authoritative: do not permanently exclude a parked
   // issue from the set before checking whether GitHub has advanced it.
+  // Current-run containment is a hard exclusion. It is intentionally separate
+  // from local deferred freshness: an issue blocked in this bounded run must
+  // not be selected again until the run ends, even if authority still lists it.
+  const currentRunDeferred = new Set(options.deferredIssues || []);
   const excluded = new Set([
     ...(options.completedIssues || []),
+    ...currentRunDeferred,
     ...localArchived,
   ]);
   const groups: string[] = [];
+  let firstCandidateIssueNumber: number | undefined;
   const excludedOpen: number[] = [];
   const deferredOpen: number[] = [];
+  const currentRunDeferredOpen: number[] = [];
   try {
     options.onStatus?.(`Querying ${authority.name} work items`);
     const queried = (await authority.listCandidates(config))
@@ -206,6 +230,7 @@ export async function candidateShortlist(
       .filter((issue): issue is CandidateIssue => Boolean(issue));
     for (const issue of queried) {
       if (localArchived.has(issue.number)) excludedOpen.push(issue.number);
+      if (currentRunDeferred.has(issue.number)) currentRunDeferredOpen.push(issue.number);
       if (deferredIssueStillUnchanged(issue, localDeferred)) deferredOpen.push(issue.number);
     }
     options.onStatus?.("Checking ownership leases");
@@ -238,6 +263,7 @@ export async function candidateShortlist(
         })
         .slice(0, wanted);
       if (!issues.length) continue;
+      firstCandidateIssueNumber ??= issues[0].number;
       groups.push(
         `${priorityName}:\n${issues.map((issue) => {
           const labels = labelNames(issue).filter((label) => /^(status:|type:)/.test(label)).join(", ");
@@ -245,9 +271,10 @@ export async function candidateShortlist(
         }).join("\n")}`,
       );
     }
-  } catch {
+  } catch (error) {
     // Never trust a partial authority view: a failed query could otherwise hide urgent work.
-    return { exhausted: false };
+    const reason = error instanceof Error ? error.message : String(error);
+    return { exhausted: false, outcome: "unavailable", reason };
   }
 
   const notes: string[] = [];
@@ -257,6 +284,14 @@ export async function candidateShortlist(
       `Locally archived open issues omitted from this shortlist: ${archivedNotes
         .map((issue) => `#${issue}`)
         .join(", ")}. Do not reselect them unless live GitHub comments or labels show new actionable requirements after archive.`,
+    );
+  }
+  const currentRunNotes = [...new Set(currentRunDeferredOpen)].sort((left, right) => left - right);
+  if (currentRunNotes.length) {
+    notes.push(
+      `Issues contained earlier in this run omitted from the shortlist: ${currentRunNotes
+        .map((issue) => `#${issue}`)
+        .join(", ")}. They are not eligible for reselection during this run.`,
     );
   }
   const deferredNotes = [...new Set(deferredOpen)].sort((left, right) => left - right);
@@ -270,10 +305,12 @@ export async function candidateShortlist(
   const note = notes.join("\n");
 
   if (!groups.length) {
-    return { text: note || undefined, exhausted: true };
+    return { text: note || undefined, exhausted: true, outcome: "exhausted" };
   }
   return {
     text: [groups.join("\n\n"), note].filter(Boolean).join("\n\n"),
     exhausted: false,
+    outcome: "candidate",
+    candidateIssueNumber: firstCandidateIssueNumber,
   };
 }
