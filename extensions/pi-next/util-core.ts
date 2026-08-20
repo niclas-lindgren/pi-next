@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { configuredPath, loadPiNextConfig } from "../../src/coordination/config.ts";
 import { promisify } from "node:util";
@@ -194,12 +195,27 @@ export type IssueWorkerRunner = (
   options?: IssueWorkerOptions,
 ) => Promise<IssueWorkerResult>;
 
+/**
+ * Keep child workers independent from project package reconciliation. A worker
+ * starts in an issue worktree, where Pi may otherwise see a project
+ * `.pi/settings.json` and try to install a stale pinned package before it can
+ * run the already-loaded extension (for example, `git checkout <missing
+ * commit>`). The extension that launched the worker is an immutable local path,
+ * so explicitly loading it is both safer and reproducible.
+ */
+function workerExtensionPath(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "pi-next.ts");
+}
+
 export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => {
   const executable = options.executable ?? process.execPath;
   const entrypoint = options.executableArgs ?? [process.argv[1]];
   if (!entrypoint[0]) {
     return Promise.reject(new Error("Unable to determine the Pi worker entrypoint"));
   }
+  const isolatedExtensionArgs = options.executableArgs
+    ? []
+    : ["--no-approve", "--no-extensions", "--extension", workerExtensionPath()];
   const dispatchArgs = options.dispatch?.modelPolicy?.model
     ? ["--model", options.dispatch.modelPolicy.model]
     : [];
@@ -208,6 +224,7 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
   }
   const child = spawn(executable, [
     ...entrypoint,
+    ...isolatedExtensionArgs,
     ...dispatchArgs,
     ...(options.readOnly ? ["--no-tools"] : []),
     "--print",
