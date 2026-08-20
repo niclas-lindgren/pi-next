@@ -712,6 +712,20 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 export type WorktreeRecoveryDetails = Record<string, string>;
 
+/**
+ * Ownership proof carried through legacy-worktree recovery. A recovered
+ * checkout is only allowed to replace the canonical checkout while this
+ * exact owner is still authoritative and fresh.
+ */
+export interface WorktreeRecoveryOwnership {
+  lease: IssueLease;
+  authority: Pick<IssueLeaseAuthority, "read">;
+}
+
+export interface EnsureIssueWorktreeOptions {
+  ownership?: WorktreeRecoveryOwnership;
+}
+
 export class WorktreeRecoveryError extends Error {
   readonly code = "worktree_recovery_failed";
   constructor(
@@ -825,6 +839,7 @@ async function salvageDivergentLegacyWorktree(
   legacyTip: string,
   mainTip: string,
   recordEvent?: IssueLifecycleRecorder,
+  ownership?: WorktreeRecoveryOwnership,
 ): Promise<string> {
   const mergeBase = await git(cwd, ["merge-base", mainTip, legacyTip]).catch(() => undefined);
   if (!mergeBase) {
@@ -914,6 +929,85 @@ async function salvageDivergentLegacyWorktree(
     }
 
     // The replay is fully validated before the legacy checkout is moved. The
+    // final authority read is intentionally after replay/validation and
+    // immediately before adoption. In particular, do not infer ownership
+    // from the lease that started recovery: another worker may have taken it
+    // over while cherry-picks were running.
+    const owner = ownership?.lease;
+    let liveOwner: IssueLease | undefined;
+    let authorityReason = "ownership_missing";
+    if (ownership) {
+      try {
+        liveOwner = await ownership.authority.read(issueNumber);
+        const matches = !!liveOwner &&
+          issueLeaseMatchesOwner(liveOwner, ownership.lease) &&
+          isIssueLeaseFresh(liveOwner, new Date());
+        authorityReason = matches ? "owner_unchanged" : "owner_changed";
+        recordEvent?.(cwd, {
+          event: "legacy_worktree_adoption_authority_checked",
+          issueNumber,
+          runId: ownership.lease.runId,
+          agent: ownership.lease.agent,
+          branch: canonicalBranch,
+          worktree: `.worktrees/issue-${issueNumber}`,
+          outcome: matches ? "success" : "rejected",
+          reasonCode: authorityReason,
+        });
+        if (!matches) {
+          throw new WorktreeRecoveryError(issueNumber, "migrate", new Error("lease ownership changed before legacy-worktree adoption"), {
+            reason: "legacy_salvage_authority_changed",
+            legacyBranch,
+            legacyTip,
+            mainTip,
+            recoveryBranch,
+            initiatingRunId: ownership.lease.runId,
+            initiatingAgent: ownership.lease.agent,
+            observedRunId: liveOwner?.runId || "missing",
+            observedAgent: liveOwner?.agent || "missing",
+          });
+        }
+      } catch (error) {
+        if (error instanceof WorktreeRecoveryError) throw error;
+        recordEvent?.(cwd, {
+          event: "legacy_worktree_adoption_authority_checked",
+          issueNumber,
+          runId: owner?.runId || `salvage-${token}`,
+          agent: owner?.agent,
+          branch: canonicalBranch,
+          worktree: `.worktrees/issue-${issueNumber}`,
+          outcome: "failure",
+          reasonCode: "authority_unavailable",
+        });
+        throw new WorktreeRecoveryError(issueNumber, "migrate", error, {
+          reason: "legacy_salvage_authority_unavailable",
+          legacyBranch,
+          legacyTip,
+          mainTip,
+          recoveryBranch,
+          initiatingRunId: owner?.runId || "unknown",
+          initiatingAgent: owner?.agent || "unknown",
+        });
+      }
+    } else {
+      recordEvent?.(cwd, {
+        event: "legacy_worktree_adoption_authority_checked",
+        issueNumber,
+        runId: `salvage-${token}`,
+        branch: canonicalBranch,
+        worktree: `.worktrees/issue-${issueNumber}`,
+        outcome: "failure",
+        reasonCode: authorityReason,
+      });
+      throw new WorktreeRecoveryError(issueNumber, "migrate", new Error("cannot prove lease ownership before legacy-worktree adoption"), {
+        reason: "legacy_salvage_authority_unavailable",
+        legacyBranch,
+        legacyTip,
+        mainTip,
+        recoveryBranch,
+      });
+    }
+
+    // The replay is fully validated before the legacy checkout is moved. The
     // old branch remains intact; its clean worktree is retained as evidence at
     // a deterministic preservation path while the canonical path is rebuilt.
     const preserved = preservationPath(path, legacyTip);
@@ -969,6 +1063,7 @@ async function migrateAttachedLegacyWorktree(
   legacyBranch: string,
   canonicalBranch: string,
   recordEvent?: IssueLifecycleRecorder,
+  ownership?: WorktreeRecoveryOwnership,
 ): Promise<string> {
   if (!isLegacyIssueBranch(legacyBranch, issueNumber)) {
     throw new WorktreeRecoveryError(
@@ -1022,6 +1117,7 @@ async function migrateAttachedLegacyWorktree(
         legacyTip,
         mainTip,
         recordEvent,
+        ownership,
       );
     }
     throw new WorktreeRecoveryError(
@@ -1088,6 +1184,7 @@ export async function ensureIssueWorktree(
   cwd: string,
   issueNumber: number,
   recordEvent?: IssueLifecycleRecorder,
+  options: EnsureIssueWorktreeOptions = {},
 ): Promise<string> {
   const identity = issueWorkspaceIdentity(issueNumber);
   const path = resolve(cwd, identity.worktree);
@@ -1105,7 +1202,7 @@ export async function ensureIssueWorktree(
         throw new WorktreeRecoveryError(issueNumber, "inspect", error);
       }
       if (attachedBranch !== branch) {
-        return migrateAttachedLegacyWorktree(cwd, issueNumber, path, attachedBranch, branch, recordEvent);
+        return migrateAttachedLegacyWorktree(cwd, issueNumber, path, attachedBranch, branch, recordEvent, options.ownership);
       }
       return path;
     }

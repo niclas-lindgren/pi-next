@@ -277,6 +277,7 @@ export function registerUpdateTool(pi: ExtensionAPI) {
           archivedPlan: archived.archive,
           hash: archived.hash,
           issue: archived.issue,
+          authorityFingerprint: archived.authorityFingerprint,
         },
       };
     },

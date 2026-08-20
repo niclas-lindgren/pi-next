@@ -295,6 +295,7 @@ export async function claimLoopIssue(
         cwd,
         activeIssueNumber,
         recordLifecycleEvent,
+        { ownership: { lease, authority } },
       );
       if (workspace !== activeWorkspace) {
         throw new Error(
@@ -385,7 +386,12 @@ export async function claimLoopIssue(
   );
   let workspace: string;
   try {
-    workspace = await ensureIssueWorktree(cwd, resolvedIssueNumber, recordLifecycleEvent);
+    workspace = await ensureIssueWorktree(
+      cwd,
+      resolvedIssueNumber,
+      recordLifecycleEvent,
+      { ownership: { lease, authority } },
+    );
     await quarantineInheritedArtifacts(cwd, workspace, resolvedIssueNumber, state.runId);
     await quarantineLegacyRootArtifacts(cwd, state.runId);
     await reconcileWorkspacePlan(workspace, resolvedIssueNumber, {

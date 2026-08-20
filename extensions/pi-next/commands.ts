@@ -234,6 +234,7 @@ async function claimAndAttachIssueWorkspace(
       coordinationCwd,
       claimedLease.issueNumber,
       recordLifecycleEvent,
+      { ownership: { lease: claimedLease, authority: leaseAuthority } },
     );
     await quarantineInheritedArtifacts(
       coordinationCwd,

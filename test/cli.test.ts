@@ -59,7 +59,7 @@ test("--agent/--run/--session are required for owner-scoped commands", async () 
   assert.match((result as { message: string }).message, /--agent/);
 });
 
-test("finalize requires --candidate and --issue-updated-at", async () => {
+test("finalize requires candidate, authority fingerprint, and verification timestamp", async () => {
   const missingCandidate = await runCoordinationCli([
     "finalize",
     "--issue",
@@ -93,6 +93,25 @@ test("finalize requires --candidate and --issue-updated-at", async () => {
   assert.equal(missingUpdatedAt.ok, false);
   assert.equal((missingUpdatedAt as { code: string }).code, "INVALID_ARGS");
   assert.match((missingUpdatedAt as { message: string }).message, /--issue-updated-at/);
+
+  const missingFingerprint = await runCoordinationCli([
+    "finalize",
+    "--issue",
+    "1",
+    "--agent",
+    "claude",
+    "--run",
+    "run-1",
+    "--session",
+    "session-1",
+    "--candidate",
+    "a".repeat(40),
+    "--issue-updated-at",
+    "2026-08-19T00:00:00Z",
+  ]);
+  assert.equal(missingFingerprint.ok, false);
+  assert.equal((missingFingerprint as { code: string }).code, "INVALID_ARGS");
+  assert.match((missingFingerprint as { message: string }).message, /--authority-fingerprint/);
 });
 
 test("refuses to operate on one issue's identity from inside a different issue's worktree", async () => {

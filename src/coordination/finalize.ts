@@ -60,7 +60,8 @@ export type FinalizeErrorCode =
   | "UNSAFE_ROOT"
   | "ROOT_BUSY"
   | "PROMOTION_RACE"
-  | "STALE_AUTHORITY";
+  | "STALE_AUTHORITY"
+  | "MISSING_AUTHORITY_EVIDENCE";
 
 export class FinalizeError extends Error {
   constructor(
@@ -85,11 +86,11 @@ export interface FinalizeInput {
   /** The live work item's `updatedAt` at the moment verification was performed. */
   issueUpdatedAt: string;
   /**
-   * Exact authority fingerprint bound to successful final verification. When
-   * present, this is the mandatory close fence; the timestamp remains only a
-   * compatibility guard for older callers that predate fingerprint evidence.
+   * Exact authority fingerprint bound to successful final verification. This
+   * is mandatory evidence for authoritative completion; callers must re-run
+   * verification/reconciliation rather than downgrade to timestamp freshness.
    */
-  verifiedAuthorityFingerprint?: string;
+  verifiedAuthorityFingerprint: string;
   /**
    * Required to close a retry after a prior `requiresReverification: true`
    * result (#20): the exact integrated `main` SHA that result reported as
@@ -215,6 +216,14 @@ export async function finalizeIssue(
   input: FinalizeInput,
 ): Promise<FinalizeResult> {
   requireAuthorityCapability(workAuthority, "completion");
+
+  if (!input.verifiedAuthorityFingerprint?.trim()) {
+    throw new FinalizeError(
+      "MISSING_AUTHORITY_EVIDENCE",
+      `Cannot finalize issue #${input.issueNumber} without the authority fingerprint recorded by successful final verification; re-verify and retry`,
+      { issueNumber: String(input.issueNumber), reason: "verified_fingerprint_missing" },
+    );
+  }
 
   const branch = `agent/issue-${input.issueNumber}`;
 
@@ -407,9 +416,10 @@ export async function finalizeIssue(
     );
   }
   const liveFingerprint = workAuthority.fingerprint(item);
-  const authorityChanged = input.verifiedAuthorityFingerprint
-    ? liveFingerprint !== input.verifiedAuthorityFingerprint
-    : (item.updatedAt ?? "") !== input.issueUpdatedAt;
+  // Never fall back to updatedAt here. A timestamp is not an identity/version
+  // for the full authority surface (notably comments and labels), so missing
+  // verification evidence must have been rejected before any integration.
+  const authorityChanged = liveFingerprint !== input.verifiedAuthorityFingerprint;
   if (authorityChanged) {
     return {
       ok: true,

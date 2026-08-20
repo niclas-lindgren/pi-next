@@ -141,6 +141,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(601, "2026-08-19T00:00:00Z")),
     });
 
     assert.equal(result.closed, true);
@@ -178,6 +179,7 @@ describe("finalizeIssue", () => {
         sessionId: "session-1",
         candidateSha,
         issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(602, "2026-08-19T00:00:00Z")),
       }),
       "LEASE_LOST",
     );
@@ -204,6 +206,7 @@ describe("finalizeIssue", () => {
         sessionId: "session-1",
         candidateSha,
         issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(603, "2026-08-19T00:00:00Z")),
       }),
       "LEASE_LOST",
     );
@@ -225,6 +228,7 @@ describe("finalizeIssue", () => {
         sessionId: "session-1",
         candidateSha: "0".repeat(40),
         issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(604, "2026-08-19T00:00:00Z")),
       }),
       "CANDIDATE_STALE",
     );
@@ -249,6 +253,7 @@ describe("finalizeIssue", () => {
         sessionId: "session-1",
         candidateSha,
         issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(605, "2026-08-19T00:00:00Z")),
       }),
       "UNSAFE_ROOT",
     );
@@ -271,6 +276,7 @@ describe("finalizeIssue", () => {
         sessionId: "session-1",
         candidateSha,
         issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(606, "2026-08-19T00:00:00Z")),
       }),
       "ROOT_BUSY",
     );
@@ -294,6 +300,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z", // stale verification-time snapshot
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(607, "2026-08-19T00:00:00Z")),
     });
 
     assert.equal(result.closed, false);
@@ -374,6 +381,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(608, "2026-08-19T00:00:00Z")),
     });
 
     // The merge/push still lands durably -- main integration isn't held
@@ -399,6 +407,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(608, "2026-08-19T00:00:00Z")),
     });
     assert.equal(retryWithoutProof.requiresReverification, true);
     assert.equal(retryWithoutProof.closed, false);
@@ -414,6 +423,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(608, "2026-08-19T00:00:00Z")),
       verifiedIntegratedMain: result.mergeSha,
     });
     assert.equal(retry.requiresReverification, false);
@@ -448,6 +458,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(620, "2026-08-19T00:00:00Z")),
     });
     assert.equal(first.requiresReverification, true);
     const m1 = first.mergeSha;
@@ -471,6 +482,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(620, "2026-08-19T00:00:00Z")),
       verifiedIntegratedMain: m1,
     });
     assert.equal(retry.closed, false);
@@ -489,6 +501,7 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(620, "2026-08-19T00:00:00Z")),
       verifiedIntegratedMain: retry.mergeSha,
     });
     assert.equal(finalRetry.requiresReverification, false);
@@ -519,12 +532,35 @@ describe("finalizeIssue", () => {
       sessionId: "session-1",
       candidateSha,
       issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(609, "2026-08-19T00:00:00Z")),
     });
 
     assert.equal(result.closed, false);
     assert.equal(result.leaseLostAfterMerge, true);
     // The merge still landed durably -- only closure was withheld.
     assert.equal(git(origin, ["rev-parse", "main"]), result.mergeSha);
+  });
+
+  test("refuses authoritative completion when verified fingerprint evidence is missing", async () => {
+    const { root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 612, "feature.txt");
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(612));
+    const workAuthority = new InMemoryWorkAuthority([workItem(612, "2026-08-19T00:00:00Z")]);
+
+    await expectRejects(
+      finalizeIssue(leaseAuthority, workAuthority, {
+        cwd: root,
+        issueNumber: 612,
+        agent: "claude",
+        runId: "run-1",
+        sessionId: "session-1",
+        candidateSha,
+        issueUpdatedAt: "2026-08-19T00:00:00Z",
+      } as Parameters<typeof finalizeIssue>[2]),
+      "MISSING_AUTHORITY_EVIDENCE",
+    );
+    assert.equal(git(root, ["log", "-1", "--format=%s", "main"]), "baseline");
   });
 
   test("fails closed when the work authority does not support completion", async () => {
@@ -545,6 +581,7 @@ describe("finalizeIssue", () => {
         sessionId: "session-1",
         candidateSha,
         issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: noCompletionAuthority.fingerprint(workItem(610, "2026-08-19T00:00:00Z")),
       }),
       /completion/,
     );

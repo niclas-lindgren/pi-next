@@ -44,6 +44,7 @@ export type IssueLifecycleEventName =
   | "legacy_branch_adopted"
   | "legacy_worktree_salvage_started"
   | "legacy_worktree_salvaged"
+  | "legacy_worktree_adoption_authority_checked"
   | "legacy_worktree_migrated"
   | "project_status_sync_attempted"
   | "project_status_sync_failed"
