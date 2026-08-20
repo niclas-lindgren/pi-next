@@ -24,8 +24,12 @@ npm run typecheck
 npm test
 ```
 
-For local release guardrails, install the optional pre-push hook with
-`npm run hooks:install`. Releases are prepared with
+Install the local release/validation hook with `npm run hooks:install`. A
+push to `main` containing package code without a version bump automatically
+runs `make release` (patch by default), creates the release commit and tag, and
+stops the original push safely; rerun `git push --follow-tags`. Set
+`PI_NEXT_RELEASE_LEVEL=minor` or `major` before the push when appropriate.
+Releases can also be prepared explicitly with `make release` or
 `npm run release -- patch|minor|major`; use `--push` and `--publish` explicitly
 when desired. Tests must use temporary repositories and bare remotes for every Git mutation.
 They must not push to `origin`, the pi-next checkout, or an arbitrary consumer

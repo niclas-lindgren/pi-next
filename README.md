@@ -215,25 +215,29 @@ remotes; they never use a real hosted remote.
 
 ### Local release automation
 
-No hosted CI is required for releases. Install the repository's optional local
-pre-push validation hook once:
+No hosted CI is required for releases. Install the repository's local
+pre-push hook once:
 
 ```sh
 npm run hooks:install
 ```
 
-The hook validates pushes to `main` and warns when package code changes without
-a version bump. Prepare a checked, tagged release locally with:
+The hook validates pushes to `main`. When a main push contains package code
+without a version bump, it runs `make release` (a patch release by default),
+creates the release commit and tag, and safely stops the original push. Rerun
+the push with `--follow-tags` after choosing a different level with
+`PI_NEXT_RELEASE_LEVEL=minor|major` if needed:
 
 ```sh
-npm run release -- patch              # test, bump, commit, and tag
-npm run release -- minor --push       # also push main and the tag
+make release                         # test, bump, commit, and tag (patch)
+make release RELEASE_LEVEL=minor     # prepare a minor release
+npm run release -- patch --push       # explicitly push main and the tag
 npm run release -- patch --push --publish  # also publish to npm
 ```
 
 Use `--dry-run` to preview the next version. Releases must be prepared from a
-clean `main` checkout. Ordinary pushes remain ordinary commits; version bumps
-are intentional release boundaries.
+clean `main` checkout. Ordinary documentation-only pushes remain ordinary
+commits; package changes on `main` become intentional release boundaries.
 
 ## Versioning and compatibility
 
