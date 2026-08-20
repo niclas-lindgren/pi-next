@@ -8,7 +8,7 @@ RELEASE_FLAGS ?=
 help:
 	@printf '%s\n' \
 	  'make check                         Run typecheck and tests' \
-	  'make release [RELEASE_LEVEL=...]  Test, bump, commit, and tag a release' \
+	  'make release [RELEASE_LEVEL=...]  Test, bump, commit, tag, and push a release' \
 	  'make release-patch                 Prepare the next patch release' \
 	  'make release-minor                 Prepare the next minor release' \
 	  'make release-major                 Prepare the next major release'
@@ -18,7 +18,7 @@ check:
 	npm test
 
 release:
-	npm run release -- $(RELEASE_LEVEL) $(RELEASE_FLAGS)
+	npm run release -- $(RELEASE_LEVEL) --push $(RELEASE_FLAGS)
 
 release-patch:
 	$(MAKE) release RELEASE_LEVEL=patch
