@@ -294,6 +294,11 @@ async function applyResult(
     const deferred: LoopState = {
       ...state,
       workerResultMissing: undefined,
+      // Deferred and blocked issues are settled for this bounded run. Keeping
+      // remainingIssues aligned with the durable disposition makes queue
+      // progress truthful and prevents a run of only deferred issues from
+      // consuming its entire step budget.
+      remainingIssues: Math.max(0, state.remainingIssues - 1),
       settledStep: state.step,
       deferredIssues: [
         ...state.deferredIssues.filter((item) => item.issueNumber !== issue),

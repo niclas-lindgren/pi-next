@@ -27,6 +27,7 @@ import type {
   GenerationTeardownDiagnostics,
   IssueWorkerRuntime,
 } from "./util-core.ts";
+import type { WorkerWorkLogEvent, WorkerWorkLogPhase } from "./worker-activity.ts";
 import type { WorkerWorkLogSink } from "./work-log.ts";
 import { runOwnedIssueCycle } from "./loop.ts";
 
@@ -101,6 +102,8 @@ export interface SupervisorStatus {
   lastActivityAt: string | null;
   /** Elapsed time since `workerStartedAt`, only meaningful while `workerAlive`. */
   elapsedMs: number | null;
+  /** Best-effort lifecycle phase from the structured worker activity stream. */
+  workerPhase?: WorkerWorkLogPhase;
 }
 
 export interface RecoveryOutcome {
@@ -120,6 +123,7 @@ function buildSupervisorStatus(
   phase: SupervisorPhase,
   ownedGeneration?: ExtensionGeneration | null,
   workerRuntime?: IssueWorkerRuntime | null,
+  workerPhase?: WorkerWorkLogPhase,
 ): SupervisorStatus {
   const persisted = runId ? readLoopState(cwd, runId) : null;
   // A generation is only a lifecycle boundary. It is not evidence that a
@@ -150,6 +154,7 @@ function buildSupervisorStatus(
       workerAlive && Number.isFinite(startedMs)
         ? Math.max(0, Date.now() - startedMs)
         : null,
+    workerPhase: workerAlive ? workerPhase : undefined,
   };
 }
 
@@ -223,6 +228,7 @@ export class ForegroundSupervisor {
 
   private readonly runtime: SupervisorRuntime;
   private workerRuntime: IssueWorkerRuntime | null = null;
+  private workerPhase: WorkerWorkLogPhase | undefined;
 
   constructor(
     private readonly ctx: ExtensionCommandContext,
@@ -292,6 +298,7 @@ export class ForegroundSupervisor {
       this.phase,
       this.runtime.currentGeneration(),
       this.workerRuntime,
+      this.workerPhase,
     );
   }
 
@@ -312,11 +319,16 @@ export class ForegroundSupervisor {
       await withSupervisorRuntime(this.runtime, async () => {
         let state = initial;
         while (state.status === "running" && state.remainingIssues > 0) {
+          this.workerPhase = undefined;
+          this.workerRuntime = null;
           state = await runOwnedIssueCycle(
             this.ctx,
             state,
             this.runtime,
-            this.onWorkLog,
+            (event: WorkerWorkLogEvent) => {
+              this.workerPhase = event.phase;
+              this.onWorkLog?.(event);
+            },
             (runtime) => {
               this.workerRuntime = runtime;
               this.onWorkerState?.(runtime);
@@ -324,10 +336,27 @@ export class ForegroundSupervisor {
           );
         }
       });
+      // The issue-cycle returns at the queue boundary, before another
+      // controller turn can normalize a zero remaining count. Persist the
+      // terminal state here so the footer and later status queries agree.
+      const settled = readLoopState(this.ctx.cwd, this.runId);
+      if (settled?.status === "running" && settled.remainingIssues <= 0) {
+        writeJsonAtomic(loopStateFile(this.ctx.cwd, this.runId), {
+          ...settled,
+          status: "completed",
+          activeIssueNumber: undefined,
+          activeWorkspace: undefined,
+          activeLease: undefined,
+          updatedAt: loopNow(),
+          lastReason: "Requested issue count completed",
+        });
+      }
       this.phase = "settled";
     } catch (error) {
       this.phase = "aborted";
       throw error;
+    } finally {
+      liveSupervisors.delete(supervisorKey(this.ctx.cwd, this.runId));
     }
     return this.reconcile();
   }

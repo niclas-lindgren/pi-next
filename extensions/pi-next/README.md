@@ -80,6 +80,17 @@ worker lifetime. Worker progress, subprocesses, queued follow-up delivery, and
 other generation-owned callbacks use the owning runtime's abort/disposal
 boundary.
 
+### Auto-loop footer
+
+While `/pi-next auto` is running, its `pi-next-auto` extension status is rendered
+in Pi's footer/status surface and updated in place. It shows settled queue
+progress (`completed + deferred/blocked` over the requested issue count), the
+active issue and worker lifecycle phase, and compact liveness/recovery details.
+The step count remains diagnostic only; it is never used as a completion
+percentage. The line degrades to issue/phase/count information on narrow
+terminals and is cleared when the command ends, so worker/model output is not
+polluted with repeated progress messages.
+
 ### Transport invariant
 
 Child-process/worktree isolation and live display delivery are independently

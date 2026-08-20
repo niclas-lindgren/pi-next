@@ -113,6 +113,7 @@ export interface LoopState {
   version: 1;
   runId: string;
   requestedIssues: number;
+  /** Requested issues not yet settled; deferred and blocked issues count as settled. */
   remainingIssues: number;
   step: number;
   settledStep: number;

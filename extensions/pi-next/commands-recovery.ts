@@ -14,15 +14,16 @@ import {
 import { registerPiNextCommands as registerBasePiNextCommands } from "./commands.ts";
 import {
   currentSupervisorStatus,
-  formatSupervisorStatus,
   ForegroundSupervisor,
 } from "./foreground-supervisor.ts";
 import {
   listLoopStates,
   loopResultFile,
   loopStateFile,
+  readLoopState,
   type LoopState,
 } from "./loop-state.ts";
+import { renderAutoProgress } from "./auto-progress.ts";
 import {
   changeFiles,
   markerFile,
@@ -111,10 +112,18 @@ function activeAutoStatusRun(cwd: string, preferredRunId?: string): LoopState | 
  */
 function autoStatusText(cwd: string, startedAt: number, preferredRunId?: string): string {
   const state = activeAutoStatusRun(cwd, preferredRunId);
-  const elapsedFallback = `pi-next auto · starting · ${Math.max(0, Math.round((Date.now() - startedAt) / 1_000))}s`;
+  const elapsedFallback = `Pi-next auto · starting · ${Math.max(0, Math.round((Date.now() - startedAt) / 1_000))}s`;
   if (!state) return elapsedFallback;
-  const status = currentSupervisorStatus(cwd, state.runId);
-  return status ? `pi-next ${formatSupervisorStatus(status)}` : elapsedFallback;
+  const supervisor = currentSupervisorStatus(cwd, state.runId);
+  // setStatus is rendered by Pi in its footer/status surface. Keep all queue
+  // progress here rather than emitting repeated transcript notifications.
+  return renderAutoProgress(
+    readLoopState(cwd, state.runId) || state,
+    {
+      supervisor,
+      width: process.stdout.columns,
+    },
+  );
 }
 
 function setAutoStatusSafely(
