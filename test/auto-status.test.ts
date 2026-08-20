@@ -105,6 +105,33 @@ test("auto footer updates in place and preserves a terminal status", async () =>
   }
 });
 
+test("a new auto run replaces an older terminal footer immediately", async () => {
+  const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-replace-"));
+  try {
+    const old = state("old-terminal", "2026-01-01T00:00:00.000Z", {
+      status: "completed",
+      remainingIssues: 0,
+    });
+    const dir = join(cwd, ".pi", "runtime", "pi-next-loops", old.runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "state.json"), JSON.stringify(old));
+    const statuses: Array<[string, string | undefined]> = [];
+    const stop = startAutoStatusHeartbeat(
+      context(cwd, statuses),
+      () => undefined,
+      { replaceExisting: true },
+    );
+    try {
+      assert.match(statuses[0]?.[1] || "", /starting/);
+      assert.doesNotMatch(statuses[0]?.[1] || "", /complete/);
+    } finally {
+      stop();
+    }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("newer durable runs win over an older heartbeat", async () => {
   const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-order-"));
   try {

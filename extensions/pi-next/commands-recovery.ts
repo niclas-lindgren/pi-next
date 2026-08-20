@@ -120,8 +120,9 @@ function autoStatusText(
   startedAt: number,
   preferredRunId?: string,
   version?: string,
+  replaceExisting = false,
 ): string {
-  const state = activeAutoStatusRun(cwd, preferredRunId);
+  const state = replaceExisting ? undefined : activeAutoStatusRun(cwd, preferredRunId);
   const elapsedFallback = `Pi-next ${version ? `v${version} ` : ""}auto · starting · ${Math.max(0, Math.round((Date.now() - startedAt) / 1_000))}s`;
   if (!state) return elapsedFallback;
   const supervisor = currentSupervisorStatus(cwd, state.runId);
@@ -151,6 +152,7 @@ function setAutoStatusSafely(
 export function startAutoStatusHeartbeat(
   ctx: ExtensionCommandContext,
   preferredRunId: () => string | undefined,
+  options: { replaceExisting?: boolean } = {},
 ): () => void {
   // Read cwd before any session replacement. It is plain data and remains
   // valid after the command context becomes stale. UI writes resolve the
@@ -161,6 +163,7 @@ export function startAutoStatusHeartbeat(
   const startedAt = Date.now();
   const version = piNextRuntimeIdentity().version;
   let active = true;
+  let firstUpdate = true;
   const cancel = () => {
     if (!active) return;
     active = false;
@@ -184,8 +187,18 @@ export function startAutoStatusHeartbeat(
     if (!active) return;
     const liveCtx = getLiveCtx();
     if (liveCtx) {
-      setAutoStatusSafely(liveCtx, autoStatusText(cwd, startedAt, preferredRunId(), version));
+      setAutoStatusSafely(
+        liveCtx,
+        autoStatusText(
+          cwd,
+          startedAt,
+          preferredRunId(),
+          version,
+          Boolean(options.replaceExisting && firstUpdate),
+        ),
+      );
     }
+    firstUpdate = false;
   };
   const timer = setInterval(update, AUTO_STATUS_INTERVAL_MS);
   timer.unref?.();
@@ -365,7 +378,7 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
         const auto = args.trim() === "auto";
         let preferredRunId: string | undefined;
         const stopStatus = auto
-          ? startAutoStatusHeartbeat(ctx, () => preferredRunId)
+          ? startAutoStatusHeartbeat(ctx, () => preferredRunId, { replaceExisting: true })
           : undefined;
         try {
           if (auto) {
