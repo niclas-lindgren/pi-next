@@ -193,6 +193,9 @@ export async function containIssueLocalFailure(
     ...state,
     status: "running",
     workerResultMissing: undefined,
+    // The failed worker turn has been durably classified and must not be
+    // replayed when the next issue is selected.
+    settledStep: Math.max(state.settledStep, state.step),
     remainingIssues: newContainment
       ? Math.max(0, state.remainingIssues - 1)
       : state.remainingIssues,
@@ -535,13 +538,15 @@ export async function runOwnedIssueCycle(
   runtime: SupervisorRuntime = createSupervisorRuntime(),
   onWorkLog?: WorkerWorkLogSink,
   onWorkerState?: (runtime: import("./util-core.ts").IssueWorkerRuntime) => void,
+  authorityOverride?: import("./issue-leases.ts").IssueLeaseAuthority,
 ): Promise<LoopState> {
   const coordinationCwd = initial.coordinationCwd || ctx.cwd;
+  const issueAuthority = authorityOverride ?? new GitHubIssueLeaseAuthority(coordinationCwd);
   const display = attachWorkerDisplay(ctx);
   let state = initial;
   let prepared: LoopState;
   try {
-    prepared = await claimLoopIssue(coordinationCwd, state);
+    prepared = await claimLoopIssue(coordinationCwd, state, issueAuthority);
   } catch (error) {
     const handoff = error instanceof IssueHandoffError ? error : undefined;
     const issueNumber = handoff?.issueNumber ?? state.activeIssueNumber;
@@ -576,7 +581,7 @@ export async function runOwnedIssueCycle(
   {
       const heartbeat = prepared.activeLease
         ? startIssueLeaseHeartbeat(
-            new GitHubIssueLeaseAuthority(coordinationCwd),
+            issueAuthority,
             prepared.activeLease as import("./issue-authority.ts").IssueLease,
             {
               onRenew: (lease) => {
@@ -639,7 +644,7 @@ export async function runOwnedIssueCycle(
         // still owns the lease. Reconcile before releasing it, and always
         // return to this same issue; candidate selection happens below only
         // after the normal issue-boundary cleanup.
-        const recoveryAuthority = new GitHubIssueLeaseAuthority(coordinationCwd);
+        const recoveryAuthority = issueAuthority;
         while (true) {
           await runLoopSteps(
             { ...ctx, cwd: targetCwd } as ExtensionCommandContext,
@@ -712,7 +717,7 @@ export async function runOwnedIssueCycle(
         if (!containedFailure && heartbeat && prepared.activeIssueNumber) {
           try {
             await releaseIssueLease(
-              new GitHubIssueLeaseAuthority(coordinationCwd),
+              issueAuthority,
               heartbeat.getLease(),
               { cwd: coordinationCwd, recordEvent: recordLifecycleEvent },
             );
@@ -732,6 +737,7 @@ export async function runOwnedIssueCycle(
           lease: prepared.activeLease
             ? parseLeaseFromAuthority(JSON.stringify(prepared.activeLease))
             : undefined,
+          authority: issueAuthority,
         });
       }
       state = readLoopState(coordinationCwd, prepared.runId) || prepared;

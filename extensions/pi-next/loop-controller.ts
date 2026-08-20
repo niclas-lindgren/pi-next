@@ -56,6 +56,7 @@ import type { WorkerTelemetryReport } from "./worker-telemetry.ts";
 import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { feedbackFingerprint } from "../../src/coordination/feedback.ts";
+import { isTransientAuthorityReadFailure } from "../../src/coordination/authority-read-policy.ts";
 import { observeManagedTransition } from "./self-assessment.ts";
 import { recentLifecycleEventNames, recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
@@ -70,22 +71,10 @@ const MAX_TRANSITIONS_PER_SESSION = 3;
 export const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3;
 
 /**
- * Authority reads are an inspection boundary, not proof of lost ownership.
- * Retry only errors that look like temporary transport/service failures;
- * missing, stale, or foreign lease records still fail closed immediately.
+ * Kept as a controller export for existing integrations; the policy itself is
+ * shared with harness-neutral worktree recovery.
  */
-export function isTransientAuthorityReadFailure(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const value = error as Record<string, unknown>;
-  const status = Number(value.status ?? value.statusCode);
-  if (Number.isInteger(status) && (status === 408 || status === 429 || status >= 500)) return true;
-  const text = [value.message, value.code, value.stderr, value.stdout, value.cause]
-    .filter((part) => part !== undefined)
-    .map(String)
-    .join(" ")
-    .toLowerCase();
-  return /econn|eai_|enotfound|enetwork|etimedout|epipe|network|timeout|timed out|temporar|unavailable|connection|socket|fetch failed|rate limit|too many requests|\b(?:502|503|504)\b/.test(text);
-}
+export { isTransientAuthorityReadFailure } from "../../src/coordination/authority-read-policy.ts";
 
 export type MissingLoopResultRecoveryOutcome =
   | "none"
@@ -195,19 +184,27 @@ async function blockForNoProgress(
   cwd: string,
   state: LoopState,
   result: LoopResult,
-): Promise<StepSettlement> {
-  const blocked: LoopState = {
+): Promise<never> {
+  const issue = state.activeIssueNumber;
+  const reason = `Step reported ${result.outcome} without advancing HEAD; refusing a no-op unattended retry`;
+  // A no-op is evidence about this worker turn, not automatically about the
+  // controller. Preserve the diagnostic before handing it to the normal
+  // issue-local containment path, which releases only this issue and lets the
+  // supervisor select another candidate.
+  if (!issue || (result.issueNumber !== undefined && result.issueNumber !== issue)) {
+    throw new Error(`${reason}; active issue identity is missing or mismatched`);
+  }
+  const diagnostic: LoopState = {
     ...state,
-    status: "blocked",
-    settledStep: state.step,
+    status: "running",
     updatedAt: loopNow(),
     lastOutcome: result.outcome,
-    lastReason: `Step reported ${result.outcome} without advancing HEAD; refusing a no-op unattended retry`,
+    lastReason: reason,
   };
   const runtimeCwd = runtimeCwdFor(cwd, state);
-  writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), blocked);
+  writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), diagnostic);
   removeFile(loopResultFile(runtimeCwd, state.runId));
-  return { state: blocked, terminal: true, outcome: result.outcome };
+  throw new IssueBoundaryFailure(issue, "execution", reason);
 }
 
 async function applyResult(

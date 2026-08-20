@@ -128,12 +128,25 @@ test("salvages a clean divergent legacy branch onto authoritative main", async (
     await git(fixtureState.workspace, "commit", "-m", "fix: issue #7 legacy follow-up");
     await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
 
+    let finalAuthorityReads = 0;
+    const finalAuthority = {
+      read: async () => {
+        finalAuthorityReads += 1;
+        if (finalAuthorityReads === 1) {
+          const error = new Error("temporary authority timeout");
+          Object.assign(error, { code: "ETIMEDOUT" });
+          throw error;
+        }
+        return fixtureState.lease;
+      },
+    };
     const recovered = await ensureIssueWorktree(fixtureState.repo, 7, undefined, {
       ownership: {
         lease: fixtureState.lease,
-        authority: new MemoryAuthority(fixtureState.lease),
+        authority: finalAuthority,
       },
     });
+    assert.equal(finalAuthorityReads, 2, "transient final-boundary authority reads are retried");
     assert.equal(recovered, fixtureState.workspace);
     assert.equal(await git(recovered, "branch", "--show-current"), "agent/issue-7");
     assert.equal(await readFile(join(recovered, "main-update.txt"), "utf8"), "main\n");
@@ -142,6 +155,42 @@ test("salvages a clean divergent legacy branch onto authoritative main", async (
     const preserved = (await readdir(join(fixtureState.repo, ".worktrees"))).find((name) => name.startsWith("issue-7-legacy-"));
     assert.ok(preserved, "original legacy checkout remains as recovery evidence");
     assert.equal(await git(join(fixtureState.repo, ".worktrees", preserved!), "branch", "--show-current"), "pi-next/issue-7/legacy");
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy salvage preserves evidence after bounded transient authority-read exhaustion", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.repo, "main-update.txt"), "main\\n");
+    await git(fixtureState.repo, "add", "main-update.txt");
+    await git(fixtureState.repo, "commit", "-m", "main advances");
+    await git(fixtureState.repo, "push", "origin", "main");
+    await git(fixtureState.workspace, "switch", "-c", "pi-next/issue-7/legacy");
+    await writeFile(join(fixtureState.workspace, "legacy-change.txt"), "legacy\\n");
+    await git(fixtureState.workspace, "add", "legacy-change.txt");
+    await git(fixtureState.workspace, "commit", "-m", "feat: issue #7 legacy change");
+    await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
+
+    let reads = 0;
+    const authority = {
+      read: async () => {
+        reads += 1;
+        const error = new Error("temporary authority 503");
+        Object.assign(error, { status: 503 });
+        throw error;
+      },
+    };
+    await assert.rejects(
+      () => ensureIssueWorktree(fixtureState.repo, 7, undefined, {
+        ownership: { lease: fixtureState.lease, authority },
+      }),
+      (error: unknown) => error instanceof Error && error.message.includes("temporary authority 503"),
+    );
+    assert.equal(reads, 3, "transient adoption reads consume the bounded authority budget");
+    assert.equal(await git(fixtureState.workspace, "branch", "--show-current"), "pi-next/issue-7/legacy");
+    await assert.rejects(() => readFile(join(fixtureState.workspace, "main-update.txt")));
   } finally {
     await rm(fixtureState.root, { recursive: true, force: true });
   }
