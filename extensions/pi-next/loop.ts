@@ -12,7 +12,10 @@ import {
 } from "./execution-boundary.ts";
 import { commitExplicitPaths } from "./commit-safety.ts";
 import { cleanupCompletedIssueWorktree } from "./main-refresh.ts";
-import { runLoopSteps } from "./loop-controller.ts";
+import {
+  reconcileMissingLoopResult,
+  runLoopSteps,
+} from "./loop-controller.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
@@ -350,6 +353,7 @@ export async function runOwnedIssueCycle(
   let state = initial;
   {
       const prepared = await claimLoopIssue(coordinationCwd, state);
+      state = prepared;
       const heartbeat = prepared.activeLease
         ? startIssueLeaseHeartbeat(
             new GitHubIssueLeaseAuthority(coordinationCwd),
@@ -413,13 +417,33 @@ export async function runOwnedIssueCycle(
                 )),
             progressIntervalMs: options.progressIntervalMs ?? 10_000,
           });
-        await runLoopSteps(
-          { ...ctx, cwd: targetCwd } as ExtensionCommandContext,
-          prepared,
-          visibleWorker,
-          runtime,
-          { onWorkerState, display },
-        );
+        // A worker boundary is recoverable only while this issue's heartbeat
+        // still owns the lease. Reconcile before releasing it, and always
+        // return to this same issue; candidate selection happens below only
+        // after the normal issue-boundary cleanup.
+        const recoveryAuthority = new GitHubIssueLeaseAuthority(coordinationCwd);
+        while (true) {
+          await runLoopSteps(
+            { ...ctx, cwd: targetCwd } as ExtensionCommandContext,
+            state,
+            visibleWorker,
+            runtime,
+            { onWorkerState, display },
+          );
+          state = readLoopState(coordinationCwd, prepared.runId) || state;
+          if (!state.workerResultMissing || state.status !== "interrupted") break;
+          const recovery = await reconcileMissingLoopResult(
+            coordinationCwd,
+            state,
+            recoveryAuthority,
+          );
+          state = recovery.state;
+          if (recovery.outcome !== "resuming_same_issue") break;
+          notifyLive(
+            `Pi-next recovered a missing worker result; resuming issue #${prepared.activeIssueNumber ?? "?"} with a fresh worker`,
+            "info",
+          );
+        }
       } catch (error) {
         void reportRuntimeFailure(coordinationCwd, {
           stage: "controller",

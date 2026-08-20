@@ -75,6 +75,25 @@ export interface LoopMetrics extends LoopUsage {
 
 export type LoopIssueDisposition = "active" | "completed" | "deferred" | "blocked";
 
+/** Durable, bounded recovery evidence for a worker boundary without a result. */
+export interface LoopRecoveryState {
+  missingLoopResults: number;
+  automaticSettlements: number;
+  automaticResumes: number;
+  exhausted: number;
+  /** Attempts are counted per normalized worker-boundary fingerprint. */
+  attemptsByFingerprint: Record<string, number>;
+  lastFingerprint?: string;
+  lastOutcome?:
+    | "reconciling"
+    | "settled_from_durable_evidence"
+    | "resuming_same_issue"
+    | "recovery_unsafe"
+    | "recovery_exhausted";
+  lastReason?: string;
+  updatedAt?: string;
+}
+
 export interface LoopIssueMetrics extends LoopMetrics {
   issueNumber: number;
   disposition: LoopIssueDisposition;
@@ -110,6 +129,10 @@ export interface LoopState {
   lastOutcome?: LoopOutcome;
   lastReason?: string;
   metrics: LoopMetrics;
+  /** Present when the current worker boundary ended without a terminal result. */
+  workerResultMissing?: boolean;
+  /** Bounded durable recovery telemetry; optional for v1 state compatibility. */
+  recovery?: LoopRecoveryState;
   /** Root coordination checkout and claimed issue execution identity. */
   coordinationCwd?: string;
   activeIssueNumber?: number;
@@ -316,6 +339,19 @@ export function readLoopState(cwd: string, runId?: string): LoopState | null {
       deferredIssues: state.deferredIssues || [],
       issueMetrics: state.issueMetrics || [],
       metrics: { ...emptyLoopMetrics(), ...state.metrics },
+      recovery: state.recovery
+        ? {
+            missingLoopResults: Math.max(0, Math.trunc(state.recovery.missingLoopResults || 0)),
+            automaticSettlements: Math.max(0, Math.trunc(state.recovery.automaticSettlements || 0)),
+            automaticResumes: Math.max(0, Math.trunc(state.recovery.automaticResumes || 0)),
+            exhausted: Math.max(0, Math.trunc(state.recovery.exhausted || 0)),
+            attemptsByFingerprint: { ...(state.recovery.attemptsByFingerprint || {}) },
+            lastFingerprint: state.recovery.lastFingerprint,
+            lastOutcome: state.recovery.lastOutcome,
+            lastReason: state.recovery.lastReason,
+            updatedAt: state.recovery.updatedAt,
+          }
+        : undefined,
     };
   } catch {
     return null;
@@ -447,9 +483,12 @@ export function notifyLoopState(
   const elapsedMinutes = (elapsedMs / 60_000).toFixed(1);
   const cost = metrics.cost > 0 ? ` cost=$${metrics.cost.toFixed(4)}` : "";
   const recent = (state.issueMetrics || []).slice(-5).map(formatIssueMetric).join("; ");
+  const recovery = state.recovery
+    ? `\nRecovery: missing_results=${state.recovery.missingLoopResults} resumes=${state.recovery.automaticResumes} settlements=${state.recovery.automaticSettlements} exhausted=${state.recovery.exhausted}${state.recovery.lastOutcome ? ` outcome=${state.recovery.lastOutcome}` : ""}`
+    : "";
   safeLoopNotify(
     ctx,
-    `Pi loop ${state.status}: step=${state.step}/${state.maxSteps} issues_remaining=${state.remainingIssues} completed=${completed} deferred=${deferred}\nTelemetry: sessions=${metrics.sessions} prompts=${metrics.prompts} sessions/issue=${sessionsPerIssue} tokens=${formatCount(metrics.totalTokens)} tokens/issue=${tokensPerIssue} cache_read=${formatCount(metrics.cacheRead)} cache_rate=${cacheRate} model_min=${(metrics.modelDurationMs / 60_000).toFixed(1)} elapsed_min=${elapsedMinutes}${cost}${recent ? `\nRecent issues: ${recent}` : ""}${state.lastReason ? `\nReason: ${state.lastReason}` : ""}`,
+    `Pi loop ${state.status}: step=${state.step}/${state.maxSteps} issues_remaining=${state.remainingIssues} completed=${completed} deferred=${deferred}\nTelemetry: sessions=${metrics.sessions} prompts=${metrics.prompts} sessions/issue=${sessionsPerIssue} tokens=${formatCount(metrics.totalTokens)} tokens/issue=${tokensPerIssue} cache_read=${formatCount(metrics.cacheRead)} cache_rate=${cacheRate} model_min=${(metrics.modelDurationMs / 60_000).toFixed(1)} elapsed_min=${elapsedMinutes}${cost}${recovery}${recent ? `\nRecent issues: ${recent}` : ""}${state.lastReason ? `\nReason: ${state.lastReason}` : ""}`,
     ["failed", "blocked", "interrupted"].includes(state.status)
       ? "warning"
       : "info",

@@ -146,6 +146,8 @@ export function buildLoopPrompt(input: {
   candidateShortlist?: string;
   candidateSearchExhausted?: boolean;
   planFreshness?: string;
+  /** Controller-authored recovery context; never infer recovery from prose. */
+  recoveryReason?: string;
   dispatch?: WorkerDispatchPolicy;
 }): string {
   const policy = promptPolicy(input.cwd ? loadPiNextConfig(input.cwd) : undefined);
@@ -172,6 +174,9 @@ export function buildLoopPrompt(input: {
     selection,
     shortlist,
     freshness,
+    input.recoveryReason?.trim()
+      ? `AUTOMATIC RECOVERY: The prior worker exited without a loop_result. The controller preserved the same issue lease and worktree. Inspect and continue the existing issue work; do not reset, stash, discard, or switch issues. Recovery note: ${input.recoveryReason.trim()}`
+      : "",
     overlay,
     tokenSafeStepInstructions(input),
   ]

@@ -1,15 +1,19 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 import {
   validateCanonicalExecutionState,
   validateWorkspacePlan,
 } from "./execution-boundary.ts";
 import { checkIssueFreshness, primeIssueFreshness } from "./issue-freshness.ts";
+import { isIssueLeaseFresh, issueLeaseMatchesOwner, issueWorkspaceIdentity } from "./issue-authority.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
-import { GitHubIssueLeaseAuthority } from "./issue-leases.ts";
+import {
+  GitHubIssueLeaseAuthority,
+  type IssueLeaseAuthority,
+} from "./issue-leases.ts";
 import {
   createSupervisorRuntime,
   type SupervisorRuntime,
@@ -53,7 +57,7 @@ import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts"
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { feedbackFingerprint } from "../../src/coordination/feedback.ts";
 import { observeManagedTransition } from "./self-assessment.ts";
-import { recentLifecycleEventNames } from "./lifecycle-telemetry.ts";
+import { recentLifecycleEventNames, recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import {
   createWorkerFailureEvidence,
@@ -61,6 +65,22 @@ import {
 } from "./worker-failure.ts";
 
 const MAX_TRANSITIONS_PER_SESSION = 3;
+/** Maximum fresh workers for one normalized missing-result failure. */
+export const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3;
+
+export type MissingLoopResultRecoveryOutcome =
+  | "none"
+  | "settled_from_durable_evidence"
+  | "resuming_same_issue"
+  | "recovery_unsafe"
+  | "recovery_exhausted";
+
+export interface MissingLoopResultRecovery {
+  outcome: MissingLoopResultRecoveryOutcome;
+  state: LoopState;
+  reason?: string;
+  fingerprint?: string;
+}
 
 // Worker-generation lifecycle is injected from the owning
 // ForegroundSupervisor runtime (#612). This controller only drives one
@@ -235,6 +255,7 @@ async function applyResult(
     const issue = result.issueNumber as number;
     const completed: LoopState = {
       ...state,
+      workerResultMissing: undefined,
       remainingIssues: state.remainingIssues - 1,
       settledStep: state.step,
       completedIssues: [...new Set([...state.completedIssues, issue])],
@@ -272,6 +293,7 @@ async function applyResult(
     const deferredAt = loopNow();
     const deferred: LoopState = {
       ...state,
+      workerResultMissing: undefined,
       settledStep: state.step,
       deferredIssues: [
         ...state.deferredIssues.filter((item) => item.issueNumber !== issue),
@@ -301,6 +323,7 @@ async function applyResult(
   if (result.outcome === "continue" || result.outcome === "done") {
     const continuing: LoopState = {
       ...state,
+      workerResultMissing: undefined,
       settledStep: state.step,
       updatedAt: loopNow(),
       lastOutcome: result.outcome,
@@ -315,6 +338,7 @@ async function applyResult(
     result.outcome === "idle" ? "idle" : result.outcome;
   const terminal: LoopState = {
     ...state,
+    workerResultMissing: undefined,
     status: terminalStatus,
     settledStep: state.step,
     updatedAt: loopNow(),
@@ -326,7 +350,7 @@ async function applyResult(
   return { state: terminal, terminal: true, outcome: result.outcome };
 }
 
-async function inferCompletedArchive(
+export async function inferCompletedArchive(
   cwd: string,
   state: LoopState,
 ): Promise<LoopResult | null> {
@@ -368,12 +392,213 @@ async function settleStep(
   const interrupted: LoopState = {
     ...state,
     status: "interrupted",
+    workerResultMissing: true,
     updatedAt: loopNow(),
     lastReason:
-      "Session ended without pi_next_update(action=loop_result); use resume after checking the worktree",
+      "Session ended without pi_next_update(action=loop_result); automatic reconciliation is inspecting the current issue",
   };
   writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), interrupted);
   return { state: interrupted, terminal: true, outcome: "failed" };
+}
+
+/**
+ * Reconcile a worker boundary that has no authoritative loop_result. This is
+ * deliberately outside the model prompt: only durable archive evidence,
+ * current lease ownership, canonical worktree identity, and git state can
+ * authorize recovery. In particular, dirty issue-local files are preserved;
+ * they are not evidence of completion and are never reset or stashed.
+ */
+export async function reconcileMissingLoopResult(
+  coordinationCwd: string,
+  state: LoopState,
+  authority: Pick<IssueLeaseAuthority, "read"> = new GitHubIssueLeaseAuthority(coordinationCwd),
+  options: { maxAttempts?: number; maxTotalAttempts?: number } = {},
+): Promise<MissingLoopResultRecovery> {
+  if (!state.workerResultMissing || state.step <= state.settledStep) {
+    return { outcome: "none", state };
+  }
+
+  const issueNumber = state.activeIssueNumber;
+  const fingerprint = feedbackFingerprint({
+    harness: "pi-next",
+    stage: "worker-boundary",
+    category: "runtime",
+    code: "worker_result_missing",
+    summary: state.lastReason || "worker exited without loop_result",
+  });
+  const previous = state.recovery || {
+    missingLoopResults: 0,
+    automaticSettlements: 0,
+    automaticResumes: 0,
+    exhausted: 0,
+    attemptsByFingerprint: {},
+  };
+  const attempts = previous.attemptsByFingerprint[fingerprint] || 0;
+  const maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS));
+  const baseRecovery = {
+    ...previous,
+    missingLoopResults: previous.missingLoopResults + 1,
+    lastFingerprint: fingerprint,
+    lastOutcome: "reconciling" as const,
+    updatedAt: loopNow(),
+  };
+  // Persist the reconciliation phase before any authority or git inspection;
+  // a controller crash during inspection remains observable and is never
+  // mistaken for a cleanly settled transition.
+  writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), {
+    ...state,
+    recovery: baseRecovery,
+    updatedAt: loopNow(),
+  });
+
+  const unsafe = async (reason: string, exhausted = false): Promise<MissingLoopResultRecovery> => {
+    const recovery = {
+      ...baseRecovery,
+      exhausted: previous.exhausted + (exhausted ? 1 : 0),
+      lastOutcome: exhausted ? "recovery_exhausted" as const : "recovery_unsafe" as const,
+      lastReason: reason,
+    };
+    const blocked: LoopState = {
+      ...state,
+      status: "blocked",
+      recovery,
+      updatedAt: loopNow(),
+      lastReason: reason,
+    };
+    writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), blocked);
+    recordLifecycleEvent(coordinationCwd, {
+      event: "worker_recovery",
+      issueNumber: issueNumber || 0,
+      runId: state.runId,
+      outcome: "failure",
+      reasonCode: exhausted ? "recovery_exhausted" : "recovery_unsafe",
+    });
+    await reportRuntimeFailure(coordinationCwd, {
+      stage: "worker-recovery",
+      category: exhausted ? "runtime" : "integrity",
+      severity: exhausted ? "error" : "fatal",
+      outcome: "failed",
+      code: exhausted ? "worker_recovery_exhausted" : "worker_recovery_unsafe",
+      summary: reason,
+      issueNumber,
+      runId: state.runId,
+    });
+    return { outcome: exhausted ? "recovery_exhausted" : "recovery_unsafe", state: blocked, reason, fingerprint };
+  };
+
+  if (!Number.isSafeInteger(issueNumber) || (issueNumber || 0) < 1 || !state.activeLease) {
+    return unsafe("Cannot recover missing loop_result: active issue identity or lease is missing");
+  }
+  const issue = issueNumber as number;
+  const identity = issueWorkspaceIdentity(issue);
+  const workspace = resolve(coordinationCwd, identity.worktree);
+  if (state.activeWorkspace !== workspace || !existsSync(workspace)) {
+    return unsafe(`Cannot recover issue #${issueNumber}: canonical issue worktree is missing or ambiguous`);
+  }
+
+  let liveLease;
+  try {
+    liveLease = await authority.read(issue);
+  } catch (error) {
+    return unsafe(`Cannot reconcile issue #${issueNumber} lease before recovery: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!liveLease || !isIssueLeaseFresh(liveLease) || !issueLeaseMatchesOwner(liveLease, state.activeLease)) {
+    return unsafe(`Cannot recover issue #${issueNumber}: authoritative lease is missing, stale, or owned by another run`);
+  }
+  try {
+    const branch = await git(workspace, ["branch", "--show-current"]);
+    if (branch !== identity.branch) {
+      return unsafe(`Cannot recover issue #${issueNumber}: canonical worktree is on ${branch || "no branch"}, expected ${identity.branch}`);
+    }
+    const conflicts = await git(workspace, ["diff", "--name-only", "--diff-filter=U"]);
+    if (conflicts.trim()) {
+      return unsafe(`Cannot recover issue #${issueNumber}: unresolved git conflicts (${conflicts.trim()})`);
+    }
+  } catch (error) {
+    return unsafe(`Cannot inspect issue #${issueNumber} worktree before recovery: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const inferred = await inferCompletedArchive(workspace, state);
+  if (inferred && inferred.issueNumber === issue) {
+    const settled = await applyResult(workspace, state, inferred);
+    const recovery = {
+      ...baseRecovery,
+      automaticSettlements: previous.automaticSettlements + 1,
+      lastOutcome: "settled_from_durable_evidence" as const,
+      lastReason: inferred.reason,
+    };
+    const recovered: LoopState = {
+      ...settled.state,
+      workerResultMissing: undefined,
+      recovery,
+      updatedAt: loopNow(),
+      lastReason: `Automatically settled missing worker result: ${inferred.reason}`,
+    };
+    writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), recovered);
+    recordLifecycleEvent(coordinationCwd, {
+      event: "worker_recovery",
+      issueNumber: issue,
+      runId: state.runId,
+      outcome: "recovered",
+      reasonCode: "settled_from_durable_evidence",
+    });
+    await reportRuntimeFailure(coordinationCwd, {
+      stage: "worker-recovery",
+      category: "transient",
+      severity: "info",
+      outcome: "recovered",
+      code: "worker_result_settled",
+      summary: inferred.reason,
+      issueNumber: issue,
+      runId: state.runId,
+    });
+    return { outcome: "settled_from_durable_evidence", state: recovered, fingerprint };
+  }
+
+  const maxTotalAttempts = Math.max(
+    maxAttempts,
+    Math.trunc(options.maxTotalAttempts ?? maxAttempts * 3),
+  );
+  if (attempts >= maxAttempts || previous.missingLoopResults >= maxTotalAttempts) {
+    return unsafe(`Automatic recovery exhausted after ${attempts} attempts for issue #${issue}; human inspection is required`, true);
+  }
+
+  const recovery = {
+    ...baseRecovery,
+    automaticResumes: previous.automaticResumes + 1,
+    attemptsByFingerprint: { ...previous.attemptsByFingerprint, [fingerprint]: attempts + 1 },
+    lastOutcome: "resuming_same_issue" as const,
+    lastReason: `Resuming issue #${issueNumber} with a fresh worker; existing issue-worktree changes are preserved`,
+  };
+  const resumed: LoopState = {
+    ...state,
+    status: "running",
+    settledStep: state.step,
+    workerResultMissing: undefined,
+    recovery,
+    updatedAt: loopNow(),
+    lastReason: recovery.lastReason,
+    stopRequested: false,
+  };
+  writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), resumed);
+  recordLifecycleEvent(coordinationCwd, {
+    event: "worker_recovery",
+    issueNumber: issue,
+    runId: state.runId,
+    outcome: "recovered",
+    reasonCode: "resuming_same_issue",
+  });
+  await reportRuntimeFailure(coordinationCwd, {
+    stage: "worker-recovery",
+    category: "transient",
+    severity: "info",
+    outcome: "recovered",
+    code: "worker_result_resumed",
+    summary: recovery.lastReason,
+    issueNumber: issue,
+    runId: state.runId,
+  });
+  return { outcome: "resuming_same_issue", state: resumed, reason: recovery.lastReason, fingerprint };
 }
 
 async function recordPromptTelemetry(
@@ -560,6 +785,10 @@ async function runOneStep(
         candidateShortlist: shortlist.text,
         candidateSearchExhausted: shortlist.exhausted,
         planFreshness,
+        recoveryReason:
+          state.recovery?.lastOutcome === "resuming_same_issue"
+            ? state.recovery.lastReason
+            : undefined,
       }),
       {
         signal: runtime.currentGeneration()?.signal,
@@ -654,7 +883,28 @@ async function runOneStep(
     // Health is diagnostic; persistence or publication failures cannot alter
     // the worker transition's authoritative result.
   }
-  if (promptError) throw promptError;
+  if (promptError) {
+    const resultPath = loopResultFile(runtimeCwdFor(ctx.cwd, state), state.runId);
+    if (existsSync(resultPath)) {
+      // A worker may have written the authoritative terminal result and then
+      // failed while its process was unwinding. The result wins over the
+      // process exit classification.
+      const settled = await settleStep(ctx.cwd, state);
+      if (!hasPlan && existsSync(planFile(ctx.cwd))) {
+        const plannedIssue = currentPlanIssue(ctx.cwd);
+        if (plannedIssue) await primeIssueFreshness(ctx.cwd, plannedIssue);
+      }
+      return settled;
+    }
+    const missing: LoopState = {
+      ...state,
+      workerResultMissing: true,
+      updatedAt: loopNow(),
+      lastReason: `Worker exited without pi_next_update(action=loop_result): ${promptError instanceof Error ? promptError.message : String(promptError)}`,
+    };
+    writeJsonAtomic(loopStateFile(runtimeCwdFor(ctx.cwd, state), state.runId), missing);
+    throw promptError;
+  }
 
   const settled = await settleStep(ctx.cwd, state);
   if (!hasPlan && existsSync(planFile(ctx.cwd))) {

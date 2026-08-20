@@ -280,6 +280,13 @@ export async function prepareAbandonedAutoResume(
 
   writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), {
     ...state,
+    // The abandoned boundary has been reconciled locally. Mark it runnable so
+    // ForegroundSupervisor.launch() can start the fresh same-issue worker;
+    // leaving this as interrupted would make its running-state loop exit before
+    // dispatching anything.
+    status: "running",
+    workerResultMissing: undefined,
+    stopRequested: false,
     settledStep: state.step,
     updatedAt: new Date().toISOString(),
     lastReason: dirty.length

@@ -23,7 +23,8 @@ export type LifecycleEventName =
   | "project_status_synced"
   | "generation_teardown"
   | "plan_repaired"
-  | "workflow_artifact_quarantined";
+  | "workflow_artifact_quarantined"
+  | "worker_recovery";
 
 export interface LifecycleEvent {
   event: LifecycleEventName;
