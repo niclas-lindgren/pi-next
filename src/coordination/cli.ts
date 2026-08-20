@@ -38,6 +38,7 @@ import {
 import { finalizeIssue, FinalizeError } from "./finalize.ts";
 import { loadPiNextConfig } from "./config.ts";
 import { AuthorityCapabilityError, createWorkAuthority, type WorkAuthorityAdapter } from "./work-authority.ts";
+import type { PendingVerificationRequest } from "./types.ts";
 
 export type CoordinationCliCommand =
   | "status"
@@ -106,6 +107,8 @@ interface ParsedFlags {
   authorityFingerprint?: string;
   verifiedIntegratedMain?: string;
   closeComment?: string;
+  pendingVerification?: PendingVerificationRequest;
+  pendingComment?: string;
 }
 
 function parseFlags(args: string[]): ParsedFlags {
@@ -167,6 +170,18 @@ function parseFlags(args: string[]): ParsedFlags {
         break;
       case "--close-comment":
         flags.closeComment = next();
+        break;
+      case "--pending-verification": {
+        const value = next();
+        try {
+          flags.pendingVerification = JSON.parse(value ?? "") as PendingVerificationRequest;
+        } catch {
+          throw new CoordinationCliError("INVALID_ARGS", "--pending-verification must be valid JSON");
+        }
+        break;
+      }
+      case "--pending-comment":
+        flags.pendingComment = next();
         break;
       default:
         throw new CoordinationCliError("INVALID_ARGS", `Unknown flag: ${arg}`);
@@ -398,6 +413,8 @@ async function runFinalize(flags: ParsedFlags): Promise<CoordinationCliSuccess> 
       verifiedAuthorityFingerprint: flags.authorityFingerprint,
       verifiedIntegratedMain: flags.verifiedIntegratedMain,
       closeComment: flags.closeComment,
+      pendingVerification: flags.pendingVerification,
+      pendingComment: flags.pendingComment,
     });
     return { ...result, command: "finalize" };
   } catch (error) {

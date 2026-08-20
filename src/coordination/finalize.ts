@@ -51,6 +51,7 @@ import {
   type AuthorityWorkItem,
   type WorkAuthorityAdapter,
 } from "./work-authority.ts";
+import type { PendingVerificationRecord, PendingVerificationRequest } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -105,6 +106,9 @@ export interface FinalizeInput {
    */
   verifiedIntegratedMain?: string;
   closeComment?: string;
+  /** Explicit consumer-supplied criteria that may remain pending after safe integration. */
+  pendingVerification?: PendingVerificationRequest;
+  pendingComment?: string;
 }
 
 export interface FinalizeResult {
@@ -128,6 +132,8 @@ export interface FinalizeResult {
    * candidate) before the issue can close.
    */
   requiresReverification: boolean;
+  /** Present only when integration succeeded and the item was recorded open for external verification. */
+  pendingVerification?: PendingVerificationRecord;
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -215,7 +221,34 @@ export async function finalizeIssue(
   workAuthority: WorkAuthorityAdapter,
   input: FinalizeInput,
 ): Promise<FinalizeResult> {
-  requireAuthorityCapability(workAuthority, "completion");
+  const pendingRequest = input.pendingVerification;
+  if (pendingRequest) {
+    if (
+      pendingRequest.status !== "awaiting_external_verification" ||
+      pendingRequest.criteria.length === 0 ||
+      pendingRequest.criteria.some((criterion) =>
+        !criterion.id.trim() ||
+        !criterion.criterion.trim() ||
+        !criterion.classification.trim() ||
+        !criterion.environment.trim(),
+      )
+    ) {
+      throw new FinalizeError(
+        "MISSING_AUTHORITY_EVIDENCE",
+        `Cannot finalize issue #${input.issueNumber} with an empty or implicit pending-verification criterion`,
+        { issueNumber: String(input.issueNumber), reason: "pending_criteria_invalid" },
+      );
+    }
+    requireAuthorityCapability(workAuthority, "pendingVerification");
+    if (!workAuthority.recordPendingVerification) {
+      throw new FinalizeError(
+        "STALE_AUTHORITY",
+        `Authority adapter ${workAuthority.name} advertises pendingVerification but cannot record it`,
+      );
+    }
+  } else {
+    requireAuthorityCapability(workAuthority, "completion");
+  }
 
   if (!input.verifiedAuthorityFingerprint?.trim()) {
     throw new FinalizeError(
@@ -430,6 +463,28 @@ export async function finalizeIssue(
       authorityChanged: true,
       leaseLostAfterMerge: false,
       requiresReverification: false,
+    };
+  }
+
+  if (pendingRequest) {
+    const record: PendingVerificationRecord = {
+      version: 1,
+      status: pendingRequest.status,
+      issueNumber: input.issueNumber,
+      integratedMainCommitSha: mergeSha,
+      criteria: pendingRequest.criteria.map((criterion) => ({ ...criterion })),
+    };
+    await workAuthority.recordPendingVerification!(String(input.issueNumber), record, input.pendingComment);
+    return {
+      ok: true,
+      issueNumber: input.issueNumber,
+      branch,
+      mergeSha,
+      closed: false,
+      authorityChanged: false,
+      leaseLostAfterMerge: false,
+      requiresReverification: false,
+      pendingVerification: record,
     };
   }
 

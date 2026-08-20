@@ -77,6 +77,31 @@ export type IssueLifecycleRecorder = (
 
 export type ProjectStatus = "Todo" | "In Progress" | "Done" | "Blocked";
 
+/**
+ * Authority-neutral evidence supplied by a consumer when implementation is
+ * safe to integrate but one or more explicitly classified post-integration
+ * checks remain. The kernel preserves these values verbatim; it does not
+ * infer whether a criterion is safe to defer.
+ */
+export interface PendingVerificationCriterion {
+  id: string;
+  criterion: string;
+  classification: string;
+  environment: string;
+  evidence?: string;
+}
+
+export interface PendingVerificationRequest {
+  status: "awaiting_external_verification";
+  criteria: readonly PendingVerificationCriterion[];
+}
+
+export interface PendingVerificationRecord extends PendingVerificationRequest {
+  version: 1;
+  issueNumber: number;
+  integratedMainCommitSha: string;
+}
+
 /** GitHub-backed implementations must make this operation retryable/observable. */
 export interface ProjectStatusAuthority {
   set(issueNumber: number, status: ProjectStatus): Promise<void>;

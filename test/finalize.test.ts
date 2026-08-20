@@ -163,6 +163,54 @@ describe("finalizeIssue", () => {
     );
   });
 
+  test("integrates safely and records explicit pending verification without closing", async () => {
+    const { origin, root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 611, "feature.txt");
+
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(611));
+    const workAuthority = new InMemoryWorkAuthority([workItem(611, "2026-08-19T00:00:00Z")]);
+    const pendingRequest = {
+      status: "awaiting_external_verification" as const,
+      criteria: [{
+        id: "AC-1",
+        criterion: "Preview deployment confirms the integrated flow",
+        classification: "post_merge_preview",
+        environment: "preview",
+        evidence: "preview deployment URL",
+      }],
+    };
+
+    const result = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 611,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(611, "2026-08-19T00:00:00Z")),
+      pendingVerification: pendingRequest,
+    });
+
+    assert.equal(result.closed, false);
+    assert.equal(result.authorityChanged, false);
+    assert.equal(result.leaseLostAfterMerge, false);
+    assert.equal(result.requiresReverification, false);
+    assert.deepEqual(result.pendingVerification, {
+      version: 1,
+      status: "awaiting_external_verification",
+      issueNumber: 611,
+      integratedMainCommitSha: result.mergeSha,
+      criteria: pendingRequest.criteria,
+    });
+    const item = await workAuthority.get("611");
+    assert.equal(item.state, "open");
+    assert.match(item.comments.at(-1)?.body ?? "", /pi-next-awaiting-verification/);
+    assert.match(item.comments.at(-1)?.body ?? "", new RegExp(result.mergeSha));
+    assert.equal(git(origin, ["rev-parse", "main"]), result.mergeSha);
+  });
+
   test("refuses to finalize when the lease is not owned by the caller", async () => {
     const { root } = setupRepo();
     const candidateSha = createCandidateBranch(root, 602, "feature.txt");

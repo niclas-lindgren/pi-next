@@ -42,6 +42,14 @@ Integration can land durably even when closure is withheld
 main is never held hostage by a stale verification snapshot, but a stale
 worker can never silently mark stale-authority work "Done".
 
+When a consumer supplies explicit `pendingVerification` criteria, finalization
+uses the same lease, authority, integration, and reachability fences, then
+records an `awaiting_external_verification` result containing the exact
+criteria and integrated `main` SHA through the adapter's
+`recordPendingVerification` capability. The issue remains open; the kernel
+never infers that a criterion is safe to defer, and consumer policy owns the
+classification and later verification.
+
 A `requiresReverification: true` result's `mergeSha` is the exact integrated
 main revision the caller must reverify before retrying. The retry must pass
 that same SHA back as `verifiedIntegratedMain` (#20): candidate reachability
@@ -65,6 +73,8 @@ where available, but Pi-next does not claim OS sandboxing by prompt convention.
 discover -> authority freshness -> lease CAS -> canonical worktree
   -> plan/implementation -> checkpoint/recovery -> verification
   -> current-authority reconciliation -> guarded completion
+       |-> fully verified: close
+       `-> explicit pending criteria: record open awaiting verification
 ```
 
 Any ownership, identity, freshness, worktree, verification, or integration

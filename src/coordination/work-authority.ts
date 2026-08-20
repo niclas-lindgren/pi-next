@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 
 import type { PiNextConfig } from "./config.ts";
 import type { SelfAssessmentFinding } from "./self-assessment.ts";
+import type { PendingVerificationRecord } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +41,8 @@ export interface AuthorityCapabilities {
   discovery: boolean;
   freshness: boolean;
   completion: boolean;
+  /** Record an explicitly supplied pending-verification state while leaving the item open. */
+  pendingVerification?: boolean;
   atomicOwnership: boolean;
   projectStatus: boolean;
 }
@@ -52,6 +55,8 @@ export interface WorkAuthorityAdapter {
   fingerprint(item: AuthorityWorkItem): string;
   /** Terminal completion: mark a work item done and record the closing comment. Requires `capabilities.completion`. */
   close(id: string, comment: string): Promise<void>;
+  /** Record structured pending criteria after safe integration without closing the item. */
+  recordPendingVerification?(id: string, record: PendingVerificationRecord, comment?: string): Promise<void>;
   /** Optional, thresholded governance surface. Never required for scheduling. */
   publishFinding?(finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
   updateFinding?(id: string, finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
@@ -178,6 +183,7 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
     discovery: true,
     freshness: true,
     completion: true,
+    pendingVerification: true,
     // Ownership is provided by the separate lease CAS authority.
     atomicOwnership: false,
     projectStatus: false,
@@ -235,6 +241,23 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
 
   async close(id: string, comment: string): Promise<void> {
     await this.gh(["issue", "close", id, "--comment", comment]);
+    this.cache.delete(id);
+  }
+
+  async recordPendingVerification(id: string, record: PendingVerificationRecord, comment?: string): Promise<void> {
+    const body = [
+      "<!-- pi-next-awaiting-verification -->",
+      "## Implementation complete / awaiting external verification",
+      "",
+      `integratedMainCommitSha: ${record.integratedMainCommitSha}`,
+      `issueNumber: ${record.issueNumber}`,
+      "",
+      "```json",
+      JSON.stringify(record, null, 2),
+      "```",
+      ...(comment ? ["", comment] : []),
+    ].join("\\n");
+    await this.gh(["issue", "comment", id, "--body", body.slice(0, 8_000)]);
     this.cache.delete(id);
   }
 
@@ -341,6 +364,7 @@ export class InMemoryWorkAuthority implements WorkAuthorityAdapter {
     discovery: true,
     freshness: true,
     completion: true,
+    pendingVerification: true,
     atomicOwnership: false,
     projectStatus: false,
   });
@@ -373,6 +397,27 @@ export class InMemoryWorkAuthority implements WorkAuthorityAdapter {
     item.comments = [
       ...item.comments,
       { id: `close-${id}-${item.comments.length}`, author: "system", body: comment, createdAt: now, updatedAt: now },
+    ];
+  }
+
+  async recordPendingVerification(id: string, record: PendingVerificationRecord, comment?: string): Promise<void> {
+    const item = this.items.get(id);
+    if (!item) throw new Error(`Unknown work item: ${id}`);
+    const now = new Date().toISOString();
+    const body = [
+      "<!-- pi-next-awaiting-verification -->",
+      "## Implementation complete / awaiting external verification",
+      "",
+      `integratedMainCommitSha: ${record.integratedMainCommitSha}`,
+      "",
+      "```json",
+      JSON.stringify(record, null, 2),
+      "```",
+      ...(comment ? ["", comment] : []),
+    ].join("\\n");
+    item.comments = [
+      ...item.comments,
+      { id: `pending-${id}-${item.comments.length}`, author: "system", body, createdAt: now, updatedAt: now },
     ];
   }
 
