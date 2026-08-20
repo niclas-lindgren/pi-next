@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.5 - 2026-08-20
+
+Operational issue-boundary learning release.
+
+- Feed complexity-normalized peer metrics into live maintenance decisions and
+  enforce a maintenance-overhead budget.
+- Prevent stacked tuning after inconclusive evaluations and automatically roll
+  back known reversible tuning overlays after measured regressions.
+- Persist held corrective findings for non-reversible or failed rollbacks, with
+  behavioral coverage for normalized outliers and evaluation gating.
+
 ## 0.1.4 - 2026-08-20
 
 Self-assessment governance conformance release.

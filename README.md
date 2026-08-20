@@ -5,7 +5,7 @@ Pi-next is an experimental autonomous issue-implementation loop for the
 is a Pi extension, not a model provider or a replacement for Pi's package
 manager.
 
-> **Experimental / pre-1.0:** v0.1.4 is the latest migration-ready public
+> **Experimental / pre-1.0:** v0.1.5 is the latest migration-ready public
 > release. Review the code and use a disposable repository before enabling
 > autonomous runs on valuable work.
 
@@ -22,7 +22,7 @@ Use an immutable release tag or commit, rather than floating `main`, for
 reproducible or autonomous use. The supported release is:
 
 ```sh
-pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.4
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.5
 ```
 
 The `-l` form records the exact package ref in the consuming repository's
@@ -44,10 +44,10 @@ commit; subsequent `pi update --extensions` runs reconcile that pinned ref
 rather than floating to `main`:
 
 ```sh
-pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.4
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.1.5
 ```
 
-A commit SHA may be used while developing. v0.1.4 uses package/config schema
+A commit SHA may be used while developing. v0.1.5 uses package/config schema
 version 1 and supports Pi 0.84.2+ with Node 22.19+. It is pre-1.0: minor
 releases may change behavior, and consumers should review release notes before
 upgrading. Updating or removing pi-next does not own or delete the consumer's
