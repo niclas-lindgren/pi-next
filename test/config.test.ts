@@ -88,6 +88,101 @@ test("a non-GitHub authority can provide configurable candidates", async () => {
   assert.doesNotMatch(result.text || "", /paused work item/);
 });
 
+test("awaiting external verification is excluded until authoritative PASS/FAIL evidence", async () => {
+  const pending = {
+    version: 1 as const,
+    status: "awaiting_external_verification" as const,
+    criteria: [{ id: "deploy", description: "Deploy and verify the integrated revision", environment: "preview" }],
+    integratedMainSha: "a".repeat(40),
+  };
+  const authority = new InMemoryWorkAuthority([
+    {
+      id: "pending",
+      number: 9,
+      title: "pending verification",
+      body: "changed-authority body",
+      state: "open",
+      priority: "urgent",
+      states: ["prepared"],
+      comments: [{
+        id: "pending-marker",
+        author: "system",
+        body: `<!-- pi-next-pending-verification -->\n${JSON.stringify(pending)}`,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      }],
+    },
+    {
+      id: "passed",
+      number: 10,
+      title: "passed verification",
+      body: "",
+      state: "open",
+      priority: "urgent",
+      states: ["prepared"],
+      comments: [
+        {
+          id: "passed-pending-marker",
+          author: "system",
+          body: `<!-- pi-next-pending-verification -->\n${JSON.stringify(pending)}`,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+        {
+          id: "passed-result-marker",
+          author: "maintainer",
+          body: `<!-- pi-next-pending-verification-result -->\n${JSON.stringify({ version: 1, integratedMainSha: pending.integratedMainSha, status: "passed", evidence: "maintainer approval" })}`,
+          createdAt: "2026-01-02T00:00:00Z",
+          updatedAt: "2026-01-02T00:00:00Z",
+        },
+      ],
+    },
+    {
+      id: "failed",
+      number: 11,
+      title: "failed verification",
+      body: "",
+      state: "open",
+      priority: "urgent",
+      states: ["prepared"],
+      comments: [
+        {
+          id: "failed-pending-marker",
+          author: "system",
+          body: `<!-- pi-next-pending-verification -->\n${JSON.stringify(pending)}`,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+        {
+          id: "failed-result-marker",
+          author: "maintainer",
+          body: `<!-- pi-next-pending-verification-result -->\n${JSON.stringify({ version: 1, integratedMainSha: pending.integratedMainSha, status: "failed", evidence: "preview regression" })}`,
+          createdAt: "2026-01-02T00:00:00Z",
+          updatedAt: "2026-01-02T00:00:00Z",
+        },
+      ],
+    },
+    {
+      id: "eligible",
+      number: 12,
+      title: "unrelated eligible work",
+      body: "",
+      state: "open",
+      priority: "urgent",
+      states: ["prepared"],
+      comments: [],
+    },
+  ]);
+
+  const result = await candidateShortlist("/tmp", { authority, config: validatedConfig, refreshMain: false });
+  assert.equal(result.candidateIssueNumber, 10);
+  assert.match(result.text || "", /#10 passed verification/);
+  assert.match(result.text || "", /#11 failed verification/);
+  assert.match(result.text || "", /#12 unrelated eligible work/);
+  assert.doesNotMatch(result.text || "", /#9 pending verification/);
+  assert.match(result.text || "", /#9/);
+});
+
 test("current-run deferred issues are excluded and authoritative exhaustion is explicit", async () => {
   const authority = new InMemoryWorkAuthority([
     {

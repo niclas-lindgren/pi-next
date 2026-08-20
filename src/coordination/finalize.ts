@@ -238,16 +238,17 @@ function validatePendingVerification(input: PendingVerificationRequest | undefin
     }
     const id = typeof criterion.id === "string" ? criterion.id.trim() : "";
     const description = typeof criterion.description === "string" ? criterion.description.trim() : "";
-    if (!id || !description || seen.has(id)) {
+    const environment = typeof criterion.environment === "string" ? criterion.environment.trim() : "";
+    if (!id || !description || !environment || seen.has(id)) {
       throw new FinalizeError(
         "INVALID_PENDING_VERIFICATION",
-        "Pending verification criteria require unique non-empty id and description fields",
+        "Pending verification criteria require unique non-empty id, description, and environment fields",
       );
     }
     seen.add(id);
-    return { id, description };
+    return { id, description, environment };
   });
-  return { version: 1, criteria, integratedMainSha: "" };
+  return { version: 1, status: "awaiting_external_verification", criteria, integratedMainSha: "" };
 }
 
 export async function finalizeIssue(

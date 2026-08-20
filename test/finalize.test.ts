@@ -170,8 +170,8 @@ describe("finalizeIssue", () => {
     leaseAuthority.seed(freshLease(621));
     const workAuthority = new InMemoryWorkAuthority([workItem(621, "2026-08-19T00:00:00Z")]);
     const criteria = [
-      { id: "deploy", description: "Deploy the integrated main revision to staging" },
-      { id: "human-check", description: "Obtain explicit product-owner verification" },
+      { id: "deploy", description: "Deploy the integrated main revision to staging", environment: "preview" },
+      { id: "human-check", description: "Obtain explicit product-owner verification", environment: "human_approval" },
     ] as const;
 
     const result = await finalizeIssue(leaseAuthority, workAuthority, {
@@ -191,6 +191,7 @@ describe("finalizeIssue", () => {
     assert.equal(result.requiresReverification, false);
     assert.deepEqual(result.pendingVerification, {
       version: 1,
+      status: "awaiting_external_verification",
       criteria,
       integratedMainSha: result.mergeSha,
     });

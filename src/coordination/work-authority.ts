@@ -14,9 +14,14 @@ import type { SelfAssessmentFinding } from "./self-assessment.ts";
 
 const execFileAsync = promisify(execFile);
 const PENDING_VERIFICATION_MARKER = "<!-- pi-next-pending-verification -->";
+const PENDING_VERIFICATION_RESULT_MARKER = "<!-- pi-next-pending-verification-result -->";
 
 function pendingVerificationComment(record: PendingVerificationRecord): string {
   return `${PENDING_VERIFICATION_MARKER}\n${JSON.stringify(record)}`;
+}
+
+function pendingVerificationResultComment(result: PendingVerificationResult): string {
+  return `${PENDING_VERIFICATION_RESULT_MARKER}\n${JSON.stringify(result)}`;
 }
 
 export interface AuthorityComment {
@@ -39,6 +44,10 @@ export interface AuthorityWorkItem {
   priority?: string;
   states: string[];
   comments: AuthorityComment[];
+  /** Structured pending state projected from the authority's comments. */
+  pendingVerification?: PendingVerificationRecord;
+  /** Latest authoritative result for the pending integrated revision, when any. */
+  pendingVerificationResult?: PendingVerificationResult;
 }
 
 export interface AuthorityCapabilities {
@@ -56,13 +65,24 @@ export interface PendingVerificationCriterion {
   id: string;
   /** Human-readable, explicit criterion retained by the authority adapter. */
   description: string;
+  /** Required verification environment, such as preview, production, or human approval. */
+  environment: string;
 }
 
 export interface PendingVerificationRecord {
   version: 1;
+  status: "awaiting_external_verification";
   criteria: readonly PendingVerificationCriterion[];
   /** Exact origin/main revision that was integrated and reachability-proven. */
   integratedMainSha: string;
+}
+
+export interface PendingVerificationResult {
+  version: 1;
+  integratedMainSha: string;
+  status: "passed" | "failed";
+  /** Authority-backed evidence or a reference to the authoritative result. */
+  evidence: string;
 }
 
 export interface WorkAuthorityAdapter {
@@ -75,6 +95,8 @@ export interface WorkAuthorityAdapter {
   close(id: string, comment: string): Promise<void>;
   /** Record structured post-integration checks while leaving the work item open. Requires `capabilities.pendingVerification`. */
   markPendingVerification?(id: string, record: PendingVerificationRecord): Promise<void>;
+  /** Record authoritative PASS/FAIL evidence so a pending issue can re-enter selection. */
+  recordPendingVerificationResult?(id: string, result: PendingVerificationResult): Promise<void>;
   /** Optional, thresholded governance surface. Never required for scheduling. */
   publishFinding?(finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
   updateFinding?(id: string, finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
@@ -177,10 +199,46 @@ function parseComments(raw: unknown): AuthorityComment[] {
     : [];
 }
 
+function markedJson<T>(comments: readonly AuthorityComment[], marker: string): T | undefined {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const body = comments[index].body;
+    const markerIndex = body.indexOf(marker);
+    if (markerIndex < 0) continue;
+    try {
+      return JSON.parse(body.slice(markerIndex + marker.length).trim()) as T;
+    } catch {
+      // A malformed lifecycle marker is intentionally not treated as evidence.
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+export function pendingVerificationState(
+  item: Pick<AuthorityWorkItem, "comments" | "pendingVerification" | "pendingVerificationResult">,
+): { pending?: PendingVerificationRecord; result?: PendingVerificationResult } {
+  const pending = item.pendingVerification ?? markedJson<PendingVerificationRecord>(item.comments, PENDING_VERIFICATION_MARKER);
+  const result = item.pendingVerificationResult ?? markedJson<PendingVerificationResult>(item.comments, PENDING_VERIFICATION_RESULT_MARKER);
+  return { pending, result };
+}
+
+/** Pending external verification is not autonomous implementation work. */
+export function isAwaitingExternalVerification(
+  item: Pick<AuthorityWorkItem, "comments" | "pendingVerification" | "pendingVerificationResult">,
+): boolean {
+  const { pending, result } = pendingVerificationState(item);
+  if (!pending) return item.comments.some((comment) => comment.body.includes(PENDING_VERIFICATION_MARKER));
+  if (pending.status !== "awaiting_external_verification") return false;
+  return !result || result.integratedMainSha !== pending.integratedMainSha || !["passed", "failed"].includes(result.status);
+}
+
 function fromGitHub(raw: Record<string, unknown>): AuthorityWorkItem {
   const labels = parseLabels(raw.labels);
   const number = Number(raw.number || 0);
   const priority = labels.find((label) => label.startsWith("priority:"))?.slice("priority:".length).trim();
+  const comments = parseComments(raw.comments);
+  const pendingVerification = markedJson<PendingVerificationRecord>(comments, PENDING_VERIFICATION_MARKER);
+  const pendingVerificationResult = markedJson<PendingVerificationResult>(comments, PENDING_VERIFICATION_RESULT_MARKER);
   return {
     id: Number.isSafeInteger(number) && number > 0 ? String(number) : String(raw.id || ""),
     number: Number.isSafeInteger(number) && number > 0 ? number : undefined,
@@ -190,7 +248,9 @@ function fromGitHub(raw: Record<string, unknown>): AuthorityWorkItem {
     updatedAt: String(raw.updatedAt || "") || undefined,
     priority,
     states: labels,
-    comments: parseComments(raw.comments),
+    comments,
+    ...(pendingVerification ? { pendingVerification } : {}),
+    ...(pendingVerificationResult ? { pendingVerificationResult } : {}),
   };
 }
 
@@ -224,7 +284,7 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
     for (const priority of config.selection.priorities) {
       const { stdout } = await execFileAsync(
         "gh",
-        ["issue", "list", "--state", "open", "--label", `priority: ${priority}`, "--limit", "100", "--json", "number,title,state,updatedAt,labels"],
+        ["issue", "list", "--state", "open", "--label", `priority: ${priority}`, "--limit", "100", "--json", "number,title,state,updatedAt,labels,comments"],
         { cwd: this.cwd, maxBuffer: 2 * 1024 * 1024, encoding: "utf8" },
       );
       const issues = JSON.parse(stdout) as unknown;
@@ -264,6 +324,14 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
 
   async markPendingVerification(id: string, record: PendingVerificationRecord): Promise<void> {
     const comment = pendingVerificationComment(record);
+    const item = await this.get(id);
+    if (item.comments.some((entry) => entry.body === comment)) return;
+    await this.gh(["issue", "comment", id, "--body", comment]);
+    this.cache.delete(id);
+  }
+
+  async recordPendingVerificationResult(id: string, result: PendingVerificationResult): Promise<void> {
+    const comment = pendingVerificationResultComment(result);
     const item = await this.get(id);
     if (item.comments.some((entry) => entry.body === comment)) return;
     await this.gh(["issue", "comment", id, "--body", comment]);
@@ -415,9 +483,23 @@ export class InMemoryWorkAuthority implements WorkAuthorityAdapter {
     const body = pendingVerificationComment(record);
     if (item.comments.some((comment) => comment.body === body)) return;
     const now = new Date().toISOString();
+    item.pendingVerification = record;
     item.comments = [
       ...item.comments,
       { id: `pending-verification-${id}-${item.comments.length}`, author: "system", body, createdAt: now, updatedAt: now },
+    ];
+  }
+
+  async recordPendingVerificationResult(id: string, result: PendingVerificationResult): Promise<void> {
+    const item = this.items.get(id);
+    if (!item) throw new Error(`Unknown work item: ${id}`);
+    const body = pendingVerificationResultComment(result);
+    if (item.comments.some((comment) => comment.body === body)) return;
+    item.pendingVerificationResult = result;
+    const now = new Date().toISOString();
+    item.comments = [
+      ...item.comments,
+      { id: `pending-verification-result-${id}-${item.comments.length}`, author: "authority", body, createdAt: now, updatedAt: now },
     ];
   }
 

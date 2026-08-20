@@ -5,6 +5,7 @@ import { loadPiNextConfig, type PiNextConfig } from "../../src/coordination/conf
 import {
   createWorkAuthority,
   requireAuthorityCapability,
+  isAwaitingExternalVerification,
   type AuthorityWorkItem,
   type WorkAuthorityAdapter,
 } from "../../src/coordination/work-authority.ts";
@@ -221,11 +222,18 @@ export async function candidateShortlist(
   const groups: string[] = [];
   let firstCandidateIssueNumber: number | undefined;
   const excludedOpen: number[] = [];
+  const pendingVerificationOpen: number[] = [];
   const deferredOpen: number[] = [];
   const currentRunDeferredOpen: number[] = [];
   try {
     options.onStatus?.(`Querying ${authority.name} work items`);
-    const queried = (await authority.listCandidates(config))
+    const queriedItems = await authority.listCandidates(config);
+    const queried = queriedItems
+      .filter((item) => {
+        if (!isAwaitingExternalVerification(item)) return true;
+        if (Number.isSafeInteger(item.number) && item.number! > 0) pendingVerificationOpen.push(item.number!);
+        return false;
+      })
       .map(candidateFromAuthority)
       .filter((issue): issue is CandidateIssue => Boolean(issue));
     for (const issue of queried) {
@@ -292,6 +300,14 @@ export async function candidateShortlist(
       `Issues contained earlier in this run omitted from the shortlist: ${currentRunNotes
         .map((issue) => `#${issue}`)
         .join(", ")}. They are not eligible for reselection during this run.`,
+    );
+  }
+  const pendingNotes = [...new Set(pendingVerificationOpen)].sort((left, right) => left - right);
+  if (pendingNotes.length) {
+    notes.push(
+      `Issues awaiting authoritative external verification omitted from autonomous implementation selection: ${pendingNotes
+        .map((issue) => `#${issue}`)
+        .join(", ")}. They become eligible again only after a structured PASS/FAIL result or a configured verification worker path.`,
     );
   }
   const deferredNotes = [...new Set(deferredOpen)].sort((left, right) => left - right);
