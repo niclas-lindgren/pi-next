@@ -479,6 +479,13 @@ export async function reconcileMissingLoopResult(
     recovery: baseRecovery,
     updatedAt: loopNow(),
   });
+  recordLifecycleEvent(coordinationCwd, {
+    event: "worker_recovery",
+    issueNumber: issueNumber || 0,
+    runId: state.runId,
+    outcome: "skip",
+    reasonCode: "worker_result_missing_reconciling",
+  });
 
   const unsafe = async (
     reason: string,
