@@ -16,7 +16,7 @@ import {
   currentSupervisorStatus,
   ForegroundSupervisor,
 } from "./foreground-supervisor.ts";
-import { getLiveCtx, setLiveCtx } from "./live-ctx.ts";
+import { getLiveCtx, sessionIdentity, setLiveCtx } from "./live-ctx.ts";
 import {
   listLoopStates,
   loopResultFile,
@@ -83,25 +83,22 @@ function locallyAbandoned(cwd: string, state: LoopState): boolean {
 }
 
 /**
- * Return the run controlled by this interactive Pi process. This is diagnostic
- * only; lease authority remains GitHub. A preferred recovery run may be shown
- * before its fresh controller lock is installed.
+ * Return the run explicitly owned by this session. Lease authority remains
+ * GitHub, but a footer must never use repository-global timestamp ordering as
+ * an identity fallback when another worker is active.
  */
-/**
- * Select the newest durable status. In particular, a heartbeat for an older
- * run must not overwrite a newer run that started in the same session.
- * `listLoopStates` is timestamp ordered, but keep the comparison explicit so
- * this invariant remains true if its storage implementation changes.
- */
-export function activeAutoStatusRun(cwd: string, preferredRunId?: string): LoopState | undefined {
+export function activeAutoStatusRun(
+  cwd: string,
+  preferredRunId?: string,
+  ownerSessionId?: string,
+): LoopState | undefined {
   const states = listLoopStates(cwd).filter((state) =>
     ["running", "completed", "idle", "blocked", "failed", "stopped", "interrupted"].includes(state.status),
   );
-  const preferred = preferredRunId
-    ? states.find((state) => state.runId === preferredRunId)
-    : undefined;
+  if (preferredRunId) return states.find((state) => state.runId === preferredRunId);
+  if (!ownerSessionId) return undefined;
   return states
-    .filter((state) => !preferred || state.runId === preferred.runId || state.updatedAt >= preferred.updatedAt)
+    .filter((state) => state.sessionId === ownerSessionId)
     .sort((a, b) => {
       const updated = b.updatedAt.localeCompare(a.updatedAt);
       if (updated !== 0) return updated;
@@ -119,11 +116,14 @@ function autoStatusText(
   cwd: string,
   startedAt: number,
   preferredRunId?: string,
+  ownerSessionId?: string,
   version?: string,
   replaceExisting = false,
 ): string {
-  const state = replaceExisting ? undefined : activeAutoStatusRun(cwd, preferredRunId);
-  const elapsedFallback = `Pi-next ${version ? `v${version} ` : ""}auto · starting · ${Math.max(0, Math.round((Date.now() - startedAt) / 1_000))}s`;
+  const state = replaceExisting
+    ? undefined
+    : activeAutoStatusRun(cwd, preferredRunId, ownerSessionId);
+  const elapsedFallback = `Pi-next ${version ? `v${version} ` : ""}auto · no issue attached · ${Math.max(0, Math.round((Date.now() - startedAt) / 1_000))}s`;
   if (!state) return elapsedFallback;
   const supervisor = currentSupervisorStatus(cwd, state.runId);
   // setStatus is rendered by Pi in its footer/status surface. Keep all queue
@@ -162,8 +162,10 @@ export function startAutoStatusHeartbeat(
   const cwd = ctx.cwd;
   const startedAt = Date.now();
   const version = piNextRuntimeIdentity().version;
+  const ownerSessionId = sessionIdentity(ctx);
   let active = true;
   let firstUpdate = true;
+  let boundRunId: string | undefined;
   const cancel = () => {
     if (!active) return;
     active = false;
@@ -187,12 +189,21 @@ export function startAutoStatusHeartbeat(
     if (!active) return;
     const liveCtx = getLiveCtx();
     if (liveCtx) {
+      // Bind once to this session's own durable run. Before that happens,
+      // deliberately render a neutral state instead of borrowing the newest
+      // run from the repository runtime directory.
+      boundRunId ||= preferredRunId() || activeAutoStatusRun(
+        cwd,
+        undefined,
+        ownerSessionId,
+      )?.runId;
       setAutoStatusSafely(
         liveCtx,
         autoStatusText(
           cwd,
           startedAt,
-          preferredRunId(),
+          boundRunId,
+          ownerSessionId,
           version,
           Boolean(options.replaceExisting && firstUpdate),
         ),
@@ -276,7 +287,15 @@ export interface AbandonedAutoResumePreparation {
 export async function prepareAbandonedAutoResume(
   coordinationCwd: string,
   state: LoopState,
+  ownerSessionId?: string,
 ): Promise<AbandonedAutoResumePreparation> {
+  if (ownerSessionId && state.sessionId !== ownerSessionId) {
+    // Recovery has already passed the authoritative lease check. Bind the
+    // recovered run before any early-return path so reloads cannot later
+    // rediscover it as an unowned repository-global status.
+    state = { ...state, sessionId: ownerSessionId };
+    writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), state);
+  }
   if (state.step <= state.settledStep) return { ok: true };
   if (existsSync(loopResultFile(coordinationCwd, state.runId))) return { ok: true };
 
@@ -321,6 +340,7 @@ export async function prepareAbandonedAutoResume(
 
   writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), {
     ...state,
+    sessionId: ownerSessionId || state.sessionId,
     // The abandoned boundary has been reconciled locally. Mark it runnable so
     // ForegroundSupervisor.launch() can start the fresh same-issue worker;
     // leaving this as interrupted would make its running-state loop exit before
@@ -361,9 +381,16 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
   // a live local controller also gets a fresh heartbeat.
   pi.on("session_start", (_event, ctx) => {
     setLiveCtx(ctx);
-    const state = activeAutoStatusRun(ctx.cwd);
+    const ownerSessionId = sessionIdentity(ctx);
+    const state = activeAutoStatusRun(ctx.cwd, undefined, ownerSessionId);
     if (!state) return;
-    setAutoStatusSafely(ctx, autoStatusText(ctx.cwd, Date.now(), state.runId, piNextRuntimeIdentity().version));
+    setAutoStatusSafely(ctx, autoStatusText(
+      ctx.cwd,
+      Date.now(),
+      state.runId,
+      ownerSessionId,
+      piNextRuntimeIdentity().version,
+    ));
     if (state.status === "running" && controllerPid(ctx.cwd, state.runId) === process.pid) {
       startAutoStatusHeartbeat(ctx, () => state.runId);
     }

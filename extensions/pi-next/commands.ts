@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
+import { sessionIdentity } from "./live-ctx.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import { LocalIssueLeaseAuthority } from "./local-lease.ts";
 import {
@@ -605,7 +606,7 @@ export function registerPiNextCommands(
         // record is never evidence that a worker is actually alive right
         // now (#612) — only the live child runtime callback is. Surface both
         // explicitly rather than conflating them into one status line.
-        const supervisor = currentSupervisorStatus(ctx.cwd);
+        const supervisor = currentSupervisorStatus(ctx.cwd, undefined, sessionIdentity(ctx));
         if (supervisor) {
           notifySafely(ctx, formatSupervisorStatus(supervisor), "info");
         }

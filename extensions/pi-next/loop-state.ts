@@ -117,6 +117,8 @@ export interface DeferredIssue {
 export interface LoopState {
   version: 1;
   runId: string;
+  /** Stable owner session for presentation/recovery scoping. */
+  sessionId?: string;
   requestedIssues: number;
   /** Requested issues not yet settled; deferred and blocked issues count as settled. */
   remainingIssues: number;

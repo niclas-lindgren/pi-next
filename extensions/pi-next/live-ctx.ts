@@ -31,6 +31,22 @@ export function getLiveCtx(): ExtensionCommandContext | undefined {
   return current;
 }
 
+/**
+ * Stable host-session identity used to scope presentation state. A run may
+ * replace its command context while progressing, but its originating session
+ * identity remains the boundary that prevents another session's durable run
+ * from being selected as a footer fallback.
+ */
+export function sessionIdentity(ctx: unknown): string | undefined {
+  try {
+    const manager = (ctx as { sessionManager?: { getSessionId?: () => string } } | undefined)?.sessionManager;
+    const id = manager?.getSessionId?.();
+    return typeof id === "string" && id.trim() ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Test-only reset so unrelated specs never observe a leaked singleton. */
 export function __resetLiveCtxForTests(): void {
   current = undefined;

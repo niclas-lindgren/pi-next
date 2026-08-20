@@ -68,7 +68,7 @@ import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
-import { getLiveCtx } from "./live-ctx.ts";
+import { getLiveCtx, sessionIdentity } from "./live-ctx.ts";
 import {
   createSupervisorRuntime,
   type SupervisorRuntime,
@@ -921,6 +921,7 @@ export async function runPiNextLoop(
 
     const resumed: LoopState = {
       ...current,
+      sessionId: current.sessionId || sessionIdentity(ctx),
       settledStep,
       status: "running",
       stopRequested: false,
@@ -937,6 +938,7 @@ export async function runPiNextLoop(
   const state: LoopState = {
     version: 1,
     runId: `${createdAt.replace(/[:.]/g, "-")}-${process.pid}`,
+    sessionId: sessionIdentity(ctx),
     requestedIssues,
     remainingIssues: requestedIssues,
     step: 0,
