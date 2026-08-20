@@ -83,6 +83,8 @@ export interface LoopRecoveryState {
   exhausted: number;
   /** Attempts are counted per normalized worker-boundary fingerprint. */
   attemptsByFingerprint: Record<string, number>;
+  /** Maximum retries allowed for the current recovery policy. */
+  retryLimit?: number;
   lastFingerprint?: string;
   lastOutcome?:
     | "reconciling"
@@ -116,6 +118,9 @@ export interface LoopState {
   /** Requested issues not yet settled; deferred and blocked issues count as settled. */
   remainingIssues: number;
   step: number;
+  /** Current bounded session transition (1..3) for controller status display. */
+  sessionTransition?: number;
+  sessionTransitionLimit?: number;
   settledStep: number;
   maxSteps: number;
   stepHead?: string;
@@ -347,6 +352,7 @@ export function readLoopState(cwd: string, runId?: string): LoopState | null {
             automaticResumes: Math.max(0, Math.trunc(state.recovery.automaticResumes || 0)),
             exhausted: Math.max(0, Math.trunc(state.recovery.exhausted || 0)),
             attemptsByFingerprint: { ...(state.recovery.attemptsByFingerprint || {}) },
+            retryLimit: state.recovery.retryLimit,
             lastFingerprint: state.recovery.lastFingerprint,
             lastOutcome: state.recovery.lastOutcome,
             lastReason: state.recovery.lastReason,

@@ -24,6 +24,7 @@ import {
   type LoopState,
 } from "./loop-state.ts";
 import { renderAutoProgress } from "./auto-progress.ts";
+import { piNextRuntimeIdentity } from "../../src/version.ts";
 import {
   changeFiles,
   markerFile,
@@ -102,17 +103,18 @@ function activeAutoStatusRun(cwd: string, preferredRunId?: string): LoopState | 
 }
 
 /**
- * Delegates step/elapsed/liveness formatting to
- * foreground-supervisor.ts's shared `currentSupervisorStatus`/
- * `formatSupervisorStatus` (#612) instead of duplicating that
- * computation here; this function only resolves *which* local run this
- * process's heartbeat should describe (still `activeAutoStatusRun`'s
- * pid-scoped, diagnostic-only selection) and the pre-first-step fallback
- * text.
+ * Resolves the durable run and live supervisor snapshot for the footer
+ * renderer. The heartbeat is deliberately presentation-only: it never owns
+ * or infers workflow authority.
  */
-function autoStatusText(cwd: string, startedAt: number, preferredRunId?: string): string {
+function autoStatusText(
+  cwd: string,
+  startedAt: number,
+  preferredRunId?: string,
+  version?: string,
+): string {
   const state = activeAutoStatusRun(cwd, preferredRunId);
-  const elapsedFallback = `Pi-next auto · starting · ${Math.max(0, Math.round((Date.now() - startedAt) / 1_000))}s`;
+  const elapsedFallback = `Pi-next ${version ? `v${version} ` : ""}auto · starting · ${Math.max(0, Math.round((Date.now() - startedAt) / 1_000))}s`;
   if (!state) return elapsedFallback;
   const supervisor = currentSupervisorStatus(cwd, state.runId);
   // setStatus is rendered by Pi in its footer/status surface. Keep all queue
@@ -121,6 +123,7 @@ function autoStatusText(cwd: string, startedAt: number, preferredRunId?: string)
     readLoopState(cwd, state.runId) || state,
     {
       supervisor,
+      version,
       width: process.stdout.columns,
     },
   );
@@ -145,6 +148,7 @@ export function startAutoStatusHeartbeat(
   // valid after the command context becomes stale.
   const cwd = ctx.cwd;
   const startedAt = Date.now();
+  const version = piNextRuntimeIdentity().version;
   let active = true;
   const cancel = () => {
     if (!active) return;
@@ -166,7 +170,7 @@ export function startAutoStatusHeartbeat(
     // session_shutdown cancels the timer before the replacement context is
     // disposed. This guard also handles an already queued timer callback.
     if (!active) return;
-    setAutoStatusSafely(ctx, autoStatusText(cwd, startedAt, preferredRunId()));
+    setAutoStatusSafely(ctx, autoStatusText(cwd, startedAt, preferredRunId(), version));
   };
   const timer = setInterval(update, AUTO_STATUS_INTERVAL_MS);
   timer.unref?.();

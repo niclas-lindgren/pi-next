@@ -183,8 +183,9 @@ export function appendWorkerWorkLog(
   event: WorkerWorkLogEvent,
 ): void {
   try {
-    // Always retain attributed events in the session transcript. The view
-    // filter is presentation-only, so switching views does not lose history.
+    // Always retain attributed events for direct worker commands. Auto-loop
+    // uses appendWorkerNarrative below so mechanical activity stays in the
+    // live secondary widget instead of dominating the normal transcript.
     pi.appendEntry(WORK_LOG_ENTRY_TYPE, event);
   } catch (error) {
     // A replaced/shutting-down TUI is not an execution failure, but a
@@ -192,4 +193,17 @@ export function appendWorkerWorkLog(
     // from "nothing to report yet" — record it (diagnostic-only).
     reportSwallowedHostDeliveryFailure(error, "appendWorkerWorkLog");
   }
+}
+
+/**
+ * Keep auto-loop transcript entries semantic: assistant-visible summaries,
+ * verification outcomes, and failures. Reads, searches, edits, and tool
+ * starts remain available in the owner-bound live activity widget.
+ */
+export function appendWorkerNarrative(
+  pi: ExtensionAPI,
+  event: WorkerWorkLogEvent,
+): void {
+  if (!["assistant", "verify", "error"].includes(event.kind)) return;
+  appendWorkerWorkLog(pi, event);
 }

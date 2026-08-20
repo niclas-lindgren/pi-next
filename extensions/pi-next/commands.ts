@@ -57,7 +57,7 @@ import {
   type IssueWorkerRunner,
 } from "./util-core.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
-import { appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
+import { appendWorkerNarrative, appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
 import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
@@ -533,7 +533,10 @@ export function registerPiNextCommands(
     },
   });
 
-  registerPiNextLoopCommand(pi, (event) => appendWorkerWorkLog(pi, event));
+  // Auto-loop keeps mechanical worker activity in the secondary live widget;
+  // only assistant summaries, verification results, and errors enter the
+  // normal transcript.
+  registerPiNextLoopCommand(pi, (event) => appendWorkerNarrative(pi, event));
 
   pi.registerCommand("pi-next-doctor", {
     description: "Check the installed pi-next package, project config, and workflow prerequisites",

@@ -33,7 +33,8 @@ function state(overrides: Partial<LoopState> = {}): LoopState {
 test("auto progress starts at 0/N and never uses maxSteps as completion", () => {
   const output = renderAutoProgress(state({ maxSteps: 500 }), { width: 120 });
   assert.match(output, /0\/5 settled 0%/);
-  assert.doesNotMatch(output, /500/);
+  assert.match(output, /step 0\/500/);
+  assert.doesNotMatch(output, /500.*settled/);
 });
 
 test("completed, deferred, and blocked issues all count as settled", () => {
@@ -54,6 +55,7 @@ test("active issue and worker phase are visible", () => {
   const current = state({ activeIssueNumber: 642, step: 73 });
   const output = renderAutoProgress(current, {
     width: 120,
+    version: "0.2.5",
     supervisor: {
       workerAlive: true,
       workerLiveness: "alive",
@@ -61,8 +63,10 @@ test("active issue and worker phase are visible", () => {
       workerPhase: "implementation",
     },
   });
+  assert.match(output, /v0.2.5/);
   assert.match(output, /#642 · implementing/);
-  assert.match(output, /step 73/);
+  assert.match(output, /session 0\/3/);
+  assert.match(output, /step 73\/500/);
   assert.match(output, /47m/);
   assert.equal(autoLifecyclePhase(current, { workerAlive: true, workerLiveness: "alive", elapsedMs: 0, workerPhase: "verification" }), "verifying");
 });
@@ -75,11 +79,13 @@ test("recovery and terminal states are explicit", () => {
       automaticSettlements: 0,
       automaticResumes: 1,
       exhausted: 0,
-      attemptsByFingerprint: {},
+      attemptsByFingerprint: { "missing-result": 2 },
+      lastFingerprint: "missing-result",
       lastOutcome: "resuming_same_issue",
     },
   });
   assert.match(renderAutoProgress(recovering, { width: 120 }), /recovering/);
+  assert.match(renderAutoProgress(recovering, { width: 160 }), /retry 2\/3/);
   assert.match(renderAutoProgress(state({ status: "completed", remainingIssues: 0, completedIssues: [1, 2, 3, 4, 5] }), { width: 120 }), /100%.*complete/);
 });
 

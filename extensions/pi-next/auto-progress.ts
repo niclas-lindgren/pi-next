@@ -4,6 +4,8 @@ import type { WorkerWorkLogPhase } from "./worker-activity.ts";
 
 export interface AutoProgressRenderOptions {
   supervisor?: Pick<SupervisorStatus, "workerAlive" | "workerLiveness" | "elapsedMs" | "workerPhase"> | null;
+  /** Installed package version shown in the controller-owned footer. */
+  version?: string;
   /** Maximum line width. The status API is one line, so never return a wrapped line. */
   width?: number;
 }
@@ -68,11 +70,11 @@ function duration(ms: number | null | undefined): string | undefined {
   if (ms == null || !Number.isFinite(ms)) return undefined;
   const seconds = Math.max(0, Math.round(ms / 1_000));
   if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+  return `${Math.floor(seconds / 60)}m`;
 }
 
 function boundedWidth(width: number | undefined): number {
-  return Math.max(20, Math.floor(width || 100));
+  return Math.max(20, Math.floor(width || 80));
 }
 
 /**
@@ -92,11 +94,20 @@ export function renderAutoProgress(
   const issue = state.activeIssueNumber ? `#${state.activeIssueNumber}` : undefined;
   const phase = phaseLabel(state, options.supervisor);
   const elapsed = duration(options.supervisor?.elapsedMs);
-  const recovery = state.recovery?.lastOutcome &&
-    !["settled_from_durable_evidence"].includes(state.recovery.lastOutcome)
-    ? "recovery"
+  const recoveryOutcome = state.recovery?.lastOutcome;
+  const recovery = recoveryOutcome && recoveryOutcome !== "settled_from_durable_evidence"
+    ? `recovery:${recoveryOutcome.replaceAll("_", " ")}`
+    : "recovery:none";
+  const retryAttempt = state.recovery?.lastFingerprint
+    ? state.recovery.attemptsByFingerprint[state.recovery.lastFingerprint] || 0
+    : 0;
+  const retry = retryAttempt > 0
+    ? `retry ${retryAttempt}/${state.recovery?.retryLimit || 3}`
     : undefined;
+  const session = `session ${state.sessionTransition || 0}/${state.sessionTransitionLimit || 3}`;
+  const step = `step ${state.step}/${state.maxSteps}`;
   const width = boundedWidth(options.width);
+  const version = options.version ? `v${options.version} ` : "";
 
   // Keep the issue and phase ahead of optional detail when the terminal is
   // narrow. This is still a single status line and cannot wrap the transcript.
@@ -105,17 +116,21 @@ export function renderAutoProgress(
     : `Pi-next auto · ${phase} · ${settled}/${requested} ${percent}%`;
   if (width < 48) return compact.slice(0, width);
 
-  const barSlots = width < 72 ? 8 : width < 96 ? 12 : 18;
-  const primary = `Pi-next auto ${progressBar(percent, barSlots)} ${settled}/${requested} settled ${percent}%`;
+  const barSlots = width < 128 ? 8 : 18;
+  const primary = `Pi-next ${version}auto ${progressBar(percent, barSlots)} ${settled}/${requested} settled ${percent}%`;
   const current = issue ? ` · ${issue} · ${phase}` : ` · ${phase}`;
   const counts = ` · ✓${completed} ↷${deferred} · ${remaining} remaining`;
-  const diagnostics = [
-    state.step > 0 ? `step ${state.step}` : undefined,
-    recovery,
-    elapsed,
-  ].filter(Boolean).join(" · ");
+  const diagnostics = [recovery, retry, session, step, elapsed]
+    .filter(Boolean).join(" · ");
   const full = primary + current + counts + (diagnostics ? ` · ${diagnostics}` : "");
   if (full.length <= width) return full;
+
+  // At ordinary terminal widths keep controller diagnostics by shortening the
+  // prose around the progress bar before dropping recovery/session/step data.
+  const concisePrefix = version ? `Pi-next ${version.trim()}` : "Pi-next auto";
+  const concisePrimary = `${concisePrefix} ${progressBar(percent, barSlots)} ${settled}/${requested} settled ${percent}%`;
+  const concise = concisePrimary + current + ` · ${remaining} rem` + (diagnostics ? ` · ${diagnostics}` : "");
+  if (concise.length <= width) return concise;
 
   const medium = primary + current + counts;
   if (medium.length <= width) return medium;

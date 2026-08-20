@@ -56,7 +56,7 @@ import {
 import { workflowArtifacts } from "./plan-read.ts";
 import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
-import { appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
+import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
 import { getLiveCtx } from "./live-ctx.ts";
 import {
@@ -408,13 +408,10 @@ export async function runOwnedIssueCycle(
               }),
             onWorkerState: options.onWorkerState ?? onWorkerState,
             display: options.display ?? display,
-            onProgress:
-              options.onProgress ??
-              ((elapsedMs) =>
-                notifyLive(
-                  `pi-next #${prepared.activeIssueNumber ?? "?"} worker still running (${Math.round(elapsedMs / 1_000)}s)`,
-                  "info",
-                )),
+            // The controller-owned footer renders elapsed worker time from
+            // the live runtime. Do not emit heartbeat notifications into the
+            // normal transcript.
+            onProgress: options.onProgress,
             progressIntervalMs: options.progressIntervalMs ?? 10_000,
           });
         // A worker boundary is recoverable only while this issue's heartbeat
@@ -439,10 +436,6 @@ export async function runOwnedIssueCycle(
           );
           state = recovery.state;
           if (recovery.outcome !== "resuming_same_issue") break;
-          notifyLive(
-            `Pi-next recovered a missing worker result; resuming issue #${prepared.activeIssueNumber ?? "?"} with a fresh worker`,
-            "info",
-          );
         }
       } catch (error) {
         void reportRuntimeFailure(coordinationCwd, {
@@ -725,7 +718,7 @@ export async function runPiNextLoop(
 
 export function registerPiNextLoopCommand(
   pi: ExtensionAPI,
-  onWorkLog: WorkerWorkLogSink = (event) => appendWorkerWorkLog(pi, event),
+  onWorkLog: WorkerWorkLogSink = (event) => appendWorkerNarrative(pi, event),
 ): void {
   pi.registerCommand("pi-next-loop", {
     description:

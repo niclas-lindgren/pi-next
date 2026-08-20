@@ -44,7 +44,6 @@ import {
   notifyLoopState,
   readLoopState,
   runtimeCwdFor,
-  safeLoopNotify,
   safeLoopBoundary,
   ZERO_USAGE,
   type LoopOutcome,
@@ -444,6 +443,7 @@ export async function reconcileMissingLoopResult(
     ...previous,
     missingLoopResults: previous.missingLoopResults + 1,
     lastFingerprint: fingerprint,
+    retryLimit: maxAttempts,
     lastOutcome: "reconciling" as const,
     updatedAt: loopNow(),
   };
@@ -695,6 +695,8 @@ async function runOneStep(
     ...inputState,
     status: "running",
     step: inputState.step + 1,
+    sessionTransition: transitionInSession,
+    sessionTransitionLimit: MAX_TRANSITIONS_PER_SESSION,
     stepHead,
     stepStartedAt: loopNow(),
     updatedAt: loopNow(),
@@ -745,12 +747,6 @@ async function runOneStep(
           deferredIssues: state.deferredIssues.map((item) => item.issueNumber),
           leaseAuthority: new GitHubIssueLeaseAuthority(ctx.cwd),
         });
-  safeLoopNotify(
-    ctx,
-    `pi-next step ${state.step}/${state.maxSteps}; issues remaining ${state.remainingIssues}; session transition ${transitionInSession}/${MAX_TRANSITIONS_PER_SESSION}`,
-    "info",
-  );
-
   const started = Date.now();
   let promptError: unknown;
   let telemetry: WorkerTelemetryReport = { status: "unavailable" };
@@ -1018,11 +1014,6 @@ async function driveLoop(
     if (maintenanceOwed(ctx.cwd, state)) {
       const decision = await issueBoundaryMaintenanceDecision(ctx.cwd, state);
       if (!decision) continue;
-      safeLoopNotify(
-        ctx,
-        `Pi loop issue-boundary maintenance after #${state.completedIssues[state.completedIssues.length - 1]}`,
-        "info",
-      );
       if (!decision.shouldTune) {
         await runIssueBoundaryMaintenance(ctx, state, decision, executeWorker);
         state = readLoopState(runtimeCwdFor(ctx.cwd, state), state.runId) || state;

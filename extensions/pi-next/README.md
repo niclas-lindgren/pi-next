@@ -66,10 +66,12 @@ worker; direct commands must not observe or dispose another run's worker.
    directly from that stream and renders it as a live `ctx.ui.setWidget`
    panel above the editor, so visible assistant text and tool activity
    appear while a child is still generating/working, not only once a full
-   message/tool call has completed. `work-log.ts` separately appends only
-   completed, bounded events (`pi-next-worker-log` custom entries) as
-   durable transcript history; `/pi-next-view` filters both the live panel
-   and the durable transcript the same way. Footer heartbeats and the live
+   message/tool call has completed. `work-log.ts` separately appends bounded
+   worker entries (`pi-next-worker-log` custom entries) as durable transcript
+   history; auto-loop appends assistant summaries, verification outcomes, and
+   failures there, while reads/searches/edits/tool starts remain in the live
+   secondary activity panel. `/pi-next-view` filters both surfaces without
+   changing worker execution. Footer heartbeats and the live
    panel's own bounded fallback heartbeat are supplemental, and status
    reports `worker liveness unknown` unless a live child runtime callback
    has confirmed the process.
