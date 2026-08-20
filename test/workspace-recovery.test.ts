@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -105,6 +105,38 @@ async function resume(fixtureState: Awaited<ReturnType<typeof fixture>>) {
     new MemoryAuthority(fixtureState.lease),
   );
 }
+
+test("salvages a clean divergent legacy branch onto authoritative main", async () => {
+  const fixtureState = await fixture();
+  try {
+    // Advance authoritative main while the legacy branch remains on the old
+    // fixture base, then add one explicitly issue-attributed legacy commit.
+    await writeFile(join(fixtureState.repo, "main-update.txt"), "main\n");
+    await git(fixtureState.repo, "add", "main-update.txt");
+    await git(fixtureState.repo, "commit", "-m", "main advances");
+    await git(fixtureState.repo, "push", "origin", "main");
+    await git(fixtureState.workspace, "switch", "-c", "pi-next/issue-7/legacy");
+    await writeFile(join(fixtureState.workspace, "legacy-change.txt"), "legacy\n");
+    await git(fixtureState.workspace, "add", "legacy-change.txt");
+    await git(fixtureState.workspace, "commit", "-m", "feat: issue #7 legacy change");
+    await writeFile(join(fixtureState.workspace, "legacy-followup.txt"), "followup\n");
+    await git(fixtureState.workspace, "add", "legacy-followup.txt");
+    await git(fixtureState.workspace, "commit", "-m", "fix: issue #7 legacy follow-up");
+    await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
+
+    const recovered = await ensureIssueWorktree(fixtureState.repo, 7);
+    assert.equal(recovered, fixtureState.workspace);
+    assert.equal(await git(recovered, "branch", "--show-current"), "agent/issue-7");
+    assert.equal(await readFile(join(recovered, "main-update.txt"), "utf8"), "main\n");
+    assert.equal(await readFile(join(recovered, "legacy-change.txt"), "utf8"), "legacy\n");
+    assert.equal(await readFile(join(recovered, "legacy-followup.txt"), "utf8"), "followup\n");
+    const preserved = (await readdir(join(fixtureState.repo, ".worktrees"))).find((name) => name.startsWith("issue-7-legacy-"));
+    assert.ok(preserved, "original legacy checkout remains as recovery evidence");
+    assert.equal(await git(join(fixtureState.repo, ".worktrees", preserved!), "branch", "--show-current"), "pi-next/issue-7/legacy");
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
 
 test("real issue handoff quarantines an inherited unowned artifact and continues", async () => {
   const fixtureState = await fixture({

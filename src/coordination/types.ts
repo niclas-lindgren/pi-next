@@ -42,6 +42,8 @@ export type IssueLifecycleEventName =
   | "claim_expired"
   | "claim_taken_over"
   | "legacy_branch_adopted"
+  | "legacy_worktree_salvage_started"
+  | "legacy_worktree_salvaged"
   | "legacy_worktree_migrated"
   | "project_status_sync_attempted"
   | "project_status_sync_failed"
