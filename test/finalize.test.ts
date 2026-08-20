@@ -307,6 +307,43 @@ describe("finalizeIssue", () => {
     );
   });
 
+  test("final close fencing compares the verified authority fingerprint, not only updatedAt", async () => {
+    const { root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 611, "feature.txt");
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(611));
+    const original = workItem(611, "2026-08-19T00:00:00Z");
+    const workAuthority = new InMemoryWorkAuthority([original]);
+    const verifiedAuthorityFingerprint = workAuthority.fingerprint(original);
+
+    // An authoritative comment arrives without relying on updatedAt changing.
+    workAuthority.upsert({
+      ...original,
+      comments: [{
+        id: "decision-1",
+        author: "human",
+        body: "Requirement changed after verification",
+        createdAt: "2026-08-19T01:00:00Z",
+        updatedAt: "2026-08-19T01:00:00Z",
+      }],
+    });
+
+    const result = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 611,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: original.updatedAt!,
+      verifiedAuthorityFingerprint,
+    });
+
+    assert.equal(result.closed, false);
+    assert.equal(result.authorityChanged, true);
+    assert.equal((await workAuthority.get("611")).state, "open");
+  });
+
   test("reconciles main advancing between verification and finalize, merging safely but requiring reverification before closure", async () => {
     const { origin, root } = setupRepo();
     const candidateSha = createCandidateBranch(root, 608, "feature.txt");

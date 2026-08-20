@@ -46,7 +46,11 @@ import {
   type IssueLease,
 } from "./issue-authority.ts";
 import type { IssueLeaseAuthority } from "./issue-leases.ts";
-import { requireAuthorityCapability, type WorkAuthorityAdapter } from "./work-authority.ts";
+import {
+  requireAuthorityCapability,
+  type AuthorityWorkItem,
+  type WorkAuthorityAdapter,
+} from "./work-authority.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -80,6 +84,12 @@ export interface FinalizeInput {
   candidateSha: string;
   /** The live work item's `updatedAt` at the moment verification was performed. */
   issueUpdatedAt: string;
+  /**
+   * Exact authority fingerprint bound to successful final verification. When
+   * present, this is the mandatory close fence; the timestamp remains only a
+   * compatibility guard for older callers that predate fingerprint evidence.
+   */
+  verifiedAuthorityFingerprint?: string;
   /**
    * Required to close a retry after a prior `requiresReverification: true`
    * result (#20): the exact integrated `main` SHA that result reported as
@@ -384,8 +394,23 @@ export async function finalizeIssue(
     };
   }
 
-  const item = await workAuthority.get(String(input.issueNumber));
-  if ((item.updatedAt ?? "") !== input.issueUpdatedAt) {
+  let item: AuthorityWorkItem;
+  try {
+    // This is deliberately a fresh adapter read immediately before close. Do
+    // not use a cached freshness record: comments, labels, body, and state
+    // all belong to this irreversible-transition fence.
+    item = await workAuthority.get(String(input.issueNumber));
+  } catch (error) {
+    throw new FinalizeError(
+      "STALE_AUTHORITY",
+      `Cannot verify live authority for issue #${input.issueNumber} immediately before close: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const liveFingerprint = workAuthority.fingerprint(item);
+  const authorityChanged = input.verifiedAuthorityFingerprint
+    ? liveFingerprint !== input.verifiedAuthorityFingerprint
+    : (item.updatedAt ?? "") !== input.issueUpdatedAt;
+  if (authorityChanged) {
     return {
       ok: true,
       issueNumber: input.issueNumber,
