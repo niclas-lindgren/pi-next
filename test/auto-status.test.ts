@@ -174,7 +174,7 @@ test("independent session status never falls back to another session's newer run
   }
 });
 
-test("session replacement rebinds durable status and shutdown only cancels old writes", async () => {
+test("session replacement keeps the live heartbeat attached to the new context", async () => {
   const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-session-"));
   try {
     const runId = "replacement-run";
@@ -197,8 +197,8 @@ test("session replacement rebinds durable status and shutdown only cancels old w
     events.get("session_start")?.({}, context(cwd, statuses, "session-a"));
     assert.match(statuses.at(-1)?.[1] || "", /blocked/);
 
-    // A live state gets a replacement heartbeat, but shutdown must cancel it
-    // without attempting to clear or write through the old context.
+    // A live state keeps its heartbeat across replacement; writes resolve the
+    // current context rather than the disposed one.
     await writeFile(join(runDir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:01.000Z")));
     await writeFile(join(runDir, "controller.lock"), `run_id=${runId}\npid=${process.pid}\n`);
     const liveStatuses: Array<[string, string | undefined]> = [];
