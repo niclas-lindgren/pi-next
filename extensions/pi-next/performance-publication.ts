@@ -9,6 +9,7 @@ import { cpus } from "node:os";
 import { dirname, join, relative } from "node:path";
 
 import { configuredPath, loadPiNextConfig } from "../../src/coordination/config.ts";
+import type { IssueEfficiencyMetrics } from "../../src/coordination/self-assessment.ts";
 import { sessionModel } from "./auto-telemetry.ts";
 import { commitExplicitPaths, readQualityEvidence } from "./commit-safety.ts";
 import type { LoopIssueMetrics, LoopState, LoopUsage } from "./loop-state.ts";
@@ -204,6 +205,91 @@ async function complexityMetrics(cwd: string, issueNumber: number): Promise<Comp
     migrationFiles,
     additions,
     deletions,
+  };
+}
+
+export interface PublishedIssueEfficiencyMetrics {
+  issueNumber: number;
+  metrics: IssueEfficiencyMetrics;
+  maintenanceOverheadShare: number;
+}
+
+function numeric(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function issueEfficiencyFromRecord(record: Record<string, unknown>): PublishedIssueEfficiencyMetrics | undefined {
+  const issueNumber = numeric(record.issueNumber);
+  const product = record.product && typeof record.product === "object" ? record.product as Record<string, unknown> : undefined;
+  const complexity = record.complexity && typeof record.complexity === "object" ? record.complexity as Record<string, unknown> : undefined;
+  if (!issueNumber || !product || !complexity) return undefined;
+  const maintenance = record.maintenance && typeof record.maintenance === "object" ? record.maintenance as Record<string, unknown> : undefined;
+  const complexityMetrics = {
+    plannedTasks: numeric(complexity.plannedTasks),
+    acceptanceCriteria: numeric(complexity.acceptanceCriteria),
+    changedFiles: numeric(complexity.changedFiles),
+    sourceFiles: numeric(complexity.sourceFiles),
+    testFiles: numeric(complexity.testFiles),
+    docsFiles: numeric(complexity.docsFiles),
+    migrationFiles: numeric(complexity.migrationFiles),
+    additions: numeric(complexity.additions),
+    deletions: numeric(complexity.deletions),
+  };
+  const shares = [
+    numeric(maintenance?.freshTokenOverheadShare),
+    numeric(maintenance?.costOverheadShare),
+    numeric(maintenance?.wallOverheadShare),
+  ];
+  return {
+    issueNumber,
+    metrics: {
+      freshTokens: numeric(product.freshTokens),
+      costUsd: numeric(product.costUsd),
+      wallMs: numeric(product.transitionWallMs),
+      complexity: complexityMetrics,
+      model: typeof record.observedModel === "string" ? record.observedModel : undefined,
+    },
+    maintenanceOverheadShare: Math.max(...shares),
+  };
+}
+
+/** Read the bounded, sanitized issue-efficiency history used by the controller. */
+export function readPublishedIssueEfficiencyMetrics(cwd: string): PublishedIssueEfficiencyMetrics[] {
+  const records = mergeRecords(parseRecords(metricsFile(cwd)), parseRecords(pendingFile(cwd)));
+  return records
+    .map(issueEfficiencyFromRecord)
+    .filter((value): value is PublishedIssueEfficiencyMetrics => Boolean(value))
+    .slice(-MAX_RECORDS);
+}
+
+/** Collect the current completed issue's normalized-workload inputs before publication. */
+export async function collectIssueEfficiencyMetrics(
+  cwd: string,
+  state: LoopState,
+  issueNumber: number,
+): Promise<PublishedIssueEfficiencyMetrics | undefined> {
+  const metric = state.issueMetrics.find((item) => item.issueNumber === issueNumber && item.disposition === "completed");
+  if (!metric) return undefined;
+  const complexity = await complexityMetrics(cwd, issueNumber);
+  return {
+    issueNumber,
+    metrics: {
+      freshTokens: numeric(metric.input) + numeric(metric.output),
+      costUsd: numeric(metric.cost),
+      wallMs: numeric(metric.modelDurationMs),
+      complexity: {
+        plannedTasks: complexity.plannedTasks,
+        acceptanceCriteria: complexity.acceptanceCriteria,
+        changedFiles: complexity.changedFiles,
+        sourceFiles: complexity.sourceFiles,
+        testFiles: complexity.testFiles,
+        docsFiles: complexity.docsFiles,
+        migrationFiles: complexity.migrationFiles,
+        additions: complexity.additions,
+        deletions: complexity.deletions,
+      },
+    },
+    maintenanceOverheadShare: 0,
   };
 }
 

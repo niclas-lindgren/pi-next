@@ -1,10 +1,19 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 
+import { configuredPath, loadPiNextConfig } from "../../src/coordination/config.ts";
 import {
+  assessIssueBoundary,
+  DEFAULT_HEALTH_POLICY,
+  normalizeIssueMetrics,
+  type SelfAssessmentFinding,
+} from "../../src/coordination/self-assessment.ts";
+import {
+  collectIssueEfficiencyMetrics,
   observedSessionModel,
   publishIssuePerformanceMetrics,
+  readPublishedIssueEfficiencyMetrics,
 } from "./performance-publication.ts";
 import { buildLoopMaintenancePrompt } from "./prompt.ts";
 import {
@@ -16,7 +25,9 @@ import {
   type LoopIssueMetrics,
   type LoopState,
 } from "./loop-state.ts";
-import { removeFile, runtimeDir, writeJsonAtomic } from "./util.ts";
+import { commitExplicitPaths } from "./commit-safety.ts";
+import { persistSelfAssessmentFinding } from "./self-assessment.ts";
+import { git, removeFile, runtimeDir, writeJsonAtomic } from "./util.ts";
 import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
 
 const MAX_HISTORY = 20;
@@ -99,6 +110,13 @@ interface MaintenanceRecord {
   note?: string;
   assessment?: MaintenanceAssessmentResult;
   evaluation?: MaintenanceEvaluation;
+  reversibleTuning?: boolean;
+  tuningSnapshot?: {
+    path: string;
+    existed: boolean;
+    content?: string;
+  };
+  rollbackCommit?: string;
 }
 
 interface MaintenanceState {
@@ -251,7 +269,7 @@ function initialEvaluation(
   assessment: MaintenanceAssessmentResult,
   baseline?: LoopIssueMetrics,
 ): MaintenanceEvaluation {
-  const changed = assessment.action.changed && ["change_applied", "change_requires_reload", "previous_tuning_rolled_back"].includes(assessment.status);
+  const changed = assessment.action.changed && ["change_applied", "change_requires_reload"].includes(assessment.status);
   if (!changed || !baseline) {
     return { state: "not_applicable", afterIssues: assessment.evaluateAfterIssues };
   }
@@ -391,14 +409,185 @@ export function maintenanceDecision(state: LoopState): MaintenanceDecision | nul
   return { issueNumber, completedCount, reasons, shouldTune, summary };
 }
 
-function recordMaintenance(
+/**
+ * Boundary decision used by the live controller. The legacy synchronous
+ * decision remains available for hosts/tests, while this path consumes the
+ * complexity-normalized publication history before invoking a model.
+ */
+export async function issueBoundaryMaintenanceDecision(
+  cwd: string,
+  state: LoopState,
+): Promise<MaintenanceDecision | null> {
+  const base = maintenanceDecision(state);
+  if (!base) return null;
+
+  const current = await collectIssueEfficiencyMetrics(cwd, state, base.issueNumber);
+  let reasons = [...base.reasons];
+  let shouldTune = base.shouldTune;
+  let normalizedSummary = "";
+  let overheadShare = 0;
+
+  if (current) {
+    const peers = readPublishedIssueEfficiencyMetrics(cwd)
+      .filter((item) => item.issueNumber !== base.issueNumber);
+    const peerMetrics = peers.map((item) => item.metrics);
+    overheadShare = peers.length ? average(peers.map((item) => item.maintenanceOverheadShare)) : 0;
+    const normalized = assessIssueBoundary(
+      normalizeIssueMetrics(current.metrics),
+      peerMetrics.map((metrics) => normalizeIssueMetrics(metrics)),
+      overheadShare,
+      DEFAULT_HEALTH_POLICY.maxMaintenanceOverheadShare,
+    );
+    normalizedSummary = `cohort=${normalized.cohort} comparablePeers=${normalized.comparablePeers}`;
+
+    if (normalized.regressions.length) {
+      reasons.push(...normalized.regressions.map((reason) => `complexity-normalized outlier: ${reason}`));
+      shouldTune = true;
+    } else if (normalized.comparablePeers >= 2) {
+      // A raw-expensive but complexity-normal issue must not trigger tuning
+      // merely because its workload was larger than unrelated peers.
+      reasons = reasons.filter((reason) => !/severe fresh token use|severe accumulated transition wall time|fresh token use is a clear outlier|transition wall time is a clear outlier|fresh tokens per prompt is a clear outlier/i.test(reason));
+      shouldTune = reasons.length > 0;
+    }
+    if (normalized.maintenanceOverheadExceeded) {
+      reasons.push(`maintenance overhead ${(overheadShare * 100).toFixed(1)}% exceeds ${(DEFAULT_HEALTH_POLICY.maxMaintenanceOverheadShare * 100).toFixed(1)}% budget`);
+      shouldTune = false;
+    }
+  }
+
+  const maintenance = readMaintenance(cwd);
+  const evaluatedHistory = evaluatePending(maintenance.history, state);
+  const latestEvaluation = [...evaluatedHistory]
+    .reverse()
+    .find((record) => record.evaluation?.state === "inconclusive" || record.evaluation?.state === "regressed");
+  const lastObservedIssue = latestEvaluation?.evaluation?.observed?.issueNumbers.at(-1);
+  if (latestEvaluation && (!lastObservedIssue || state.completedIssues.length <= (state.completedIssues.indexOf(lastObservedIssue) + 1))) {
+    reasons.push(latestEvaluation.evaluation?.state === "regressed"
+      ? "previous tuning regressed; rollback or held corrective finding must settle before another change"
+      : "previous tuning was inconclusive; wait for new issue evidence before stacking another change");
+    shouldTune = false;
+  }
+
+  return {
+    ...base,
+    reasons: [...new Set(reasons)],
+    shouldTune,
+    summary: [base.summary, normalizedSummary, overheadShare ? `maintenanceOverhead=${(overheadShare * 100).toFixed(1)}%` : ""].filter(Boolean).join(" ").slice(0, MAX_TEXT),
+  };
+}
+
+function tuningOverlayPath(cwd: string): string {
+  return configuredPath(cwd, loadPiNextConfig(cwd).workflow.tuningPath);
+}
+
+function relativeTuningPath(cwd: string): string {
+  return relative(cwd, tuningOverlayPath(cwd)).replace(/\\/g, "/");
+}
+
+function reversibleTuningSnapshot(
+  cwd: string,
+  assessment: MaintenanceAssessmentResult,
+  before: MaintenanceRecord["tuningSnapshot"],
+): MaintenanceRecord["tuningSnapshot"] | undefined {
+  if (!assessment.action.changed || !["change_applied", "change_requires_reload"].includes(assessment.status)) return undefined;
+  const path = tuningOverlayPath(cwd);
+  const configured = relativeTuningPath(cwd);
+  const files = assessment.action.files.map((file) => {
+    const normalized = file.replace(/\\/g, "/");
+    return normalized.startsWith("./") ? normalized.slice(2) : normalized;
+  });
+  if (!files.length || files.some((file) => file !== configured)) return undefined;
+  return before && before.path === path ? before : undefined;
+}
+
+function maintenanceFinding(record: MaintenanceRecord, reason: string): SelfAssessmentFinding {
+  const action = record.assessment?.action;
+  const fingerprint = `maintenance-regression:${record.runId}:${record.issueNumber}:${action?.commit || "uncommitted"}`.slice(0, 180);
+  return {
+    fingerprint,
+    title: `Maintenance tuning regressed for issue #${record.issueNumber}`,
+    category: "efficiency",
+    severity: "P2",
+    confidence: "high",
+    evidence: [reason, ...(record.evaluation?.conclusion ? [record.evaluation.conclusion] : [])],
+    affectedRuns: [record.runId],
+    affectedIssues: [record.issueNumber],
+    recurrence: 1,
+    proposedAction: "Review the maintenance hypothesis and add a bounded reversible rollback or corrected runtime policy before retrying it.",
+    approvalState: "pending_review",
+  };
+}
+
+async function rollbackTuning(cwd: string, record: MaintenanceRecord): Promise<string> {
+  const snapshot = record.tuningSnapshot;
+  if (!snapshot) throw new Error("No mechanically reversible tuning snapshot is available");
+  if (snapshot.existed) writeFileSync(snapshot.path, snapshot.content || "", "utf8");
+  else if (existsSync(snapshot.path)) unlinkSync(snapshot.path);
+  const commit = await commitExplicitPaths(
+    cwd,
+    [relative(cwd, snapshot.path).replace(/\\/g, "/")],
+    `perf(agent): rollback regressed maintenance tuning #${record.issueNumber}`,
+    { allowCoordinationMigration: true },
+  );
+  if (!commit) throw new Error("Rollback produced no tracked tuning change");
+
+  const upstream = await git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).catch(() => "");
+  if (upstream.includes("/")) {
+    const split = upstream.indexOf("/");
+    const remote = upstream.slice(0, split);
+    const branch = upstream.slice(split + 1);
+    await git(cwd, ["push", remote, `HEAD:${branch}`]);
+    await git(cwd, ["fetch", remote, branch]);
+    await git(cwd, ["merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"]);
+  }
+  return commit;
+}
+
+async function operationalizeEvaluations(
+  cwd: string,
+  previous: MaintenanceState,
+  evaluated: MaintenanceRecord[],
+): Promise<MaintenanceRecord[]> {
+  const prior = new Map(previous.history.map((record) => [`${record.runId}:${record.issueNumber}:${record.completedCount}`, record]));
+  const next: MaintenanceRecord[] = [];
+  for (const record of evaluated) {
+    const old = prior.get(`${record.runId}:${record.issueNumber}:${record.completedCount}`);
+    if (old?.evaluation?.state === "pending" && record.evaluation?.state === "regressed" && !record.rollbackCommit) {
+      if (record.reversibleTuning && record.tuningSnapshot) {
+        try {
+          const commit = await rollbackTuning(cwd, record);
+          next.push({
+            ...record,
+            rollbackCommit: commit,
+            assessment: record.assessment ? {
+              ...record.assessment,
+              status: "previous_tuning_rolled_back",
+              action: { ...record.assessment.action, description: "Regressed reversible tuning was restored automatically", commit },
+            } : record.assessment,
+            evaluation: { ...record.evaluation, conclusion: `${record.evaluation.conclusion || "Regression detected"} Reversible tuning was rolled back automatically.` },
+          });
+          continue;
+        } catch (error) {
+          persistSelfAssessmentFinding(cwd, maintenanceFinding(record, `Automatic rollback failed: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      } else {
+        persistSelfAssessmentFinding(cwd, maintenanceFinding(record, "A non-reversible maintenance tuning regressed and requires review."));
+      }
+    }
+    next.push(record);
+  }
+  return next;
+}
+
+async function recordMaintenance(
   cwd: string,
   state: LoopState,
   record: Omit<MaintenanceRecord, "runId">,
-): void {
+): Promise<void> {
   const current = readMaintenance(cwd);
   const evaluated = evaluatePending(current.history, state);
-  const history = [...evaluated, { ...record, runId: state.runId }].slice(-MAX_HISTORY);
+  const operational = await operationalizeEvaluations(cwd, current, evaluated);
+  const history = [...operational, { ...record, runId: state.runId }].slice(-MAX_HISTORY);
   writeJsonAtomic(maintenanceFile(cwd), {
     version: 2,
     runId: state.runId,
@@ -410,9 +599,10 @@ function recordMaintenance(
 export async function runIssueBoundaryMaintenance(
   ctx: ExtensionCommandContext,
   state: LoopState,
-  decision: MaintenanceDecision = maintenanceDecision(state) as MaintenanceDecision,
+  decision: MaintenanceDecision | undefined,
   worker: IssueWorkerRunner = runIssueWorker,
 ): Promise<void> {
+  decision = decision ?? await issueBoundaryMaintenanceDecision(ctx.cwd, state) ?? undefined;
   if (!decision) return;
 
   const beforeBoundary = await safeLoopBoundary(ctx.cwd, true);
@@ -425,7 +615,7 @@ export async function runIssueBoundaryMaintenance(
       status: "healthy_no_change",
       summary: `Deterministic checkpoint healthy: ${decision.summary}`.slice(0, MAX_TEXT),
       rootCauses: [],
-      evidence: [],
+      evidence: decision.reasons,
       confidence: "high",
       action: { changed: false, files: [], description: "No tuning needed", expectedEffect: "None" },
       regressionGuard: { protected: [], successCriteria: [] },
@@ -437,17 +627,17 @@ export async function runIssueBoundaryMaintenance(
       decision.issueNumber,
       {
         triggered: false,
-        reasons: [],
+        reasons: decision.reasons,
         assessmentStatus: assessment.status,
         behaviorChanged: false,
         model: modelBefore,
       },
     );
-    recordMaintenance(ctx.cwd, state, {
+    await recordMaintenance(ctx.cwd, state, {
       issueNumber: decision.issueNumber,
       completedCount: decision.completedCount,
       checkedAt: loopNow(),
-      reasons: [],
+      reasons: decision.reasons,
       tuningRequested: false,
       tuningRan: false,
       metricsCommit,
@@ -459,6 +649,10 @@ export async function runIssueBoundaryMaintenance(
   }
 
   removeFile(maintenanceResultFile(ctx.cwd));
+  const tuningPath = tuningOverlayPath(ctx.cwd);
+  const tuningBefore: MaintenanceRecord["tuningSnapshot"] = existsSync(tuningPath)
+    ? { path: tuningPath, existed: true, content: readFileSync(tuningPath, "utf8") }
+    : { path: tuningPath, existed: false };
   const before = sessionUsage(ctx);
   const started = Date.now();
   let note = "maintenance assessment completed";
@@ -485,6 +679,7 @@ export async function runIssueBoundaryMaintenance(
   };
 
   const assessment = parseAssessmentResult(ctx.cwd) || defaultAssessment(note);
+  const reversibleSnapshot = reversibleTuningSnapshot(ctx.cwd, assessment, tuningBefore);
   const afterBoundary = await safeLoopBoundary(ctx.cwd, true);
   if (!afterBoundary.safe) throw new Error(`Issue-boundary maintenance left unsafe state: ${afterBoundary.reason}`);
 
@@ -503,7 +698,7 @@ export async function runIssueBoundaryMaintenance(
     },
   );
 
-  recordMaintenance(ctx.cwd, state, {
+  await recordMaintenance(ctx.cwd, state, {
     issueNumber: decision.issueNumber,
     completedCount: decision.completedCount,
     checkedAt: loopNow(),
@@ -515,6 +710,8 @@ export async function runIssueBoundaryMaintenance(
     metricsCommit,
     assessment,
     evaluation: initialEvaluation(assessment, baseline),
+    reversibleTuning: Boolean(reversibleSnapshot),
+    tuningSnapshot: reversibleSnapshot,
     note: assessment.summary,
   });
 }
