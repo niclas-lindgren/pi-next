@@ -8,5 +8,6 @@ export * from "./feedback.ts";
 export * from "./self-assessment.ts";
 export * from "./work-authority.ts";
 export * from "./issue-leases.ts";
+export * from "./authority-read-policy.ts";
 export * from "./finalize.ts";
 export * from "./cli.ts";

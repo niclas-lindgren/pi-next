@@ -36,6 +36,7 @@ import {
   type ProjectStatusAuthority,
   ProjectStatusSyncError,
 } from "./types.ts";
+import { readAuthorityWithTransientRetry } from "./authority-read-policy.ts";
 
 export type { IssueLease } from "./issue-authority.ts";
 export type {
@@ -938,7 +939,9 @@ async function salvageDivergentLegacyWorktree(
     let authorityReason = "ownership_missing";
     if (ownership) {
       try {
-        liveOwner = await ownership.authority.read(issueNumber);
+        liveOwner = await readAuthorityWithTransientRetry(
+          () => ownership.authority.read(issueNumber),
+        );
         const matches = !!liveOwner &&
           issueLeaseMatchesOwner(liveOwner, ownership.lease) &&
           isIssueLeaseFresh(liveOwner, new Date());
