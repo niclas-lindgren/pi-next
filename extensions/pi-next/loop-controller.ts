@@ -62,7 +62,7 @@ import {
   createWorkerFailureEvidence,
   WorkerFailureError,
 } from "./worker-failure.ts";
-import { classifyFailure } from "./failure-scope.ts";
+import { classifyFailure, IssueBoundaryFailure } from "./failure-scope.ts";
 
 const MAX_TRANSITIONS_PER_SESSION = 3;
 /** Maximum fresh workers for one normalized missing-result failure. */
@@ -230,17 +230,12 @@ async function applyResult(
   ) {
     const boundary = await safeLoopBoundary(cwd, result.outcome === "archived");
     if (!boundary.safe) {
-      const failed: LoopState = {
-        ...state,
-        status: "failed",
-        settledStep: state.step,
-        updatedAt: loopNow(),
-        lastOutcome: result.outcome,
-        lastReason: boundary.reason,
-      };
-      writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), failed);
       removeFile(loopResultFile(runtimeCwd, state.runId));
-      return { state: failed, terminal: true, outcome: "failed" };
+      throw new IssueBoundaryFailure(
+        result.issueNumber || state.activeIssueNumber || 0,
+        "execution",
+        boundary.reason || "issue workspace did not reach a safe boundary",
+      );
     }
   }
 

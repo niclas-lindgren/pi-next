@@ -32,6 +32,21 @@ export interface FailureClassification {
 }
 
 /** A handoff error retains typed issue context while crossing the controller boundary. */
+export class IssueBoundaryFailure extends Error {
+  readonly code = "issue_boundary_unsafe";
+  readonly paths: string[];
+  constructor(
+    readonly issueNumber: number,
+    readonly stage: IssueFailureStage,
+    readonly reason: string,
+    paths: string[] = [],
+  ) {
+    super(`Issue #${issueNumber} boundary is unsafe: ${reason}`);
+    this.name = "IssueBoundaryFailure";
+    this.paths = paths;
+  }
+}
+
 export class IssueHandoffError extends Error {
   readonly code = "issue_handoff_failed";
   readonly issueNumber: number;
@@ -84,6 +99,19 @@ export function classifyFailure(
   error: unknown,
   context: FailureScopeContext,
 ): FailureClassification {
+  if (error instanceof IssueBoundaryFailure &&
+      context.issueNumber === error.issueNumber &&
+      context.ownershipProven !== false) {
+    return {
+      scope: "issue-local",
+      stage: error.stage,
+      issueNumber: error.issueNumber,
+      code: error.code,
+      paths: error.paths,
+      reason: error.message,
+    };
+  }
+
   if (error instanceof IssueHandoffError) {
     return {
       scope: error.leaseReleased || error.ownershipProven ? "issue-local" : "loop-global",
