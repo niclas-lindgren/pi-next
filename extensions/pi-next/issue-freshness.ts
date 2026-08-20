@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import {
   createWorkAuthority,
+  extractAuthorityCommentRequirements,
   requireAuthorityCapability,
   type WorkAuthorityAdapter,
 } from "../../src/coordination/work-authority.ts";
@@ -113,11 +114,16 @@ export async function getLiveIssueFingerprint(
     : /(?:risk\s*:\s*high|priority\s*:?\s*p0|p0)/.test(authorityText)
       ? "high"
       : "normal";
+  const bodyCriteria = extractIssueAcceptanceCriteria(item.body);
+  const commentCriteria = adapter.projectRequirements
+    ? adapter.projectRequirements(item)
+    : extractAuthorityCommentRequirements(item.comments);
+  const criteria = [...bodyCriteria, ...commentCriteria];
   return {
     title: item.title,
     fingerprint: adapter.fingerprint(item),
     githubUpdatedAt: item.updatedAt,
-    acceptanceCriteria: extractIssueAcceptanceCriteria(item.body),
+    acceptanceCriteria: [...new Set(criteria.map((criterion) => criterion.trim()).filter(Boolean))],
     risk,
   };
 }

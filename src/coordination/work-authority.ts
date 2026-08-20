@@ -56,6 +56,39 @@ export interface WorkAuthorityAdapter {
   publishFinding?(finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
   updateFinding?(id: string, finding: SelfAssessmentFinding, config: Pick<PiNextConfig, "assessment">): Promise<{ id: string; url?: string }>;
   readFindingApproval?(id: string, config: Pick<PiNextConfig, "assessment">): Promise<SelfAssessmentFinding["approvalState"]>;
+  /** Optional adapter-owned projection of explicit requirement/decision comments. */
+  projectRequirements?(item: AuthorityWorkItem): readonly string[];
+}
+
+/**
+ * Extract only explicitly marked requirement/decision material from comments.
+ * Ordinary discussion, status updates, and noise are intentionally ignored.
+ * Adapters may provide a stricter domain-specific projector instead.
+ */
+export function extractAuthorityCommentRequirements(comments: readonly AuthorityComment[]): string[] {
+  const output: string[] = [];
+  for (const comment of comments) {
+    const lines = comment.body.split(/\r?\n/);
+    let section = false;
+    let sectionLevel = 0;
+    for (const line of lines) {
+      const heading = line.match(/^(#{1,6})\s+(acceptance criteria|requirements?|authoritative decisions?|decisions?)\s*:?[ \t]*$/i);
+      if (heading) {
+        section = true;
+        sectionLevel = heading[1].length;
+        continue;
+      }
+      if (/^#{1,6}\s+/.test(line)) {
+        const level = line.match(/^#+/)?.[0].length || 0;
+        if (section && level <= sectionLevel) section = false;
+      }
+      const checkbox = section ? line.match(/^\s*[-*]\s+\[[ xX]\]\s+(.+?)\s*$/) : null;
+      const explicit = line.match(/^\s*(?:[-*]\s*)?(requirement|decision|authoritative decision|must|shall)\s*:\s*(.+?)\s*$/i);
+      const value = checkbox?.[1] || (explicit ? `${explicit[1]}: ${explicit[2]}` : undefined);
+      if (value?.trim()) output.push(value.trim());
+    }
+  }
+  return [...new Set(output.map((value) => value.trim()).filter(Boolean))];
 }
 
 export class AuthorityCapabilityError extends Error {
@@ -194,6 +227,10 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
 
   fingerprint(item: AuthorityWorkItem): string {
     return authorityFingerprint(item);
+  }
+
+  projectRequirements(item: AuthorityWorkItem): readonly string[] {
+    return extractAuthorityCommentRequirements(item.comments);
   }
 
   async close(id: string, comment: string): Promise<void> {

@@ -162,7 +162,7 @@ test("owned PLAN recovery reconstructs acceptance criteria from live authority",
       capabilities: { discovery: true, freshness: true, completion: false, atomicOwnership: false, projectStatus: false },
       listCandidates: async () => [],
       get: async () => ({
-        id: "7", number: 7, title: "Live bounded repair", body: "## Acceptance Criteria\n- [ ] preserve completed work\n- [ ] retain the log", state: "open", updatedAt: "2026-01-01T00:00:00Z", priority: "P1", states: [], comments: [{ id: "decision-1", author: "maintainer", body: "retain the log", createdAt: "2026-01-01", updatedAt: "2026-01-01" }],
+        id: "7", number: 7, title: "Live bounded repair", body: "## Acceptance Criteria\n- [ ] preserve completed work\n- [ ] retain the log", state: "open", updatedAt: "2026-01-01T00:00:00Z", priority: "P1", states: [], comments: [{ id: "decision-1", author: "maintainer", body: "Decision: preserve audit trail", createdAt: "2026-01-01", updatedAt: "2026-01-01" }],
       }),
       fingerprint: (item: { title: string; body: string }) => `${item.title}:${item.body}`,
       close: async () => undefined,
@@ -171,9 +171,27 @@ test("owned PLAN recovery reconstructs acceptance criteria from live authority",
     const repaired = await readFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "utf8");
     assert.match(repaired, /preserve completed work/);
     assert.match(repaired, /retain the log/);
+    assert.match(repaired, /Decision: preserve audit trail/);
     assert.match(repaired, /implement the bounded repair/);
     assert.match(repaired, /Authority reconciliation authority=/);
     assert.doesNotThrow(() => validateWorkspacePlan(fixtureState.workspace, 7));
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("non-material authority comments do not churn acceptance criteria", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), plan("\n## Log\n").replace("## Acceptance Criteria\n- [ ] Existing requirements remain intact\n", ""));
+    const authority = {
+      name: "quiet", capabilities: { discovery: true, freshness: true, completion: false, atomicOwnership: false, projectStatus: false }, listCandidates: async () => [],
+      get: async () => ({ id: "7", number: 7, title: "Live bounded repair", body: "## Acceptance Criteria\n- [ ] Existing requirements remain intact", state: "open", states: [], comments: [{ id: "noise", author: "reviewer", body: "Looks good, thanks!", createdAt: "2026-01-01", updatedAt: "2026-01-01" }] }), fingerprint: (item: { body: string }) => item.body, close: async () => undefined,
+    };
+    await reconcileWorkspacePlan(fixtureState.workspace, 7, { authority });
+    const repaired = await readFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "utf8");
+    assert.match(repaired, /Existing requirements remain intact/);
+    assert.doesNotMatch(repaired, /Looks good/);
   } finally {
     await rm(fixtureState.root, { recursive: true, force: true });
   }
