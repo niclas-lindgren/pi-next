@@ -13,7 +13,7 @@ import {
   type IssueLeaseAuthority,
 } from "../src/coordination/index.ts";
 import { claimLoopIssue } from "../extensions/pi-next/loop.ts";
-import { validateWorkspacePlan } from "../extensions/pi-next/execution-boundary.ts";
+import { reconcileWorkspacePlan, validateWorkspacePlan } from "../extensions/pi-next/execution-boundary.ts";
 import { PlanAuthorityError } from "../extensions/pi-next/util-core.ts";
 import { lifecycleTelemetryFile } from "../extensions/pi-next/lifecycle-telemetry.ts";
 import { emptyLoopMetrics, type LoopState } from "../extensions/pi-next/loop-state.ts";
@@ -145,6 +145,51 @@ test("resume repairs a missing canonical title without changing task authority",
     const repaired = await readFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "utf8");
     assert.match(repaired, /^# Plan: Issue #7/m);
     assert.match(repaired, /implement the bounded repair/);
+    assert.match(repaired, /## Log/);
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("owned PLAN recovery reconstructs acceptance criteria from live authority", async () => {
+  const fixtureState = await fixture();
+  try {
+    const incomplete = plan("\n## Log\n")
+      .replace("## Acceptance Criteria\n- [ ] Existing requirements remain intact\n", "");
+    await writeFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), incomplete);
+    const authority = {
+      name: "fixture",
+      capabilities: { discovery: true, freshness: true, completion: false, atomicOwnership: false, projectStatus: false },
+      listCandidates: async () => [],
+      get: async () => ({
+        id: "7", number: 7, title: "Live bounded repair", body: "## Acceptance Criteria\n- [ ] preserve completed work\n- [ ] retain the log", state: "open", updatedAt: "2026-01-01T00:00:00Z", priority: "P1", states: [], comments: [{ id: "decision-1", author: "maintainer", body: "retain the log", createdAt: "2026-01-01", updatedAt: "2026-01-01" }],
+      }),
+      fingerprint: (item: { title: string; body: string }) => `${item.title}:${item.body}`,
+      close: async () => undefined,
+    };
+    await reconcileWorkspacePlan(fixtureState.workspace, 7, { runId: "run-live-repair", authority });
+    const repaired = await readFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "utf8");
+    assert.match(repaired, /preserve completed work/);
+    assert.match(repaired, /retain the log/);
+    assert.match(repaired, /implement the bounded repair/);
+    assert.match(repaired, /Authority reconciliation authority=/);
+    assert.doesNotThrow(() => validateWorkspacePlan(fixtureState.workspace, 7));
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("mechanical repair runs before an authority failure", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), plan("").replace(/## Acceptance Criteria[\s\S]*$/, ""));
+    await assert.rejects(
+      () => reconcileWorkspacePlan(fixtureState.workspace, 7, { runId: "run-bounded-repair", authority: {
+        name: "empty", capabilities: { discovery: true, freshness: true, completion: false, atomicOwnership: false, projectStatus: false }, listCandidates: async () => [], get: async () => ({ id: "7", number: 7, title: "", body: "", state: "open", states: [], comments: [] }), fingerprint: () => "empty", close: async () => undefined,
+      } }),
+      /provided none/,
+    );
+    const repaired = await readFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "utf8");
     assert.match(repaired, /## Log/);
   } finally {
     await rm(fixtureState.root, { recursive: true, force: true });

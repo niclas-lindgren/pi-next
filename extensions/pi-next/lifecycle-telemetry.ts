@@ -23,6 +23,7 @@ export type LifecycleEventName =
   | "project_status_synced"
   | "generation_teardown"
   | "plan_repaired"
+  | "plan_reconciled"
   | "workflow_artifact_quarantined"
   | "worker_recovery"
   | "issue_contained";
@@ -56,6 +57,7 @@ export interface LifecycleEvent {
   repair?: {
     paths: string[];
     fields: string[];
+    authorityFingerprint?: string;
   };
   /** Structured issue-local containment evidence; the worktree is preserved. */
   containment?: {
