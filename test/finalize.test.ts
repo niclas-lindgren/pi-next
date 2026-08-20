@@ -163,6 +163,67 @@ describe("finalizeIssue", () => {
     );
   });
 
+  test("integrates and records pending post-integration verification while leaving authority open", async () => {
+    const { origin, root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 621, "feature.txt");
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(621));
+    const workAuthority = new InMemoryWorkAuthority([workItem(621, "2026-08-19T00:00:00Z")]);
+    const criteria = [
+      { id: "deploy", description: "Deploy the integrated main revision to staging" },
+      { id: "human-check", description: "Obtain explicit product-owner verification" },
+    ] as const;
+
+    const result = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 621,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(621, "2026-08-19T00:00:00Z")),
+      pendingVerification: { criteria },
+    });
+
+    assert.equal(result.closed, false);
+    assert.equal(result.authorityChanged, false);
+    assert.equal(result.requiresReverification, false);
+    assert.deepEqual(result.pendingVerification, {
+      version: 1,
+      criteria,
+      integratedMainSha: result.mergeSha,
+    });
+    const item = await workAuthority.get("621");
+    assert.equal(item.state, "open");
+    assert.ok(item.comments.some((comment) => comment.body.includes("pi-next-pending-verification") && comment.body.includes(result.mergeSha)));
+    assert.equal(git(origin, ["rev-parse", "main"]), result.mergeSha);
+  });
+
+  test("rejects malformed pending verification before any promotion", async () => {
+    const { root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 622, "feature.txt");
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(622));
+    const workAuthority = new InMemoryWorkAuthority([workItem(622, "2026-08-19T00:00:00Z")]);
+
+    await expectRejects(
+      finalizeIssue(leaseAuthority, workAuthority, {
+        cwd: root,
+        issueNumber: 622,
+        agent: "claude",
+        runId: "run-1",
+        sessionId: "session-1",
+        candidateSha,
+        issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(622, "2026-08-19T00:00:00Z")),
+        pendingVerification: { criteria: [] },
+      }),
+      "INVALID_PENDING_VERIFICATION",
+    );
+    assert.equal(git(root, ["log", "-1", "--format=%s", "main"]), "baseline");
+  });
+
   test("refuses to finalize when the lease is not owned by the caller", async () => {
     const { root } = setupRepo();
     const candidateSha = createCandidateBranch(root, 602, "feature.txt");
