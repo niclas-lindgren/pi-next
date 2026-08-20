@@ -31,6 +31,7 @@ export interface IssueFreshnessResult {
 }
 
 export interface LiveIssueFingerprint {
+  title: string;
   fingerprint: string;
   githubUpdatedAt?: string;
   acceptanceCriteria: string[];
@@ -113,6 +114,7 @@ export async function getLiveIssueFingerprint(
       ? "high"
       : "normal";
   return {
+    title: item.title,
     fingerprint: adapter.fingerprint(item),
     githubUpdatedAt: item.updatedAt,
     acceptanceCriteria: extractIssueAcceptanceCriteria(item.body),

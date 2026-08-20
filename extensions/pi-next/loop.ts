@@ -7,6 +7,7 @@ import { relative } from "node:path";
 
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import {
+  reconcileWorkspacePlan,
   validateCanonicalExecutionState,
   validateWorkspacePlan,
 } from "./execution-boundary.ts";
@@ -237,6 +238,7 @@ export async function claimLoopIssue(
   cwd: string,
   state: LoopState,
   authorityOverride?: import("./issue-leases.ts").IssueLeaseAuthority,
+  workAuthorityOverride?: import("../../src/coordination/work-authority.ts").WorkAuthorityAdapter,
 ): Promise<LoopState> {
   const hasPersistedExecutionState =
     state.activeIssueNumber !== undefined ||
@@ -283,6 +285,10 @@ export async function claimLoopIssue(
       }
       await quarantineInheritedArtifacts(cwd, workspace, activeIssueNumber, state.runId);
       await quarantineLegacyRootArtifacts(cwd, state.runId);
+      await reconcileWorkspacePlan(workspace, activeIssueNumber, {
+        runId: state.runId,
+        authority: workAuthorityOverride,
+      });
       validateWorkspacePlan(workspace, activeIssueNumber, { runId: state.runId });
     } catch (error) {
       throw new IssueHandoffError({
@@ -352,6 +358,10 @@ export async function claimLoopIssue(
     workspace = await ensureIssueWorktree(cwd, issueNumber, recordLifecycleEvent);
     await quarantineInheritedArtifacts(cwd, workspace, issueNumber, state.runId);
     await quarantineLegacyRootArtifacts(cwd, state.runId);
+    await reconcileWorkspacePlan(workspace, issueNumber, {
+      runId: state.runId,
+      authority: workAuthorityOverride,
+    });
     validateWorkspacePlan(workspace, issueNumber, { runId: state.runId });
   } catch (error) {
     try {
