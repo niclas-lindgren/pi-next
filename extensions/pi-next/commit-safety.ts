@@ -83,7 +83,7 @@ export function writeQualityEvidence(
 
 export async function assertArchiveReady(
   cwd: string,
-): Promise<{ plan: string; issue: number; fingerprint: string }> {
+): Promise<{ plan: string; issue: number; fingerprint: string; authorityFingerprint: string }> {
   const planPath = planFile(cwd);
   if (!existsSync(planPath)) throw new Error(`PLAN.md not found at ${planPath}`);
   const plan = readFileSync(planPath, "utf8");
@@ -177,7 +177,9 @@ export async function assertArchiveReady(
       `Cannot archive with a dirty worktree:\n${changed.map((file) => `- ${file}`).join("\n")}`,
     );
   }
-  return { plan, issue, fingerprint };
+  // This exact fingerprint is the final-verification authority evidence. Do
+  // not replace it with a later cache entry when a caller proceeds to close.
+  return { plan, issue, fingerprint, authorityFingerprint: liveIssue.fingerprint };
 }
 
 export async function commitExplicitPaths(
@@ -295,7 +297,7 @@ export function archivePlanFiles(cwd: string, planPath: string, issue: number): 
 
 export async function archiveAndCommit(
   cwd: string,
-): Promise<{ archive: string; hash: string; issue: number }> {
+): Promise<{ archive: string; hash: string; issue: number; authorityFingerprint: string }> {
   const ready = await assertArchiveReady(cwd);
   const localPs = psDir(cwd);
   const planPath = planFile(cwd);
@@ -334,7 +336,7 @@ export async function archiveAndCommit(
       `Archive commit ${hash} was created locally but could not be pushed to origin/main; the closure boundary cannot trust an unpushed archive commit. ${errorOutput(error)}`,
     );
   }
-  return { archive, hash, issue: ready.issue };
+  return { archive, hash, issue: ready.issue, authorityFingerprint: ready.authorityFingerprint };
 }
 
 export function removeFile(path: string): void {

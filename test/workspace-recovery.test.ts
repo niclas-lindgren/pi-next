@@ -37,6 +37,10 @@ class MemoryAuthority implements IssueLeaseAuthority {
   async remove(): Promise<void> {
     this.current = undefined as never;
   }
+
+  replaceCurrent(lease: IssueLease): void {
+    this.current = lease;
+  }
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -124,7 +128,12 @@ test("salvages a clean divergent legacy branch onto authoritative main", async (
     await git(fixtureState.workspace, "commit", "-m", "fix: issue #7 legacy follow-up");
     await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
 
-    const recovered = await ensureIssueWorktree(fixtureState.repo, 7);
+    const recovered = await ensureIssueWorktree(fixtureState.repo, 7, undefined, {
+      ownership: {
+        lease: fixtureState.lease,
+        authority: new MemoryAuthority(fixtureState.lease),
+      },
+    });
     assert.equal(recovered, fixtureState.workspace);
     assert.equal(await git(recovered, "branch", "--show-current"), "agent/issue-7");
     assert.equal(await readFile(join(recovered, "main-update.txt"), "utf8"), "main\n");
@@ -133,6 +142,45 @@ test("salvages a clean divergent legacy branch onto authoritative main", async (
     const preserved = (await readdir(join(fixtureState.repo, ".worktrees"))).find((name) => name.startsWith("issue-7-legacy-"));
     assert.ok(preserved, "original legacy checkout remains as recovery evidence");
     assert.equal(await git(join(fixtureState.repo, ".worktrees", preserved!), "branch", "--show-current"), "pi-next/issue-7/legacy");
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy salvage aborts adoption when lease ownership changes after replay", async () => {
+  const fixtureState = await fixture();
+  const authority = new MemoryAuthority(fixtureState.lease);
+  try {
+    await writeFile(join(fixtureState.repo, "main-update.txt"), "main\n");
+    await git(fixtureState.repo, "add", "main-update.txt");
+    await git(fixtureState.repo, "commit", "-m", "main advances");
+    await git(fixtureState.repo, "push", "origin", "main");
+    await git(fixtureState.workspace, "switch", "-c", "pi-next/issue-7/legacy");
+    await writeFile(join(fixtureState.workspace, "legacy-change.txt"), "legacy\n");
+    await git(fixtureState.workspace, "add", "legacy-change.txt");
+    await git(fixtureState.workspace, "commit", "-m", "feat: issue #7 legacy change");
+    await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
+
+    const foreignLease = createIssueLease({
+      issueNumber: 7,
+      agent: "other-worker",
+      runId: "run-foreign",
+      sessionId: "session-foreign",
+      acquiredAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const record = (_cwd: string, event: { event: string }) => {
+      if (event.event === "legacy_worktree_salvage_started") authority.replaceCurrent(foreignLease);
+    };
+
+    await assert.rejects(
+      () => ensureIssueWorktree(fixtureState.repo, 7, record, {
+        ownership: { lease: fixtureState.lease, authority },
+      }),
+      (error: unknown) => error instanceof Error && error.message.includes("ownership changed"),
+    );
+    assert.equal(await git(fixtureState.workspace, "branch", "--show-current"), "pi-next/issue-7/legacy");
+    await assert.rejects(() => readFile(join(fixtureState.workspace, "main-update.txt")));
   } finally {
     await rm(fixtureState.root, { recursive: true, force: true });
   }

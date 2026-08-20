@@ -61,7 +61,8 @@ export type CoordinationCliErrorCode =
   | "INVALID_ARGS"
   | "CANDIDATE_STALE"
   | "ROOT_BUSY"
-  | "PROMOTION_RACE";
+  | "PROMOTION_RACE"
+  | "MISSING_AUTHORITY_EVIDENCE";
 
 export type CoordinationCliErrorDetails = Record<string, string>;
 
@@ -339,7 +340,9 @@ async function runPrepare(flags: ParsedFlags): Promise<CoordinationCliSuccess> {
   const leaseAuthority = leaseAuthorityFor(cwd);
   const claimResult = await runClaim(flags, leaseAuthority);
   try {
-    const worktree = await ensureIssueWorktree(cwd, issueNumber);
+    const worktree = await ensureIssueWorktree(cwd, issueNumber, undefined, {
+      ownership: { lease: claimResult.lease as IssueLease, authority: leaseAuthority },
+    });
     return { ok: true, command: "prepare", lease: claimResult.lease, worktree };
   } catch (error) {
     const handoffError = error instanceof WorktreeRecoveryError
@@ -379,6 +382,9 @@ async function runFinalize(flags: ParsedFlags): Promise<CoordinationCliSuccess> 
   }
   if (!flags.issueUpdatedAt) {
     throw new CoordinationCliError("INVALID_ARGS", "--issue-updated-at <iso-timestamp> is required");
+  }
+  if (!flags.authorityFingerprint) {
+    throw new CoordinationCliError("INVALID_ARGS", "--authority-fingerprint <fingerprint> is required for authoritative completion");
   }
   try {
     const result = await finalizeIssue(leaseAuthorityFor(cwd), workAuthorityFor(cwd), {
