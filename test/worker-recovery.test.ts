@@ -75,6 +75,77 @@ test("missing loop_result preserves dirty issue work and resumes the same issue 
     assert.equal(first.state.settledStep, 1);
     assert.equal(await readFile(join(workspace, "partial.ts"), "utf8"), "unfinished\n");
 
+    let transientReads = 0;
+    const transientAuthority = {
+      read: async () => {
+        transientReads += 1;
+        if (transientReads === 1) {
+          const error = new Error("temporary network timeout");
+          Object.assign(error, { code: "ETIMEDOUT" });
+          throw error;
+        }
+        return lease;
+      },
+    };
+    const transient = await reconcileMissingLoopResult(
+      root,
+      state(root, workspace, lease),
+      transientAuthority,
+      { maxAttempts: 3 },
+    );
+    assert.equal(transient.outcome, "resuming_same_issue");
+    assert.equal(transientReads, 2, "transient authority failures are retried before blocking");
+    const transientFingerprint = transient.state.recovery?.lastFingerprint;
+    assert.equal(
+      transient.state.recovery?.attemptsByFingerprint[transientFingerprint || ""],
+      1,
+    );
+
+    const repeatedTransient = await reconcileMissingLoopResult(
+      root,
+      {
+        ...transient.state,
+        status: "interrupted",
+        step: 1,
+        settledStep: 0,
+        workerResultMissing: true,
+      },
+      { read: async () => {
+        const error = new Error("temporary network timeout");
+        Object.assign(error, { code: "ETIMEDOUT" });
+        throw error;
+      } },
+      { maxAttempts: 2 },
+    );
+    assert.equal(repeatedTransient.outcome, "recovery_exhausted");
+    assert.equal(repeatedTransient.state.status, "blocked");
+    assert.equal(
+      repeatedTransient.state.recovery?.attemptsByFingerprint[transientFingerprint || ""],
+      2,
+    );
+
+    const foreign = await reconcileMissingLoopResult(
+      root,
+      state(root, workspace, lease),
+      { read: async () => undefined },
+      { maxAttempts: 3 },
+    );
+    assert.equal(foreign.outcome, "recovery_unsafe");
+    assert.equal(foreign.state.recovery?.attemptsByFingerprint[foreign.fingerprint || ""], undefined);
+
+    let staleReads = 0;
+    const stale = await reconcileMissingLoopResult(
+      root,
+      state(root, workspace, lease),
+      { read: async () => {
+        staleReads += 1;
+        return { ...lease, expiresAt: new Date(Date.now() - 1_000).toISOString() };
+      } },
+      { maxAttempts: 3 },
+    );
+    assert.equal(stale.outcome, "recovery_unsafe");
+    assert.equal(staleReads, 1, "a stale lease is a proven ownership failure, not a transient retry");
+
     const repeated: LoopState = {
       ...first.state,
       step: 2,

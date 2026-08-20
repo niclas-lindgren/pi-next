@@ -104,6 +104,18 @@ async function syncProjectStatus(
 
 const execFileAsync = promisify(execFile);
 
+function isMissingLeaseRefError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as Record<string, unknown>;
+  const status = Number(value.status ?? value.statusCode);
+  if (status === 404) return true;
+  const text = [value.message, value.code, value.stderr, value.stdout]
+    .filter((part) => part !== undefined)
+    .map(String)
+    .join(" ");
+  return /\b404\b|not found|no git remotes found|unable to determine github repository/i.test(text);
+}
+
 /**
  * The authority is deliberately injected: production uses a GitHub-backed
  * compare-and-swap implementation, while callers/tests can use any shared
@@ -168,8 +180,12 @@ export class GitHubIssueLeaseAuthority implements IssueLeaseAuthority {
         ".object",
       ]);
       return JSON.parse(value) as { sha: string };
-    } catch {
-      return undefined;
+    } catch (error) {
+      // A missing lease ref is an ordinary unclaimed issue. Transport,
+      // authentication, and service failures must escape so recovery can
+      // distinguish a temporary authority outage from proven lost ownership.
+      if (isMissingLeaseRefError(error)) return undefined;
+      throw error;
     }
   }
 

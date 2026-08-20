@@ -68,6 +68,24 @@ const MAX_TRANSITIONS_PER_SESSION = 3;
 /** Maximum fresh workers for one normalized missing-result failure. */
 export const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3;
 
+/**
+ * Authority reads are an inspection boundary, not proof of lost ownership.
+ * Retry only errors that look like temporary transport/service failures;
+ * missing, stale, or foreign lease records still fail closed immediately.
+ */
+export function isTransientAuthorityReadFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as Record<string, unknown>;
+  const status = Number(value.status ?? value.statusCode);
+  if (Number.isInteger(status) && (status === 408 || status === 429 || status >= 500)) return true;
+  const text = [value.message, value.code, value.stderr, value.stdout, value.cause]
+    .filter((part) => part !== undefined)
+    .map(String)
+    .join(" ")
+    .toLowerCase();
+  return /econn|eai_|enotfound|enetwork|etimedout|epipe|network|timeout|timed out|temporar|unavailable|connection|socket|fetch failed|rate limit|too many requests|\b(?:502|503|504)\b/.test(text);
+}
+
 export type MissingLoopResultRecoveryOutcome =
   | "none"
   | "settled_from_durable_evidence"
@@ -419,13 +437,6 @@ export async function reconcileMissingLoopResult(
   }
 
   const issueNumber = state.activeIssueNumber;
-  const fingerprint = feedbackFingerprint({
-    harness: "pi-next",
-    stage: "worker-boundary",
-    category: "runtime",
-    code: "worker_result_missing",
-    summary: state.lastReason || "worker exited without loop_result",
-  });
   const previous = state.recovery || {
     missingLoopResults: 0,
     automaticSettlements: 0,
@@ -433,12 +444,28 @@ export async function reconcileMissingLoopResult(
     exhausted: 0,
     attemptsByFingerprint: {},
   };
+  // Keep the first normalized boundary fingerprint across same-issue retry
+  // steps. lastReason becomes a recovery message after the first attempt;
+  // using it as the next fingerprint would reset the retry budget forever,
+  // while reusing a previous issue's fingerprint would couple their budgets.
+  const sameIssueRecovery = previous.lastRecoveryIssueNumber === issueNumber;
+  const fingerprint = sameIssueRecovery && previous.lastFingerprint
+    ? previous.lastFingerprint
+    : feedbackFingerprint({
+      harness: "pi-next",
+      stage: "worker-boundary",
+      category: "runtime",
+      code: "worker_result_missing",
+      summary: state.lastReason || "worker exited without loop_result",
+    });
   const attempts = previous.attemptsByFingerprint[fingerprint] || 0;
   const maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS));
   const baseRecovery = {
     ...previous,
     missingLoopResults: previous.missingLoopResults + 1,
     lastFingerprint: fingerprint,
+    lastRecoveryStep: state.step,
+    lastRecoveryIssueNumber: issueNumber,
     retryLimit: maxAttempts,
     lastOutcome: "reconciling" as const,
     updatedAt: loopNow(),
@@ -452,9 +479,17 @@ export async function reconcileMissingLoopResult(
     updatedAt: loopNow(),
   });
 
-  const unsafe = async (reason: string, exhausted = false): Promise<MissingLoopResultRecovery> => {
+  const unsafe = async (
+    reason: string,
+    exhausted = false,
+    consumedAttempts = attempts,
+  ): Promise<MissingLoopResultRecovery> => {
+    const attemptsByFingerprint = consumedAttempts > attempts
+      ? { ...previous.attemptsByFingerprint, [fingerprint]: consumedAttempts }
+      : previous.attemptsByFingerprint;
     const recovery = {
       ...baseRecovery,
+      attemptsByFingerprint,
       exhausted: previous.exhausted + (exhausted ? 1 : 0),
       lastOutcome: exhausted ? "recovery_exhausted" as const : "recovery_unsafe" as const,
       lastReason: reason,
@@ -498,10 +533,25 @@ export async function reconcileMissingLoopResult(
   }
 
   let liveLease;
-  try {
-    liveLease = await authority.read(issue);
-  } catch (error) {
-    return unsafe(`Cannot reconcile issue #${issueNumber} lease before recovery: ${error instanceof Error ? error.message : String(error)}`);
+  let authorityReadAttempts = 0;
+  const authorityReadBudget = Math.max(1, maxAttempts - attempts);
+  while (authorityReadAttempts < authorityReadBudget) {
+    authorityReadAttempts += 1;
+    try {
+      liveLease = await authority.read(issue);
+      break;
+    } catch (error) {
+      if (!isTransientAuthorityReadFailure(error)) {
+        return unsafe(`Cannot reconcile issue #${issueNumber} lease before recovery: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (authorityReadAttempts >= authorityReadBudget) {
+        return unsafe(
+          `Transient authority read failed while reconciling issue #${issueNumber} after ${authorityReadAttempts} attempts: ${error instanceof Error ? error.message : String(error)}`,
+          true,
+          attempts + authorityReadAttempts,
+        );
+      }
+    }
   }
   if (!liveLease || !isIssueLeaseFresh(liveLease) || !issueLeaseMatchesOwner(liveLease, state.activeLease)) {
     return unsafe(`Cannot recover issue #${issueNumber}: authoritative lease is missing, stale, or owned by another run`);

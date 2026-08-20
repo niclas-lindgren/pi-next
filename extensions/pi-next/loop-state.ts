@@ -86,6 +86,9 @@ export interface LoopRecoveryState {
   /** Maximum retries allowed for the current recovery policy. */
   retryLimit?: number;
   lastFingerprint?: string;
+  /** Boundary identity for deciding whether a previous fingerprint is reusable. */
+  lastRecoveryStep?: number;
+  lastRecoveryIssueNumber?: number;
   lastOutcome?:
     | "reconciling"
     | "settled_from_durable_evidence"
@@ -354,6 +357,8 @@ export function readLoopState(cwd: string, runId?: string): LoopState | null {
             attemptsByFingerprint: { ...(state.recovery.attemptsByFingerprint || {}) },
             retryLimit: state.recovery.retryLimit,
             lastFingerprint: state.recovery.lastFingerprint,
+            lastRecoveryStep: state.recovery.lastRecoveryStep,
+            lastRecoveryIssueNumber: state.recovery.lastRecoveryIssueNumber,
             lastOutcome: state.recovery.lastOutcome,
             lastReason: state.recovery.lastReason,
             updatedAt: state.recovery.updatedAt,
