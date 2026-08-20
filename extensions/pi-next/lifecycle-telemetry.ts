@@ -24,7 +24,8 @@ export type LifecycleEventName =
   | "generation_teardown"
   | "plan_repaired"
   | "workflow_artifact_quarantined"
-  | "worker_recovery";
+  | "worker_recovery"
+  | "issue_contained";
 
 export interface LifecycleEvent {
   event: LifecycleEventName;
@@ -55,6 +56,14 @@ export interface LifecycleEvent {
   repair?: {
     paths: string[];
     fields: string[];
+  };
+  /** Structured issue-local containment evidence; the worktree is preserved. */
+  containment?: {
+    scope: "issue-local";
+    stage: string;
+    code: string;
+    paths: string[];
+    leaseReleased: boolean;
   };
 }
 
@@ -120,6 +129,7 @@ export function recordLifecycleEvent(
     at: event.at || new Date().toISOString(),
     generation: event.generation,
     repair: event.repair,
+    containment: event.containment,
   };
   writeJsonAtomic(lifecycleTelemetryFile(cwd), {
     version: 1,

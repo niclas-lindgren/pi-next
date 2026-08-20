@@ -62,6 +62,7 @@ import {
   createWorkerFailureEvidence,
   WorkerFailureError,
 } from "./worker-failure.ts";
+import { classifyFailure } from "./failure-scope.ts";
 
 const MAX_TRANSITIONS_PER_SESSION = 3;
 /** Maximum fresh workers for one normalized missing-result failure. */
@@ -1039,6 +1040,14 @@ async function driveLoop(
             const latest = readLoopState(runtimeCwdFor(workerCwd, state), state.runId) || state;
             await driveLoop(workerContext, latest, executeWorker, runtime, display);
           } catch (error) {
+            const classification = classifyFailure(error, {
+              stage: "execution",
+              issueNumber: state.activeIssueNumber,
+              workspace: workerCwd,
+              coordinationCwd: runtimeCwdFor(workerCwd, state),
+              ownershipProven: true,
+            });
+            if (classification.scope === "issue-local") throw error;
             interruptLoop(workerContext, state, error);
           }
         },
@@ -1062,6 +1071,14 @@ async function driveLoop(
           const latest = readLoopState(runtimeCwdFor(workerCwd, state), state.runId) || state;
           await driveLoop(workerContext, latest, executeWorker, runtime, display);
         } catch (error) {
+          const classification = classifyFailure(error, {
+            stage: "execution",
+            issueNumber: state.activeIssueNumber,
+            workspace: workerCwd,
+            coordinationCwd: runtimeCwdFor(workerCwd, state),
+            ownershipProven: true,
+          });
+          if (classification.scope === "issue-local") throw error;
           interruptLoop(workerContext, state, error);
         }
       },
@@ -1104,6 +1121,14 @@ export async function runLoopSteps(
   try {
     await driveLoop(ctx, initial, observedWorker, runtime, display);
   } catch (error) {
+    const classification = classifyFailure(error, {
+      stage: "execution",
+      issueNumber: initial.activeIssueNumber,
+      workspace: ctx.cwd,
+      coordinationCwd: runtimeCwdFor(ctx.cwd, initial),
+      ownershipProven: true,
+    });
+    if (classification.scope === "issue-local") throw error;
     interruptLoop(ctx, initial, error);
   } finally {
     // A driveLoop() chain that handed off to ctx.newSession() has already

@@ -20,6 +20,11 @@ import { candidateShortlist } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import {
+  classifyFailure,
+  IssueHandoffError,
+  type FailureClassification,
+} from "./failure-scope.ts";
+import {
   claimIssueLease,
   ensureIssueWorktree,
   GitHubIssueLeaseAuthority,
@@ -35,6 +40,7 @@ import {
   listLoopStates,
   loopResultFile,
   loopStateFile,
+  markIssueDisposition,
   MAX_STEPS,
   notifyLoopState,
   parseLoopLimit,
@@ -115,6 +121,116 @@ function workerActivityText(event: WorkerWorkLogEvent): string {
   return `pi-next ${issue}${run} · ${event.phase} · ${event.kind} · ${event.summary}${paths}`;
 }
 
+/**
+ * Safely settle one attributed issue-local failure without touching its
+ * checkout. The first write records the disposition while ownership evidence
+ * is still present; only the second write clears active execution fields.
+ */
+export async function containIssueLocalFailure(
+  coordinationCwd: string,
+  state: LoopState,
+  failure: FailureClassification,
+  options: {
+    lease?: import("./issue-authority.ts").IssueLease;
+    leaseReleased?: boolean;
+    authority?: import("./issue-leases.ts").IssueLeaseAuthority;
+  } = {},
+): Promise<LoopState> {
+  const issueNumber = failure.issueNumber;
+  if (!issueNumber || failure.scope !== "issue-local") {
+    throw new Error("Issue containment requires an attributed issue-local failure");
+  }
+
+  let leaseReleased = options.leaseReleased === true;
+  const authority = options.authority ?? new GitHubIssueLeaseAuthority(coordinationCwd);
+  const lease = options.lease ?? (state.activeLease
+    ? parseLeaseFromAuthority(JSON.stringify(state.activeLease))
+    : undefined);
+  if (!leaseReleased && lease) {
+    // releaseIssueLease performs a fresh authority read and owner comparison;
+    // never remove a ref merely because local state says we owned it.
+    try {
+      await releaseIssueLease(authority, lease, {
+        cwd: coordinationCwd,
+        recordEvent: recordLifecycleEvent,
+      });
+      leaseReleased = true;
+    } catch (error) {
+      const reason = `Cannot safely release issue #${issueNumber} lease after issue-local failure: ${error instanceof Error ? error.message : String(error)}`;
+      const interrupted = {
+        ...state,
+        status: "interrupted" as const,
+        updatedAt: loopNow(),
+        lastReason: reason,
+      };
+      writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), interrupted);
+      throw new Error(reason);
+    }
+  }
+  if (!leaseReleased && state.activeLease) {
+    throw new Error(`Cannot safely release issue #${issueNumber} lease; preserving ownership evidence and stopping globally`);
+  }
+
+  const paths = failure.paths.length ? ` Paths: ${failure.paths.join(", ")}.` : "";
+  const reason = `Issue #${issueNumber} blocked for this run: ${failure.reason}.${paths} Workspace preserved; lease ${leaseReleased ? "released" : "not held"}.`;
+  const deferredAt = loopNow();
+  const disposition: LoopState = {
+    ...state,
+    status: "running",
+    workerResultMissing: undefined,
+    remainingIssues: Math.max(0, state.remainingIssues - 1),
+    deferredIssues: [
+      ...state.deferredIssues.filter((item) => item.issueNumber !== issueNumber),
+      { issueNumber, reason, deferredAt, kind: "blocked" },
+    ],
+    issueMetrics: markIssueDisposition(state.issueMetrics, issueNumber, "blocked", reason),
+    lastOutcome: "block_issue",
+    lastReason: reason,
+    updatedAt: deferredAt,
+  };
+  // Durable containment precedes clearing the active identity. A crash after
+  // this write leaves an auditable blocked disposition rather than a silent
+  // retry; the normal next write removes only controller pointers.
+  writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), disposition);
+  const cleared: LoopState = {
+    ...disposition,
+    activeIssueNumber: undefined,
+    activeWorkspace: undefined,
+    activeLease: undefined,
+    updatedAt: loopNow(),
+  };
+  writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), cleared);
+  recordLifecycleEvent(coordinationCwd, {
+    event: "issue_contained",
+    issueNumber,
+    runId: state.runId,
+    outcome: "recovered",
+    reasonCode: failure.code,
+    worktree: state.activeWorkspace,
+    containment: {
+      scope: "issue-local",
+      stage: failure.stage,
+      code: failure.code,
+      paths: failure.paths,
+      leaseReleased,
+    },
+  });
+  await reportRuntimeFailure(coordinationCwd, {
+    stage: `issue-containment:${failure.stage}`,
+    category: "integrity",
+    severity: "error",
+    outcome: "recovered",
+    code: "issue_contained",
+    summary: reason,
+    issueNumber,
+    runId: state.runId,
+    diagnosticRefs: failure.paths,
+    diagnostic: { phase: failure.stage },
+  });
+  notifyLive(reason + " Continuing with the next eligible issue.", "warning");
+  return cleared;
+}
+
 export async function claimLoopIssue(
   cwd: string,
   state: LoopState,
@@ -151,19 +267,31 @@ export async function claimLoopIssue(
       parseLeaseFromAuthority(JSON.stringify(activeLease)),
       new Date(),
     );
-    const workspace = await ensureIssueWorktree(
-      cwd,
-      activeIssueNumber,
-      recordLifecycleEvent,
-    );
-    if (workspace !== activeWorkspace) {
-      throw new Error(
-        `Persisted issue workspace mismatch: expected ${workspace}, found ${activeWorkspace}`,
+    let workspace: string;
+    try {
+      workspace = await ensureIssueWorktree(
+        cwd,
+        activeIssueNumber,
+        recordLifecycleEvent,
       );
+      if (workspace !== activeWorkspace) {
+        throw new Error(
+          `Persisted issue workspace mismatch: expected ${workspace}, found ${activeWorkspace}`,
+        );
+      }
+      await quarantineInheritedArtifacts(cwd, workspace, activeIssueNumber, state.runId);
+      await quarantineLegacyRootArtifacts(cwd, state.runId);
+      validateWorkspacePlan(workspace, activeIssueNumber, { runId: state.runId });
+    } catch (error) {
+      throw new IssueHandoffError({
+        issueNumber: activeIssueNumber,
+        stage: "workspace-validation",
+        workspace: activeWorkspace,
+        lease,
+        ownershipProven: true,
+        cause: error,
+      });
     }
-    await quarantineInheritedArtifacts(cwd, workspace, activeIssueNumber, state.runId);
-    await quarantineLegacyRootArtifacts(cwd, state.runId);
-    validateWorkspacePlan(workspace, activeIssueNumber, { runId: state.runId });
     const next = {
       ...state,
       activeWorkspace: workspace,
@@ -230,14 +358,26 @@ export async function claimLoopIssue(
         recordEvent: recordLifecycleEvent,
       });
     } catch (releaseError) {
-      throw new Error(
-        `Issue #${issueNumber} worktree handoff failed: ${error instanceof Error ? error.message : String(error)}; ` +
-          `lease release also failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
-      );
+      throw new IssueHandoffError({
+        issueNumber,
+        stage: "worktree-handoff",
+        lease,
+        leaseReleased: false,
+        ownershipProven: false,
+        cause: new Error(
+          `Worktree handoff failed: ${error instanceof Error ? error.message : String(error)}; ` +
+            `lease release also failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+        ),
+      });
     }
-    throw new Error(
-      `Issue #${issueNumber} worktree handoff failed: ${error instanceof Error ? error.message : String(error)}; lease released`,
-    );
+    throw new IssueHandoffError({
+      issueNumber,
+      stage: "worktree-handoff",
+      lease,
+      leaseReleased: true,
+      ownershipProven: false,
+      cause: error,
+    });
   }
   const next: LoopState = {
     ...state,
@@ -351,9 +491,38 @@ export async function runOwnedIssueCycle(
   const coordinationCwd = initial.coordinationCwd || ctx.cwd;
   const display = attachWorkerDisplay(ctx);
   let state = initial;
+  let prepared: LoopState;
+  try {
+    prepared = await claimLoopIssue(coordinationCwd, state);
+  } catch (error) {
+    const handoff = error instanceof IssueHandoffError ? error : undefined;
+    const issueNumber = handoff?.issueNumber ?? state.activeIssueNumber;
+    const classification = classifyFailure(error, {
+      stage: handoff?.stage ?? "claim",
+      issueNumber,
+      workspace: handoff?.workspace ?? state.activeWorkspace,
+      coordinationCwd,
+      ownershipProven: handoff?.ownershipProven ?? false,
+    });
+    if (classification.scope === "issue-local") {
+      return containIssueLocalFailure(coordinationCwd, state, classification, {
+        lease: handoff?.lease as import("./issue-authority.ts").IssueLease | undefined,
+        leaseReleased: handoff?.leaseReleased,
+      });
+    }
+    const latest = readLoopState(coordinationCwd, state.runId);
+    if (latest?.status === "running") {
+      writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), {
+        ...latest,
+        status: "interrupted",
+        updatedAt: loopNow(),
+        lastReason: `Pi-next loop-global failure during ${classification.stage}: ${classification.reason}`,
+      });
+    }
+    throw error;
+  }
+  state = prepared;
   {
-      const prepared = await claimLoopIssue(coordinationCwd, state);
-      state = prepared;
       const heartbeat = prepared.activeLease
         ? startIssueLeaseHeartbeat(
             new GitHubIssueLeaseAuthority(coordinationCwd),
@@ -379,6 +548,7 @@ export async function runOwnedIssueCycle(
             },
           )
         : undefined;
+      let containedFailure: FailureClassification | undefined;
       try {
         const targetCwd = prepared.activeWorkspace || coordinationCwd;
         if (prepared.activeWorkspace) {
@@ -438,6 +608,16 @@ export async function runOwnedIssueCycle(
           if (recovery.outcome !== "resuming_same_issue") break;
         }
       } catch (error) {
+        const classification = classifyFailure(error, {
+          stage: "execution",
+          issueNumber: prepared.activeIssueNumber,
+          workspace: prepared.activeWorkspace,
+          coordinationCwd,
+          ownershipProven: true,
+        });
+        if (classification.scope === "issue-local") {
+          containedFailure = classification;
+        } else {
         void reportRuntimeFailure(coordinationCwd, {
           stage: "controller",
           category: "runtime",
@@ -475,9 +655,10 @@ export async function runOwnedIssueCycle(
           });
         }
         throw error;
+        }
       } finally {
         await heartbeat?.stop();
-        if (heartbeat && prepared.activeIssueNumber) {
+        if (!containedFailure && heartbeat && prepared.activeIssueNumber) {
           try {
             await releaseIssueLease(
               new GitHubIssueLeaseAuthority(coordinationCwd),
@@ -494,6 +675,14 @@ export async function runOwnedIssueCycle(
         trackCrashLoggerCwd(coordinationCwd);
       }
 
+      if (containedFailure) {
+        const latest = readLoopState(coordinationCwd, prepared.runId) || state;
+        return containIssueLocalFailure(coordinationCwd, latest, containedFailure, {
+          lease: prepared.activeLease
+            ? parseLeaseFromAuthority(JSON.stringify(prepared.activeLease))
+            : undefined,
+        });
+      }
       state = readLoopState(coordinationCwd, prepared.runId) || prepared;
       // Boundary publication is deliberately after the issue worker and before
       // candidate selection. It is thresholded, deduplicated, and held by the
