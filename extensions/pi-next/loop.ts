@@ -78,6 +78,8 @@ export { MAX_ISSUES, readLoopState, writeLoopResult } from "./loop-state.ts";
 export { ForegroundSupervisor } from "./foreground-supervisor.ts";
 export type { LoopOutcome, LoopResult, LoopState } from "./loop-state.ts";
 
+const AUTO_STATUS_KEY = "pi-next-auto";
+
 /**
  * Delivers through the shared lifecycle-aware host boundary (#583) instead
  * of duplicating the try/catch-rejection contract locally. Not gated on the
@@ -793,6 +795,12 @@ export async function runPiNextLoop(
     }
     return null;
   };
+  if (input === "clear") {
+    // Clearing the footer is deliberately explicit. Ordinary auto command
+    // completion leaves the latest durable controller state visible.
+    ctx.ui.setStatus(AUTO_STATUS_KEY, undefined);
+    return;
+  }
   if (input === "status") {
     if (requestedRunId)
       notifyLoopState(ctx, readLoopState(ctx.cwd, requestedRunId));

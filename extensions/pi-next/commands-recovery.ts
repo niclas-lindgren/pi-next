@@ -38,8 +38,7 @@ const AUTO_STATUS_INTERVAL_MS = 2_500;
 
 // Session replacement tears down the ExtensionContext that owns a command.
 // Keep only cancellation callbacks here so shutdown never has to touch the
-// old context. The heartbeat's returned stop function clears the UI only
-// while its original session is still active.
+// old context. A replacement session rebinds the status from durable state.
 const autoStatusHeartbeatCancellations = new Set<() => void>();
 
 function processAlive(pid: number): boolean {
@@ -87,19 +86,27 @@ function locallyAbandoned(cwd: string, state: LoopState): boolean {
  * only; lease authority remains GitHub. A preferred recovery run may be shown
  * before its fresh controller lock is installed.
  */
-function activeAutoStatusRun(cwd: string, preferredRunId?: string): LoopState | undefined {
-  if (preferredRunId) {
-    const preferred = listLoopStates(cwd).find((state) => state.runId === preferredRunId);
-    if (preferred && ["running", "interrupted", "stopped"].includes(preferred.status)) {
-      return preferred;
-    }
-  }
-
-  return listLoopStates(cwd).find((state) => {
-    if (state.status !== "running") return false;
-    const pid = controllerPid(cwd, state.runId);
-    return pid === process.pid;
-  });
+/**
+ * Select the newest durable status. In particular, a heartbeat for an older
+ * run must not overwrite a newer run that started in the same session.
+ * `listLoopStates` is timestamp ordered, but keep the comparison explicit so
+ * this invariant remains true if its storage implementation changes.
+ */
+export function activeAutoStatusRun(cwd: string, preferredRunId?: string): LoopState | undefined {
+  const states = listLoopStates(cwd).filter((state) =>
+    ["running", "completed", "idle", "blocked", "failed", "stopped", "interrupted"].includes(state.status),
+  );
+  const preferred = preferredRunId
+    ? states.find((state) => state.runId === preferredRunId)
+    : undefined;
+  return states
+    .filter((state) => !preferred || state.runId === preferred.runId || state.updatedAt >= preferred.updatedAt)
+    .sort((a, b) => {
+      const updated = b.updatedAt.localeCompare(a.updatedAt);
+      if (updated !== 0) return updated;
+      const created = b.createdAt.localeCompare(a.createdAt);
+      return created !== 0 ? created : b.runId.localeCompare(a.runId);
+    })[0];
 }
 
 /**
@@ -158,11 +165,12 @@ export function startAutoStatusHeartbeat(
   };
   const stop = () => {
     if (!active) return;
+    // Render once more after the controller has settled. Ordinary command
+    // completion is not a request to clear the footer; the durable terminal
+    // state is the useful handoff to the operator and to a replacement
+    // session. Shutdown cancels first, so this never touches a disposed ctx.
+    update();
     cancel();
-    // `stop` is called by the command's finally block. If session shutdown
-    // already canceled the heartbeat, this branch is skipped and the stale
-    // context is never accessed.
-    setAutoStatusSafely(ctx, undefined);
   };
   autoStatusHeartbeatCancellations.add(cancel);
 
@@ -316,11 +324,28 @@ export async function prepareAbandonedAutoResume(
  * behavior remains in commands.ts; this adds restart recovery for `auto`
  * before that handler would create a competing run with a new lease identity.
  */
+export function clearAutoStatus(ctx: ExtensionCommandContext): void {
+  setAutoStatusSafely(ctx, undefined);
+}
+
 export function registerPiNextCommands(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
     // Do not clear UI state here: this callback runs as the old session is
     // being torn down. Only stop callbacks that are safe across replacement.
     for (const cancel of [...autoStatusHeartbeatCancellations]) cancel();
+  });
+
+  // Status entries belong to the current UI context, not to the disposed
+  // context that created the run. Rebind the latest durable state as soon as
+  // Pi has installed the replacement session. Terminal states need one paint;
+  // a live local controller also gets a fresh heartbeat.
+  pi.on("session_start", (_event, ctx) => {
+    const state = activeAutoStatusRun(ctx.cwd);
+    if (!state) return;
+    setAutoStatusSafely(ctx, autoStatusText(ctx.cwd, Date.now(), state.runId, piNextRuntimeIdentity().version));
+    if (state.status === "running" && controllerPid(ctx.cwd, state.runId) === process.pid) {
+      startAutoStatusHeartbeat(ctx, () => state.runId);
+    }
   });
 
   const registerCommand: ExtensionAPI["registerCommand"] = (name, command) => {
@@ -372,6 +397,8 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
           }
           await command.handler(args, ctx);
         } finally {
+          // Keep the final controller-owned status visible. A deliberate
+          // `/pi-next-loop clear` is the explicit reset path.
           stopStatus?.();
         }
       },

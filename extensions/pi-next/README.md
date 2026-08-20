@@ -90,8 +90,9 @@ progress (`completed + deferred/blocked` over the requested issue count), the
 active issue and worker lifecycle phase, and compact liveness/recovery details.
 The step count remains diagnostic only; it is never used as a completion
 percentage. The line degrades to issue/phase/count information on narrow
-terminals and is cleared when the command ends, so worker/model output is not
-polluted with repeated progress messages.
+terminals and remains as a compact terminal summary when the command ends, so
+worker/model output is not polluted with repeated progress messages. Use
+`/pi-next-loop clear` when the footer should be deliberately removed.
 
 ### Transport invariant
 
