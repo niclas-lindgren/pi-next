@@ -16,6 +16,15 @@ export interface FeedbackErrorShape {
   message: string;
 }
 
+/** Optional bounded process context for consumers; never contains raw output. */
+export interface FeedbackDiagnosticContext {
+  phase?: string;
+  role?: string;
+  model?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+}
+
 export interface FeedbackEvent {
   version: typeof FEEDBACK_SCHEMA_VERSION;
   fingerprint: string;
@@ -29,6 +38,7 @@ export interface FeedbackEvent {
   code: string;
   summary: string;
   error?: FeedbackErrorShape;
+  diagnostic?: FeedbackDiagnosticContext;
   attempt: number;
   diagnosticRefs: string[];
   at: string;
@@ -71,7 +81,11 @@ export function sanitizeFeedbackText(value: unknown): string {
     .replace(/(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis):\/\/[^\s]+/gi, "[CONNECTION_STRING]")
     .replace(/https?:\/\/[^\s)]+/gi, "[URL]")
     .replace(/\b(?:ghp|github_pat|sk|xox[baprs])-?[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
-    .replace(/(?:^|[\s=(])(?:\/(?:Users|home|tmp|var|workspace)\/[^\s:),]+|[A-Z]:\\[^\s:),]+)/g, "$1[PATH]");
+    .replace(/(?:^|[\s=(])(?:\/(?:Users|home|tmp|var|workspace)\/[^\s:),]+|[A-Z]:\\[^\s:),]+)/g, "$1[PATH]")
+    // Also cover arbitrary checkout roots (for example /builds/... and
+    // /runner/_work/...). This runs after URL/connection redaction and only
+    // matches path-like absolute values, not ordinary slash punctuation.
+    .replace(/(^|[\s=(])\/(?:[^\s/]+\/)+[^\s:),]+/g, "$1[PATH]");
 }
 
 function normalizeFingerprintText(value: string): string {
@@ -99,12 +113,26 @@ function errorShape(value: unknown): FeedbackErrorShape | undefined {
   return { name, message };
 }
 
-export type FeedbackEventInput = Omit<FeedbackEvent, "version" | "fingerprint" | "summary" | "error" | "diagnosticRefs" | "at"> & {
+export type FeedbackEventInput = Omit<FeedbackEvent, "version" | "fingerprint" | "summary" | "error" | "diagnostic" | "diagnosticRefs" | "at"> & {
   summary: unknown;
   error?: unknown;
+  diagnostic?: unknown;
   diagnosticRefs?: unknown[];
   at?: string;
 };
+
+function diagnosticContext(value: unknown): FeedbackDiagnosticContext | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const exitCode = source.exitCode === null ? null : typeof source.exitCode === "number" && Number.isInteger(source.exitCode) ? source.exitCode : undefined;
+  const phase = typeof source.phase === "string" ? sanitizeFeedbackText(source.phase).slice(0, 80) : undefined;
+  const role = typeof source.role === "string" ? sanitizeFeedbackText(source.role).slice(0, 80) : undefined;
+  const model = typeof source.model === "string" ? sanitizeFeedbackText(source.model).slice(0, 120) : undefined;
+  const signal = source.signal === null ? null : typeof source.signal === "string" ? sanitizeFeedbackText(source.signal).slice(0, 32) : undefined;
+  return phase || role || model || exitCode !== undefined || signal !== undefined
+    ? { ...(phase ? { phase } : {}), ...(role ? { role } : {}), ...(model ? { model } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...(signal === undefined ? {} : { signal }) }
+    : undefined;
+}
 
 export function createFeedbackEvent(input: FeedbackEventInput): FeedbackEvent {
   if (!CATEGORIES.includes(input.category)) throw new Error(`unsupported feedback category: ${String(input.category)}`);
@@ -125,6 +153,7 @@ export function createFeedbackEvent(input: FeedbackEventInput): FeedbackEvent {
     code: compact(input.code, 80),
     summary,
     ...(input.error === undefined ? {} : { error: errorShape(input.error) }),
+    ...(input.diagnostic === undefined ? {} : { diagnostic: diagnosticContext(input.diagnostic) }),
     attempt: Math.max(1, Math.min(999, Number.isFinite(input.attempt) ? Math.trunc(input.attempt) : 1)),
     diagnosticRefs: (input.diagnosticRefs || []).map((ref) => sanitizeFeedbackText(ref)).filter(Boolean).slice(0, MAX_REFS),
     at: timestamp,

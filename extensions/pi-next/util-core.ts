@@ -22,6 +22,10 @@ import {
 } from "./worker-activity.ts";
 import type { WorkerDisplaySink } from "./worker-display.ts";
 import type { WorkerDispatchPolicy } from "../../src/coordination/worker-dispatch.ts";
+import {
+  createWorkerFailureEvidence,
+  type WorkerFailureEvidence,
+} from "./worker-failure.ts";
 
 const execFileAsync = promisify(execFile);
 export const execAsync = promisify(exec);
@@ -136,6 +140,8 @@ export interface IssueWorkerResult {
   output: string;
   code: number | null;
   signal: string | null;
+  /** Structured, sanitized evidence retained when the child exits unsuccessfully. */
+  failure?: WorkerFailureEvidence;
   /** Bounded aggregate usage/activity/model telemetry recovered from the
    * worker's `--mode json` event stream (#599); never fabricated as zero. */
   telemetry: WorkerTelemetryReport;
@@ -309,11 +315,23 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
         options.runId,
         signal ? "aborted" : code === 0 ? "completed" : "failed",
       );
+      const ok = code === 0 && !signal;
       resolve({
-        ok: code === 0 && !signal,
+        ok,
         output,
         code,
         signal,
+        ...(ok ? {} : {
+          failure: createWorkerFailureEvidence(
+            { output, code, signal },
+            {
+              issueNumber: options.issueNumber,
+              runId: options.runId,
+              phase: options.phase,
+              dispatch: options.dispatch,
+            },
+          ),
+        }),
         telemetry: options.dispatch
           ? { ...telemetry.finish(), dispatch: {
               version: options.dispatch.version,

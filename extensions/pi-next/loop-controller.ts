@@ -54,6 +54,11 @@ import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { feedbackFingerprint } from "../../src/coordination/feedback.ts";
 import { observeManagedTransition } from "./self-assessment.ts";
 import { recentLifecycleEventNames } from "./lifecycle-telemetry.ts";
+import { reportRuntimeFailure } from "./feedback-runtime.ts";
+import {
+  createWorkerFailureEvidence,
+  WorkerFailureError,
+} from "./worker-failure.ts";
 
 const MAX_TRANSITIONS_PER_SESSION = 3;
 
@@ -520,16 +525,33 @@ async function runOneStep(
   let promptError: unknown;
   let telemetry: WorkerTelemetryReport = { status: "unavailable" };
   try {
+    const phase = hasPlan ? "implementation" : "planning" as const;
+    const config = loadPiNextConfig(ctx.cwd);
+    // A child Pi process does not inherit the parent's selected model. Use the
+    // explicit role policy when configured, otherwise carry the active parent
+    // model across so `pi --model provider/model` also works for workers.
+    const inheritedModel = ctx.model?.provider && ctx.model.id
+      ? {
+          model: `${ctx.model.provider}/${ctx.model.id}`,
+          ...(ctx.thinkingLevel ? { thinking: ctx.thinkingLevel } : {}),
+        }
+      : undefined;
+    const configuredModel = config.workerDispatch.models[phase];
+    const modelPolicy = inheritedModel || configuredModel
+      ? { ...inheritedModel, ...configuredModel }
+      : undefined;
+    const dispatch = createWorkerDispatch({
+      phase,
+      hasPlan,
+      issueNumber: state.activeIssueNumber,
+      modelPolicy,
+    });
     const task = worker(
       ctx.cwd,
       buildLoopPrompt({
         cwd: ctx.cwd,
         mode: hasPlan ? "resume" : "auto",
-        dispatch: createWorkerDispatch({
-          phase: hasPlan ? "implementation" : "planning",
-          hasPlan,
-          issueNumber: state.activeIssueNumber,
-        }),
+        dispatch,
         runId: state.runId,
         step: state.step,
         maxSteps: state.maxSteps,
@@ -543,20 +565,42 @@ async function runOneStep(
         signal: runtime.currentGeneration()?.signal,
         issueNumber: state.activeIssueNumber,
         runId: state.runId,
-        phase: hasPlan ? "implementation" : "planning",
-        dispatch: createWorkerDispatch({
-          phase: hasPlan ? "implementation" : "planning",
-          hasPlan,
-          issueNumber: state.activeIssueNumber,
-        }),
+        phase,
+        dispatch,
       },
     );
     const result = await task;
     telemetry = result.telemetry;
     if (!result.ok) {
-      throw new Error(
-        `Issue worker failed (${result.signal || `exit ${result.code ?? "unknown"}`})`,
+      const evidence = result.failure ?? createWorkerFailureEvidence(
+        { output: result.output, code: result.code, signal: result.signal },
+        {
+          issueNumber: state.activeIssueNumber,
+          runId: state.runId,
+          phase,
+          dispatch,
+        },
       );
+      const feedback = await reportRuntimeFailure(ctx.cwd, {
+        stage: phase,
+        category: evidence.category,
+        severity: evidence.severity,
+        outcome: "failed",
+        code: evidence.code,
+        summary: evidence.summary,
+        error: evidence.diagnosticExcerpt,
+        issueNumber: evidence.issueNumber,
+        runId: evidence.runId,
+        diagnosticRefs: evidence.diagnosticRefs,
+        diagnostic: {
+          phase: evidence.phase,
+          role: evidence.role,
+          model: evidence.modelPolicy?.model,
+          exitCode: evidence.exitCode,
+          signal: evidence.signal,
+        },
+      });
+      throw new WorkerFailureError(evidence, feedback);
     }
   } catch (error) {
     promptError = error;

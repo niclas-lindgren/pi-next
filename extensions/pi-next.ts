@@ -9,6 +9,12 @@ import { registerInspectTool } from "./pi-next/tools-inspect.ts";
 import { registerUpdateTool } from "./pi-next/tools-update.ts";
 import { registerWorkerWorkLogRenderer } from "./pi-next/work-log.ts";
 
+/** Consumer-owned incident adapter hook; core never creates GitHub issues. */
+export {
+  setRuntimeFeedbackSink,
+  reportRuntimeFailure,
+} from "./pi-next/feedback-runtime.ts";
+
 export default function piNextExtension(pi: ExtensionAPI) {
   // Diagnostic-only safety net for #583: a crash that previously vanished
   // now leaves a bounded record in .pi/runtime/pi-next-crash-log.jsonl

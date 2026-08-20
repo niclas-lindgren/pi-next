@@ -61,6 +61,7 @@ import { appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
 import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
+import { createWorkerFailureEvidence, WorkerFailureError } from "./worker-failure.ts";
 
 /**
  * Delivers through the shared lifecycle-aware host boundary (#583) instead
@@ -127,20 +128,35 @@ async function executeIssueWorker(
     ? await generation.track(task, { kind: "subprocess" })
     : await task;
   if (!result.ok) {
-    const detail = result.output.trim().slice(-1_000);
-    const error = new Error(`Issue worker failed (${result.signal || `exit ${result.code ?? "unknown"}`})${detail ? `: ${detail}` : ""}`);
-    void reportRuntimeFailure(cwd, {
+    const evidence = result.failure ?? createWorkerFailureEvidence(
+      { output: result.output, code: result.code, signal: result.signal },
+      {
+        issueNumber: observer?.issueNumber,
+        runId: observer?.runId,
+        phase: observer?.phase,
+        dispatch: observer?.dispatch,
+      },
+    );
+    const feedback = await reportRuntimeFailure(cwd, {
       stage: observer?.phase || "worker",
-      category: "runtime",
-      severity: "error",
+      category: evidence.category,
+      severity: evidence.severity,
       outcome: "failed",
-      code: "worker_failed",
-      summary: error.message,
-      error,
-      issueNumber: observer?.issueNumber,
-      runId: observer?.runId,
+      code: evidence.code,
+      summary: evidence.summary,
+      error: evidence.diagnosticExcerpt,
+      issueNumber: evidence.issueNumber,
+      runId: evidence.runId,
+      diagnosticRefs: evidence.diagnosticRefs,
+      diagnostic: {
+        phase: evidence.phase,
+        role: evidence.role,
+        model: evidence.modelPolicy?.model,
+        exitCode: evidence.exitCode,
+        signal: evidence.signal,
+      },
     });
-    throw error;
+    throw new WorkerFailureError(evidence, feedback);
   }
 }
 
