@@ -24,6 +24,7 @@ import {
   runIssueBoundaryMaintenance,
 } from "./loop-maintenance.ts";
 import { currentTask } from "./plan.ts";
+import { setLiveCtx } from "./live-ctx.ts";
 import { buildLoopPrompt } from "./prompt.ts";
 import {
   PlanAuthorityError,
@@ -1075,6 +1076,7 @@ async function driveLoop(
       await ctx.newSession({
         withSession: async (next: ExtensionCommandContext) => {
           const workerContext = { ...next, cwd: workerCwd } as ExtensionCommandContext;
+          setLiveCtx(workerContext);
           // Every ctx.newSession() transition replaces the live ctx (#616);
           // re-register it so long-lived callbacks (worker progress/activity,
           // lease notifications, the live display widget) keep resolving the
@@ -1109,6 +1111,7 @@ async function driveLoop(
     await ctx.newSession({
       withSession: async (next: ExtensionCommandContext) => {
         const workerContext = { ...next, cwd: workerCwd } as ExtensionCommandContext;
+        setLiveCtx(workerContext);
         // See the identical note in the maintenance branch above (#616).
         attachWorkerDisplay(workerContext, display);
         try {
