@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/mattpocock/skills.git",
+    "revision": "885e2ca4d842d139e9aef4e48d366c63cb1b8013",
+    "license": "LICENSE",
+    "provenance": "https://github.com/mattpocock/skills/commit/885e2ca4d842d139e9aef4e48d366c63cb1b8013"
+  },
+  "destination": "skills/vendor/mattpocock",
+  "packs": [
+    {
+      "name": "code-review",
+      "source": "skills/engineering/code-review",
+      "destination": "code-review",
+      "files": ["SKILL.md", "agents/openai.yaml"]
+    },
+    {
+      "name": "tdd",
+      "source": "skills/engineering/tdd",
+      "destination": "tdd",
+      "files": ["SKILL.md", "agents/openai.yaml", "mocking.md", "tests.md"]
+    },
+    {
+      "name": "diagnosing-bugs",
+      "source": "skills/engineering/diagnosing-bugs",
+      "destination": "diagnosing-bugs",
+      "files": ["SKILL.md", "agents/openai.yaml", "scripts/hitl-loop.template.sh"]
+    },
+    {
+      "name": "codebase-design",
+      "source": "skills/engineering/codebase-design",
+      "destination": "codebase-design",
+      "files": ["SKILL.md", "agents/openai.yaml", "DEEPENING.md", "DESIGN-IT-TWICE.md"]
+    }
+  ],
+  "overlays": [
+    {
+      "name": "pi-next-trust-boundary",
+      "path": "skills/overlays/mattpocock/pi-next-trust-boundary.md",
+      "appliesTo": ["code-review", "tdd", "diagnosing-bugs", "codebase-design"]
+    }
+  ]
+}

@@ -1,0 +1,279 @@
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+
+import { loadPiNextConfig, type PiNextConfig } from "../../src/coordination/config.ts";
+import {
+  createWorkAuthority,
+  requireAuthorityCapability,
+  type AuthorityWorkItem,
+  type WorkAuthorityAdapter,
+} from "../../src/coordination/work-authority.ts";
+import { psDir } from "./util.ts";
+import type { IssueLeaseAuthority } from "./issue-leases.ts";
+import { isIssueLeaseFresh } from "./issue-authority.ts";
+import { refreshMainAtIssueBoundary } from "./main-refresh.ts";
+
+const PRIORITY_BUCKET_LIMITS = [3, 5, 3, 2] as const;
+const ARCHIVED_SCAN_LIMIT = 200;
+const DEFERRED_SCAN_LIMIT = 100;
+
+interface CandidateIssue {
+  number: number;
+  title: string;
+  updatedAt?: string;
+  labels?: Array<{ name?: string }>;
+}
+
+export interface CandidateShortlist {
+  text?: string;
+  exhausted: boolean;
+}
+
+export interface CandidateShortlistOptions {
+  completedIssues?: number[];
+  deferredIssues?: number[];
+  includeLocalArchiveExclusions?: boolean;
+  /** Shared authority used to refresh ownership immediately before selection. */
+  leaseAuthority?: IssueLeaseAuthority;
+  now?: Date;
+  /** Reports slow authority/refresh phases to the interactive command UI. */
+  onStatus?: (message: string) => void;
+  /** Inject a project adapter; production resolves it from validated config. */
+  authority?: WorkAuthorityAdapter;
+  /** Use a validated configuration supplied by a host or test. */
+  config?: PiNextConfig;
+  /** Skip refreshing the shared coordination checkout when another agent owns its dirty state. */
+  refreshMain?: boolean;
+}
+
+function labelNames(issue: Pick<CandidateIssue, "labels">): string[] {
+  return (issue.labels || [])
+    .map((label) => label.name || "")
+    .filter(Boolean);
+}
+
+function stateMatches(states: string[], wanted: string): boolean {
+  const normalized = wanted.trim().toLowerCase();
+  return states.some((state) => {
+    const value = state.trim().toLowerCase();
+    return value === normalized || value.replace(/^status:/, "") === normalized.replace(/^status:/, "");
+  });
+}
+
+function candidateFromAuthority(item: AuthorityWorkItem): CandidateIssue | undefined {
+  if (!Number.isSafeInteger(item.number) || (item.number || 0) < 1) return undefined;
+  return {
+    number: item.number!,
+    title: item.title,
+    updatedAt: item.updatedAt,
+    labels: [
+      ...item.states.map((name) => ({ name })),
+      ...(item.priority ? [{ name: `priority: ${item.priority}` }] : []),
+    ],
+  };
+}
+
+/** Blocked issues require an explicit recovery/decision and are never an
+ * autonomous candidate, even when they carry a higher priority label. */
+export function isBlockedCandidate(
+  issue: Pick<CandidateIssue, "labels">,
+  blockedStates: readonly string[] = ["blocked"],
+): boolean {
+  return blockedStates.some((state) => stateMatches(labelNames(issue), state));
+}
+
+/**
+ * Findings are backlog evidence, not autonomous work.  The labels/states are
+ * configuration, so the kernel does not require a particular GitHub workflow;
+ * an authority can map its own review state into these values.
+ */
+export function isHeldSelfAssessmentFinding(
+  issue: Pick<CandidateIssue, "labels">,
+  config: Pick<PiNextConfig, "assessment">,
+): boolean {
+  const labels = labelNames(issue);
+  const isFinding = config.assessment.findingLabels.some((label) => stateMatches(labels, label));
+  if (!isFinding) return false;
+  const approved = config.assessment.approvedStates.some((state) => stateMatches(labels, state));
+  if (approved) return false;
+  return config.assessment.heldStates.some((state) => stateMatches(labels, state)) || isFinding;
+}
+
+function archivedIssueNumbers(cwd: string): Set<number> {
+  const archivedDir = join(psDir(cwd), "ARCHIVED");
+  if (!existsSync(archivedDir)) return new Set();
+
+  const files = readdirSync(archivedDir)
+    .filter((entry) => entry.endsWith(".md"))
+    .map((entry) => {
+      const path = join(archivedDir, entry);
+      return { path, mtimeMs: statSync(path).mtimeMs };
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, ARCHIVED_SCAN_LIMIT);
+
+  const issues = new Set<number>();
+  for (const { path } of files) {
+    const text = readFileSync(path, "utf8");
+    for (const match of text.matchAll(/\*\*GitHub-Issue:\*\*\s*#(\d+)/gi)) {
+      const issue = Number.parseInt(match[1], 10);
+      if (Number.isInteger(issue) && issue > 0) issues.add(issue);
+    }
+  }
+  return issues;
+}
+
+function deferredIssueVersions(cwd: string): Map<number, string | undefined> {
+  const deferredDir = join(psDir(cwd), "deferred");
+  if (!existsSync(deferredDir)) return new Map();
+
+  const files = readdirSync(deferredDir)
+    .filter((entry) => entry.endsWith(".md"))
+    .map((entry) => {
+      const path = join(deferredDir, entry);
+      return { path, mtimeMs: statSync(path).mtimeMs };
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, DEFERRED_SCAN_LIMIT);
+
+  const versions = new Map<number, string | undefined>();
+  for (const { path } of files) {
+    const text = readFileSync(path, "utf8");
+    const issueMatch = text.match(/\*\*GitHub-Issue:\*\*\s*#(\d+)/i);
+    if (!issueMatch) continue;
+    const issue = Number.parseInt(issueMatch[1], 10);
+    if (!Number.isInteger(issue) || issue <= 0 || versions.has(issue)) continue;
+    const updatedAt = text.match(/\*\*Issue-Updated-At:\*\*\s*([^\n]+)/i)?.[1]?.trim();
+    versions.set(issue, updatedAt && updatedAt !== "unverified" ? updatedAt : undefined);
+  }
+  return versions;
+}
+
+export function deferredIssueStillUnchanged(
+  issue: CandidateIssue,
+  localDeferred: Map<number, string | undefined>,
+): boolean {
+  if (!localDeferred.has(issue.number)) return false;
+  const deferredUpdatedAt = localDeferred.get(issue.number);
+  // Missing/invalid freshness provenance is unsafe to suppress: let the issue
+  // re-enter selection so the normal live-authority reconciliation can repair it.
+  if (!deferredUpdatedAt || !issue.updatedAt) return false;
+  const deferredTime = Date.parse(deferredUpdatedAt);
+  const liveTime = Date.parse(issue.updatedAt);
+  if (!Number.isFinite(deferredTime) || !Number.isFinite(liveTime)) return false;
+  return liveTime <= deferredTime;
+}
+
+export async function candidateShortlist(
+  cwd: string,
+  options: CandidateShortlistOptions = {},
+): Promise<CandidateShortlist> {
+  const config = options.config ?? loadPiNextConfig(cwd);
+  const authority = options.authority ?? createWorkAuthority(cwd, config);
+  requireAuthorityCapability(authority, "discovery");
+
+  // No PLAN means this is an issue boundary. Refresh the production checkout
+  // before reading the shared backlog so every new worker starts from other
+  // agents' already-published work. A dirty coordination checkout is allowed:
+  // another agent may be using it, and the selected issue gets its own
+  // worktree before the model session starts.
+  options.onStatus?.(`Checking ${authority.name} for actionable work (${config.selection.priorities.join(", ")})`);
+  if (options.refreshMain !== false) {
+    await refreshMainAtIssueBoundary(cwd, options.onStatus);
+  } else {
+    options.onStatus?.("Skipping shared main refresh; another agent owns the coordination checkout");
+  }
+  options.onStatus?.(`${authority.name} work-item selection is in progress`);
+
+  const localArchived =
+    options.includeLocalArchiveExclusions === false
+      ? new Set<number>()
+      : archivedIssueNumbers(cwd);
+  const localDeferred = deferredIssueVersions(cwd);
+  // Deferred freshness is authoritative: do not permanently exclude a parked
+  // issue from the set before checking whether GitHub has advanced it.
+  const excluded = new Set([
+    ...(options.completedIssues || []),
+    ...localArchived,
+  ]);
+  const groups: string[] = [];
+  const excludedOpen: number[] = [];
+  const deferredOpen: number[] = [];
+  try {
+    options.onStatus?.(`Querying ${authority.name} work items`);
+    const queried = (await authority.listCandidates(config))
+      .map(candidateFromAuthority)
+      .filter((issue): issue is CandidateIssue => Boolean(issue));
+    for (const issue of queried) {
+      if (localArchived.has(issue.number)) excludedOpen.push(issue.number);
+      if (deferredIssueStillUnchanged(issue, localDeferred)) deferredOpen.push(issue.number);
+    }
+    options.onStatus?.("Checking ownership leases");
+    const liveLeases = options.leaseAuthority
+      ? await Promise.all(queried.map(async (issue) => [issue.number, await options.leaseAuthority!.read(issue.number)] as const))
+      : [];
+    const leasedElsewhere = new Set(
+      liveLeases
+        .filter(([, lease]) => lease && isIssueLeaseFresh(lease, options.now || new Date()))
+        .map(([issue]) => issue),
+    );
+    for (let priority = 0; priority < config.selection.priorities.length; priority += 1) {
+      const priorityName = config.selection.priorities[priority];
+      const wanted = PRIORITY_BUCKET_LIMITS[Math.min(priority, PRIORITY_BUCKET_LIMITS.length - 1)] ?? 2;
+      const issues = queried
+        .filter(
+          (issue) =>
+            (issue.labels || []).some((label) => label.name === `priority: ${priorityName}` || label.name === `priority:${priorityName}` || label.name === priorityName) &&
+            !excluded.has(issue.number) &&
+            !deferredIssueStillUnchanged(issue, localDeferred) &&
+            !isBlockedCandidate(issue, config.selection.blockedStates) &&
+            !isHeldSelfAssessmentFinding(issue, config) &&
+            !leasedElsewhere.has(issue.number),
+        )
+        .sort((left, right) => {
+          const leftReady = config.selection.readyStates.some((state) => stateMatches(labelNames(left), state)) ? 1 : 0;
+          const rightReady = config.selection.readyStates.some((state) => stateMatches(labelNames(right), state)) ? 1 : 0;
+          if (leftReady !== rightReady) return rightReady - leftReady;
+          return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+        })
+        .slice(0, wanted);
+      if (!issues.length) continue;
+      groups.push(
+        `${priorityName}:\n${issues.map((issue) => {
+          const labels = labelNames(issue).filter((label) => /^(status:|type:)/.test(label)).join(", ");
+          return `- #${issue.number} ${issue.title}${labels ? ` [${labels}]` : ""}`;
+        }).join("\n")}`,
+      );
+    }
+  } catch {
+    // Never trust a partial authority view: a failed query could otherwise hide urgent work.
+    return { exhausted: false };
+  }
+
+  const notes: string[] = [];
+  const archivedNotes = [...new Set(excludedOpen)].sort((left, right) => left - right);
+  if (archivedNotes.length) {
+    notes.push(
+      `Locally archived open issues omitted from this shortlist: ${archivedNotes
+        .map((issue) => `#${issue}`)
+        .join(", ")}. Do not reselect them unless live GitHub comments or labels show new actionable requirements after archive.`,
+    );
+  }
+  const deferredNotes = [...new Set(deferredOpen)].sort((left, right) => left - right);
+  if (deferredNotes.length) {
+    notes.push(
+      `Locally deferred issues omitted while their live GitHub updatedAt has not advanced: ${deferredNotes
+        .map((issue) => `#${issue}`)
+        .join(", ")}. They become eligible again automatically after a new authoritative GitHub update.`,
+    );
+  }
+  const note = notes.join("\n");
+
+  if (!groups.length) {
+    return { text: note || undefined, exhausted: true };
+  }
+  return {
+    text: [groups.join("\n\n"), note].filter(Boolean).join("\n\n"),
+    exhausted: false,
+  };
+}

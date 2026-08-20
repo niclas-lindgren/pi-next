@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "authority": { "adapter": "memory" },
+  "selection": {
+    "priorities": ["P0", "P1", "P2", "P3"],
+    "readyStates": ["open"],
+    "blockedStates": ["blocked"]
+  },
+  "repositoryPolicy": { "entrypoints": ["CONSUMER-POLICY.md"] },
+  "workflow": {
+    "stateDir": ".pi-next",
+    "planPath": ".pi-next/PLAN.md",
+    "verifyPath": ".pi-next/VERIFY.md",
+    "archiveDir": ".pi-next/ARCHIVED",
+    "deferredDir": ".pi-next/deferred",
+    "skillPath": ".pi-next/SKILL.md",
+    "tuningPath": ".pi-next/LOOP_TUNING.md",
+    "helperDir": ".pi-next/scripts"
+  }
+}

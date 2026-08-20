@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+main_push=0
+main_local_sha=""
+main_remote_sha=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    main_push=1
+    main_local_sha=$local_sha
+    main_remote_sha=$remote_sha
+  fi
+done
+
+[ "$main_push" -eq 1 ] || exit 0
+
+if [ "$main_remote_sha" = "0000000000000000000000000000000000000000" ]; then
+  base=$(git rev-list --max-parents=0 "$main_local_sha" | tail -n 1)
+else
+  base=$main_remote_sha
+fi
+changed=$(git diff --name-only "$base..$main_local_sha")
+
+old_version=""
+if [ "$main_remote_sha" != "0000000000000000000000000000000000000000" ]; then
+  old_version=$(git show "$main_remote_sha:package.json" 2>/dev/null | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { try { console.log(JSON.parse(s).version || ""); } catch {} });' || true)
+fi
+new_version=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("package.json", "utf8")).version || "")')
+
+if printf '%s\n' "$changed" | grep -Eq '^(extensions/|src/|skills/|package\.json$|package-lock\.json$)' && [ -n "$old_version" ] && [ "$old_version" = "$new_version" ]; then
+  echo "pre-push: warning: main contains package changes without a version bump ($new_version)." >&2
+  echo "pre-push: use npm run release -- patch|minor|major for the next published release." >&2
+fi
+
+echo "pre-push: validating main before push..."
+npm run typecheck
+npm test
