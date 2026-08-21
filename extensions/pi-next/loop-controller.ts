@@ -424,17 +424,31 @@ async function settleStep(
  * authorize recovery. In particular, dirty issue-local files are preserved;
  * they are not evidence of completion and are never reset or stashed.
  */
+export interface MissingLoopResultRecoveryOptions {
+  maxAttempts?: number;
+  maxTotalAttempts?: number;
+  /** Bounded deterministic controller activity; delivery is presentation-only. */
+  onActivity?: (summary: string) => void;
+}
+
 export async function reconcileMissingLoopResult(
   coordinationCwd: string,
   state: LoopState,
   authority: Pick<IssueLeaseAuthority, "read"> = new GitHubIssueLeaseAuthority(coordinationCwd),
-  options: { maxAttempts?: number; maxTotalAttempts?: number } = {},
+  options: MissingLoopResultRecoveryOptions = {},
 ): Promise<MissingLoopResultRecovery> {
   if (!state.workerResultMissing || state.step <= state.settledStep) {
     return { outcome: "none", state };
   }
 
   const issueNumber = state.activeIssueNumber;
+  const activity = (summary: string): void => {
+    try {
+      options.onActivity?.(summary.slice(0, 180));
+    } catch {
+      // Display delivery is diagnostic only and cannot affect recovery.
+    }
+  };
   const previous = state.recovery || {
     missingLoopResults: 0,
     automaticSettlements: 0,
@@ -468,6 +482,7 @@ export async function reconcileMissingLoopResult(
     lastOutcome: "reconciling" as const,
     updatedAt: loopNow(),
   };
+  activity(`reconciling missing worker result · attempt ${attempts + 1}/${maxAttempts}`);
   // Persist the reconciliation phase before any authority or git inspection;
   // a controller crash during inspection remains observable and is never
   // mistaken for a cleanly settled transition.
@@ -489,6 +504,7 @@ export async function reconcileMissingLoopResult(
     exhausted = false,
     consumedAttempts = attempts,
   ): Promise<MissingLoopResultRecovery> => {
+    activity(exhausted ? "recovery exhausted" : "recovery unsafe");
     const attemptsByFingerprint = consumedAttempts > attempts
       ? { ...previous.attemptsByFingerprint, [fingerprint]: consumedAttempts }
       : previous.attemptsByFingerprint;
@@ -528,26 +544,36 @@ export async function reconcileMissingLoopResult(
   };
 
   if (!Number.isSafeInteger(issueNumber) || (issueNumber || 0) < 1 || !state.activeLease) {
+    activity("recovery invariant failed · issue identity or lease missing");
     return unsafe("Cannot recover missing loop_result: active issue identity or lease is missing");
   }
   const issue = issueNumber as number;
   const identity = issueWorkspaceIdentity(issue);
   const workspace = resolve(coordinationCwd, identity.worktree);
   if (state.activeWorkspace !== workspace || !existsSync(workspace)) {
+    activity("validating canonical worktree · unavailable or ambiguous");
     return unsafe(`Cannot recover issue #${issueNumber}: canonical issue worktree is missing or ambiguous`);
   }
+  activity("validating canonical worktree");
 
   let liveLease;
   let authorityReadAttempts = 0;
   const authorityReadBudget = Math.max(1, maxAttempts - attempts);
   while (authorityReadAttempts < authorityReadBudget) {
     authorityReadAttempts += 1;
+    activity(authorityReadAttempts === 1
+      ? "reading authoritative issue lease"
+      : `retrying authoritative lease read · attempt ${attempts + authorityReadAttempts}/${maxAttempts}`);
     try {
       liveLease = await authority.read(issue);
+      activity("authoritative issue lease confirmed");
       break;
     } catch (error) {
       if (!isTransientAuthorityReadFailure(error)) {
         return unsafe(`Cannot reconcile issue #${issueNumber} lease before recovery: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (authorityReadAttempts < authorityReadBudget) {
+        activity(`authority read transient · retry ${attempts + authorityReadAttempts}/${maxAttempts}`);
       }
       if (authorityReadAttempts >= authorityReadBudget) {
         return unsafe(
@@ -559,6 +585,7 @@ export async function reconcileMissingLoopResult(
     }
   }
   if (!liveLease || !isIssueLeaseFresh(liveLease) || !issueLeaseMatchesOwner(liveLease, state.activeLease)) {
+    activity("recovery unsafe · authoritative lease is missing, stale, or foreign");
     return unsafe(`Cannot recover issue #${issueNumber}: authoritative lease is missing, stale, or owned by another run`);
   }
   try {
@@ -567,15 +594,20 @@ export async function reconcileMissingLoopResult(
       return unsafe(`Cannot recover issue #${issueNumber}: canonical worktree is on ${branch || "no branch"}, expected ${identity.branch}`);
     }
     const conflicts = await git(workspace, ["diff", "--name-only", "--diff-filter=U"]);
+    activity("checking repository state");
     if (conflicts.trim()) {
+      activity("recovery unsafe · unresolved git conflicts");
       return unsafe(`Cannot recover issue #${issueNumber}: unresolved git conflicts (${conflicts.trim()})`);
     }
+    activity("repository state is recoverable; preserving issue-local changes");
   } catch (error) {
     return unsafe(`Cannot inspect issue #${issueNumber} worktree before recovery: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  activity("inspecting durable recovery evidence");
   const inferred = await inferCompletedArchive(workspace, state);
   if (inferred && inferred.issueNumber === issue) {
+    activity("durable completion evidence found");
     const settled = await applyResult(workspace, state, inferred);
     const recovery = {
       ...baseRecovery,
@@ -619,6 +651,7 @@ export async function reconcileMissingLoopResult(
     return unsafe(`Automatic recovery exhausted after ${attempts} attempts for issue #${issue}; human inspection is required`, true);
   }
 
+  activity("no durable completion evidence; preparing same-issue resume");
   const recovery = {
     ...baseRecovery,
     automaticResumes: previous.automaticResumes + 1,

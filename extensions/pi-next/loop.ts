@@ -669,13 +669,27 @@ export async function runOwnedIssueCycle(
           );
           state = readLoopState(coordinationCwd, prepared.runId) || state;
           if (!state.workerResultMissing || state.status !== "interrupted") break;
+          const recoveryIssue = state.activeIssueNumber;
+          const recoveryRunId = state.runId;
           const recovery = await reconcileMissingLoopResult(
             coordinationCwd,
             state,
             recoveryAuthority,
+            {
+              onActivity: (summary) => display?.controllerActivity(
+                recoveryIssue,
+                recoveryRunId,
+                summary,
+              ),
+            },
           );
           state = recovery.state;
           if (recovery.outcome !== "resuming_same_issue") break;
+          display?.controllerActivity(
+            state.activeIssueNumber,
+            state.runId,
+            "starting replacement worker",
+          );
         }
       } catch (error) {
         const classification = classifyFailure(error, {
