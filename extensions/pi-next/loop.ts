@@ -21,6 +21,7 @@ import {
   CandidateDiscoveryError,
   candidateShortlist,
 } from "./issue-candidates.ts";
+import { getLiveIssueFingerprint } from "./issue-freshness.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import {
@@ -298,6 +299,56 @@ export async function containIssueLocalFailure(
   return cleared;
 }
 
+async function yieldClaimedIssue(
+  cwd: string,
+  state: LoopState,
+  issueNumber: number,
+  lease: IssueLease,
+  reason: string,
+  authority: import("./issue-leases.ts").IssueLeaseAuthority,
+): Promise<LoopState> {
+  await releaseIssueLease(authority, lease, {
+    cwd,
+    recordEvent: recordLifecycleEvent,
+  });
+  const yieldedAt = loopNow();
+  const yielded: LoopState = {
+    ...state,
+    status: "running",
+    activeIssueNumber: undefined,
+    activeWorkspace: undefined,
+    activeLease: undefined,
+    deferredIssues: [
+      ...state.deferredIssues.filter((item) => item.issueNumber !== issueNumber),
+      { issueNumber, reason, deferredAt: yieldedAt, kind: "yielded" },
+    ],
+    issueMetrics: markIssueDisposition(state.issueMetrics, issueNumber, "yielded", reason),
+    lastOutcome: "yield_issue",
+    lastReason: `Yielded issue #${issueNumber}: ${reason}`,
+    updatedAt: yieldedAt,
+  };
+  writeJsonAtomic(loopStateFile(cwd, state.runId), yielded);
+  notifyLive(yielded.lastReason || `Issue #${issueNumber} yielded`, "warning");
+  return yielded;
+}
+
+async function readIssueEligibility(
+  cwd: string,
+  issueNumber: number,
+  authority: import("../../src/coordination/work-authority.ts").WorkAuthorityAdapter,
+): Promise<{ eligible: boolean; reason: string; disposition: string }> {
+  try {
+    const live = await getLiveIssueFingerprint(cwd, issueNumber, authority);
+    return live.eligibility;
+  } catch {
+    return {
+      eligible: false,
+      disposition: "unavailable",
+      reason: "authority eligibility could not be verified",
+    };
+  }
+}
+
 export async function claimLoopIssue(
   cwd: string,
   state: LoopState,
@@ -336,6 +387,22 @@ export async function claimLoopIssue(
       new Date(),
       { cwd, recordEvent: recordLifecycleEvent },
     );
+    // An injected work authority is used by harnesses to make this claim
+    // boundary independently testable. Production's active-plan gate below
+    // performs the same read through the configured authority before a worker.
+    if (workAuthorityOverride) {
+      const eligibility = await readIssueEligibility(cwd, activeIssueNumber, workAuthorityOverride);
+      if (!eligibility.eligible) {
+        return yieldClaimedIssue(
+          cwd,
+          state,
+          activeIssueNumber,
+          lease,
+          `authority now ${eligibility.disposition}: ${eligibility.reason}`,
+          authority,
+        );
+      }
+    }
     let workspace: string;
     try {
       workspace = await ensureIssueWorktree(
@@ -431,6 +498,22 @@ export async function claimLoopIssue(
     now,
     { cwd, recordEvent: recordLifecycleEvent },
   );
+  // A selected issue is revalidated before worktree handoff whenever the
+  // host supplies the configured authority. The active-plan gate is still
+  // mandatory immediately before any worker transition.
+  if (workAuthorityOverride) {
+    const eligibility = await readIssueEligibility(cwd, resolvedIssueNumber, workAuthorityOverride);
+    if (!eligibility.eligible) {
+      return yieldClaimedIssue(
+        cwd,
+        state,
+        resolvedIssueNumber,
+        lease,
+        `authority now ${eligibility.disposition}: ${eligibility.reason}`,
+        authority,
+      );
+    }
+  }
   let workspace: string;
   try {
     workspace = await ensureIssueWorktree(

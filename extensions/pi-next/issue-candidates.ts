@@ -27,6 +27,20 @@ interface CandidateIssue {
 
 export type CandidateShortlistOutcome = "candidate" | "exhausted" | "unavailable";
 
+export type AuthorityEligibility =
+  | "eligible"
+  | "blocked"
+  | "closed"
+  | "deferred"
+  | "not_ready"
+  | "unavailable";
+
+export interface AuthorityEligibilityResult {
+  disposition: AuthorityEligibility;
+  eligible: boolean;
+  reason: string;
+}
+
 export interface CandidateShortlist {
   text?: string;
   exhausted: boolean;
@@ -70,7 +84,7 @@ function labelNames(issue: Pick<CandidateIssue, "labels">): string[] {
     .filter(Boolean);
 }
 
-function stateMatches(states: string[], wanted: string): boolean {
+function stateMatches(states: readonly string[], wanted: string): boolean {
   const normalized = wanted.trim().toLowerCase();
   return states.some((state) => {
     const value = state.trim().toLowerCase();
@@ -115,6 +129,50 @@ export function isHeldSelfAssessmentFinding(
   const approved = config.assessment.approvedStates.some((state) => stateMatches(labels, state));
   if (approved) return false;
   return config.assessment.heldStates.some((state) => stateMatches(labels, state)) || isFinding;
+}
+
+/**
+ * Classify live authority through the same policy used by candidate
+ * selection. Active plans must use this result as an execution gate too;
+ * lease ownership is deliberately not part of this classification.
+ */
+export function classifyAuthorityEligibility(
+  item: AuthorityWorkItem,
+  config: PiNextConfig,
+): AuthorityEligibilityResult {
+  const states = item.states || [];
+  const state = item.state.trim().toLowerCase();
+  if (state === "closed" || state === "done" || stateMatches(states, config.authority.projectStatus.done)) {
+    return { disposition: "closed", eligible: false, reason: `authority is closed/done (${item.state || config.authority.projectStatus.done})` };
+  }
+  if (
+    stateMatches(states, config.authority.projectStatus.blocked) ||
+    isBlockedCandidate({ labels: states.map((name) => ({ name })) }, config.selection.blockedStates)
+  ) {
+    const blocker = states.find((value) =>
+      stateMatches([value], config.authority.projectStatus.blocked) ||
+      config.selection.blockedStates.some((wanted) => stateMatches([value], wanted)),
+    );
+    return { disposition: "blocked", eligible: false, reason: `authority is blocked${blocker ? ` (${blocker})` : ""}` };
+  }
+  const labels = states.map((name) => ({ name }));
+  if (
+    isAwaitingExternalVerification(item) ||
+    isHeldSelfAssessmentFinding({ labels }, config)
+  ) {
+    return { disposition: "deferred", eligible: false, reason: "authority explicitly defers autonomous work" };
+  }
+  const explicitDeferred = ["deferred", "not-autonomous", "status:deferred", "status:not-autonomous"];
+  const deferred = states.find((value) => explicitDeferred.some((wanted) => stateMatches([value], wanted)));
+  if (deferred) {
+    return { disposition: "deferred", eligible: false, reason: `authority defers autonomous work (${deferred})` };
+  }
+  const isFinding = config.assessment.findingLabels.some((label) => stateMatches(states, label));
+  const approvedFinding = isFinding && config.assessment.approvedStates.some((state) => stateMatches(states, state));
+  if (!approvedFinding && !config.selection.readyStates.some((wanted) => stateMatches(states, wanted))) {
+    return { disposition: "not_ready", eligible: false, reason: `authority is not ready (missing configured ready state: ${config.selection.readyStates.join(", ")})` };
+  }
+  return { disposition: "eligible", eligible: true, reason: "authority is eligible and ready" };
 }
 
 function archivedIssueNumbers(cwd: string): Set<number> {
@@ -230,8 +288,11 @@ export async function candidateShortlist(
     const queriedItems = await authority.listCandidates(config);
     const queried = queriedItems
       .filter((item) => {
-        if (!isAwaitingExternalVerification(item)) return true;
-        if (Number.isSafeInteger(item.number) && item.number! > 0) pendingVerificationOpen.push(item.number!);
+        const eligibility = classifyAuthorityEligibility(item, config);
+        if (eligibility.disposition !== "deferred") return true;
+        if (isAwaitingExternalVerification(item) && Number.isSafeInteger(item.number) && item.number! > 0) {
+          pendingVerificationOpen.push(item.number!);
+        }
         return false;
       })
       .map(candidateFromAuthority)
@@ -259,8 +320,10 @@ export async function candidateShortlist(
             (issue.labels || []).some((label) => label.name === `priority: ${priorityName}` || label.name === `priority:${priorityName}` || label.name === priorityName) &&
             !excluded.has(issue.number) &&
             !deferredIssueStillUnchanged(issue, localDeferred) &&
-            !isBlockedCandidate(issue, config.selection.blockedStates) &&
-            !isHeldSelfAssessmentFinding(issue, config) &&
+            classifyAuthorityEligibility(
+              queriedItems.find((item) => item.number === issue.number)!,
+              config,
+            ).eligible &&
             !leasedElsewhere.has(issue.number),
         )
         .sort((left, right) => {

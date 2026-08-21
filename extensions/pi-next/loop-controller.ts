@@ -233,6 +233,42 @@ async function applyResult(
     return { state: failed, terminal: true, outcome: "failed" };
   }
 
+  if (result.outcome === "yield_issue") {
+    const issue = result.issueNumber as number;
+    if (!Number.isSafeInteger(issue) || issue < 1 || !result.reason?.trim()) {
+      const failed: LoopState = {
+        ...state,
+        status: "failed",
+        settledStep: state.step,
+        updatedAt: loopNow(),
+        lastOutcome: result.outcome,
+        lastReason: "yield_issue requires an issue number and authoritative reason",
+      };
+      writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), failed);
+      return { state: failed, terminal: true, outcome: "failed" };
+    }
+    // Authority ineligibility is a non-destructive scheduler boundary. Do not
+    // park/remove PLAN.md or require a clean worktree: safe dirty work must
+    // remain available when the issue becomes eligible again.
+    const yieldedAt = loopNow();
+    const yielded: LoopState = {
+      ...state,
+      workerResultMissing: undefined,
+      settledStep: state.step,
+      deferredIssues: [
+        ...state.deferredIssues.filter((item) => item.issueNumber !== issue),
+        { issueNumber: issue, reason: result.reason.trim(), deferredAt: yieldedAt, kind: "yielded" },
+      ],
+      issueMetrics: markIssueDisposition(state.issueMetrics, issue, "yielded", result.reason),
+      updatedAt: yieldedAt,
+      lastOutcome: result.outcome,
+      lastReason: `Yielded issue #${issue}: ${result.reason.trim()}`,
+    };
+    writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), yielded);
+    removeFile(loopResultFile(runtimeCwd, state.runId));
+    return { state: yielded, terminal: false, outcome: result.outcome };
+  }
+
   if (
     [
       "continue",
@@ -757,14 +793,32 @@ function terminalControllerState(
   return state;
 }
 
-async function activePlanFreshness(cwd: string): Promise<string | undefined> {
+async function activePlanFreshness(cwd: string): Promise<{
+  text: string;
+  result: Awaited<ReturnType<typeof checkIssueFreshness>>;
+}> {
   const issueNumber = currentPlanIssue(cwd);
   if (!issueNumber) {
-    return "PLAN.md does not expose a valid GitHub issue number. Treat the plan as untrusted and repair/stop before implementation.";
+    return {
+      text: "PLAN.md does not expose a valid GitHub issue number. Treat the plan as untrusted and repair/stop before implementation.",
+      result: {
+        checked: false,
+        needsReconcile: true,
+        reason: "PLAN.md does not expose a valid GitHub issue number",
+        eligibility: {
+          disposition: "unavailable",
+          eligible: false,
+          reason: "active PLAN authority identity is ambiguous",
+        },
+      },
+    };
   }
-  const freshness = await checkIssueFreshness(cwd, issueNumber);
-  const status = freshness.needsReconcile ? "RECONCILE REQUIRED" : "CURRENT";
-  return `${status} for #${issueNumber}: ${freshness.reason}${freshness.githubUpdatedAt ? ` github_updated=${freshness.githubUpdatedAt}` : ""}`;
+  const result = await checkIssueFreshness(cwd, issueNumber);
+  const status = result.needsReconcile ? "RECONCILE REQUIRED" : "CURRENT";
+  return {
+    result,
+    text: `${status} for #${issueNumber}: ${result.reason}${result.githubUpdatedAt ? ` github_updated=${result.githubUpdatedAt}` : ""}`,
+  };
 }
 
 async function runOneStep(
@@ -820,9 +874,22 @@ async function runOneStep(
       plan.kind === "resolved" ? [plan.path] : [],
     );
   }
-  const planFreshness = hasPlan
+  const planFreshnessResult = hasPlan
     ? await activePlanFreshness(ctx.cwd)
     : undefined;
+  const planFreshness = planFreshnessResult?.text;
+  if (hasPlan && planFreshnessResult && !planFreshnessResult.result.eligibility.eligible) {
+    const issueNumber = state.activeIssueNumber || currentPlanIssue(ctx.cwd);
+    if (!issueNumber) throw new Error("Cannot yield an active plan without an issue identity");
+    return applyResult(ctx.cwd, state, {
+      runId: state.runId,
+      step: state.step,
+      issueNumber,
+      outcome: "yield_issue",
+      reason: `authority now ${planFreshnessResult.result.eligibility.disposition}: ${planFreshnessResult.result.eligibility.reason}`,
+      writtenAt: loopNow(),
+    });
+  }
   const shortlist =
     hasPlan || state.activeIssueNumber
       ? { exhausted: false, text: undefined }
@@ -1035,6 +1102,7 @@ async function runSessionBatch(
       settled.outcome === "archived" ||
       settled.outcome === "defer_issue" ||
       settled.outcome === "block_issue" ||
+      settled.outcome === "yield_issue" ||
       !existsSync(planFile(ctx.cwd)) ||
       planNeedsFinalLifecycle(ctx.cwd)
     ) {
@@ -1091,7 +1159,7 @@ async function driveLoop(
     // cwd, releases this issue lease, and attaches the next issue workspace.
     if (
       pending.outcome &&
-      ["archived", "defer_issue", "block_issue"].includes(pending.outcome)
+      ["archived", "defer_issue", "block_issue", "yield_issue"].includes(pending.outcome)
     ) {
       return;
     }
