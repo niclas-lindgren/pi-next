@@ -355,6 +355,7 @@ export async function claimLoopIssue(
   state: LoopState,
   authorityOverride?: import("./issue-leases.ts").IssueLeaseAuthority,
   workAuthorityOverride?: import("../../src/coordination/work-authority.ts").WorkAuthorityAdapter,
+  onStatus?: (message: string) => void,
 ): Promise<LoopState> {
   const hasPersistedExecutionState =
     state.activeIssueNumber !== undefined ||
@@ -470,6 +471,7 @@ export async function claimLoopIssue(
       deferredIssues: state.deferredIssues.map((item) => item.issueNumber),
       schedulerExcludedIssues: (state.schedulerSkips || []).map((item) => item.issueNumber),
       leaseAuthority: authority,
+      onStatus,
     });
     if (shortlist.outcome === "unavailable") {
       throw new CandidateDiscoveryError(shortlist.reason || "authority query failed");
@@ -752,7 +754,13 @@ export async function runOwnedIssueCycle(
   if (state.status !== "running") return state;
   let prepared: LoopState;
   try {
-    prepared = await claimLoopIssue(coordinationCwd, state, issueAuthority);
+    prepared = await claimLoopIssue(
+      coordinationCwd,
+      state,
+      issueAuthority,
+      undefined,
+      (message) => display?.controllerActivity(undefined, state.runId, message),
+    );
   } catch (error) {
     const handoff = error instanceof IssueHandoffError ? error : undefined;
     const issueNumber = handoff?.issueNumber ?? state.activeIssueNumber;

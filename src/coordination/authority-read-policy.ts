@@ -17,6 +17,51 @@ export function isTransientAuthorityReadFailure(error: unknown): boolean {
 }
 
 export const DEFAULT_AUTHORITY_READ_ATTEMPTS = 3;
+/** Individual authority subprocesses must not hold the scheduler forever. */
+export const DEFAULT_AUTHORITY_OPERATION_TIMEOUT_MS = 15_000;
+
+export class AuthorityOperationTimeoutError extends Error {
+  readonly code = "authority_operation_timeout";
+
+  constructor(
+    readonly operation: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`Authority operation timed out after ${timeoutMs}ms: ${operation}`);
+    this.name = "AuthorityOperationTimeoutError";
+  }
+}
+
+/**
+ * Bounds adapter calls too, including injected authorities used by hosts and
+ * tests. Production subprocesses also receive a child-process timeout so the
+ * underlying `gh` process is terminated rather than merely abandoned.
+ */
+export async function withAuthorityTimeout<T>(
+  operation: string,
+  work: Promise<T>,
+  timeoutMs = DEFAULT_AUTHORITY_OPERATION_TIMEOUT_MS,
+): Promise<T> {
+  const bounded = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.trunc(timeoutMs) : DEFAULT_AUTHORITY_OPERATION_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new AuthorityOperationTimeoutError(operation, bounded)), bounded);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export function authorityOperationTimeoutMs(): number {
+  const configured = Number.parseInt(process.env.PI_NEXT_AUTHORITY_TIMEOUT_MS || "", 10);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_AUTHORITY_OPERATION_TIMEOUT_MS;
+}
 
 export async function readAuthorityWithTransientRetry<T>(
   read: () => Promise<T>,

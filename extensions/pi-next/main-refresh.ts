@@ -8,8 +8,33 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
-import { git, planFile, verifyFile } from "./util.ts";
+import {
+  authorityOperationTimeoutMs,
+  withAuthorityTimeout,
+} from "../../src/coordination/authority-read-policy.ts";
+import { planFile, verifyFile } from "./util.ts";
+
+const execFileAsync = promisify(execFile);
+
+/** Scheduler refresh/cleanup git calls must not await an external process forever. */
+async function git(cwd: string, args: string[]): Promise<string> {
+  const timeoutMs = authorityOperationTimeoutMs();
+  const { stdout } = await withAuthorityTimeout(
+    `git ${args.join(" ")}`,
+    execFileAsync("git", ["-C", cwd, ...args], {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: timeoutMs,
+      killSignal: "SIGTERM",
+    }),
+    timeoutMs,
+  );
+  return stdout.replace(/\r\n/g, "\n").trim();
+}
 
 export interface MainRefreshResult {
   branch: string;
