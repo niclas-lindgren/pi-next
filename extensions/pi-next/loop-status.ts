@@ -160,7 +160,10 @@ function recordLine(record: LoopStatusRecord): string {
         ? "controller liveness unknown"
         : "controller not running";
   const reason = state.lastReason ? ` · ${state.lastReason.replace(/\s+/g, " ").slice(0, 160)}` : "";
-  return `${state.runId} · ${issueLabel(state)} · ${record.presentation} · ${controller}${budget}${reason}`;
+  const memory = state.hostMemory
+    ? ` · host-memory=${state.hostMemory.status} heap=${Math.round(state.hostMemory.heapUsed / 1_000_000)}MB/${Math.round(state.hostMemory.heapLimit / 1_000_000)}MB critical=${state.hostMemory.criticalStreak}`
+    : "";
+  return `${state.runId} · ${issueLabel(state)} · ${record.presentation} · ${controller}${budget}${memory}${reason}`;
 }
 
 function counts(records: readonly LoopStatusRecord[]): string {

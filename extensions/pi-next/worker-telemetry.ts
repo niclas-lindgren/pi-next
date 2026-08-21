@@ -235,6 +235,8 @@ export function parseWorkerTelemetry(output: string, context: WorkerActivityCont
  * tail-truncation `IssueWorkerResult.output` uses for failure diagnostics —
  * a long-running worker's leading `session` header is never lost.
  */
+const MAX_PENDING_LINE_CHARS = 256 * 1024;
+
 export class IncrementalWorkerTelemetryParser {
   private readonly acc: TelemetryAccumulator;
   private pending = "";
@@ -245,6 +247,9 @@ export class IncrementalWorkerTelemetryParser {
 
   push(chunk: string | Buffer): void {
     this.pending += String(chunk);
+    if (this.pending.length > MAX_PENDING_LINE_CHARS) {
+      this.pending = this.pending.slice(-MAX_PENDING_LINE_CHARS);
+    }
     const lines = this.pending.split(/\r?\n/);
     this.pending = lines.pop() ?? "";
     for (const line of lines) consumeTelemetryLine(this.acc, line);

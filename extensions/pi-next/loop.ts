@@ -14,6 +14,7 @@ import {
 import { commitExplicitPaths } from "./commit-safety.ts";
 import { cleanupCompletedIssueWorktree } from "./main-refresh.ts";
 import {
+  observeLoopHostMemory,
   reconcileMissingLoopResult,
   runLoopSteps,
 } from "./loop-controller.ts";
@@ -746,7 +747,10 @@ export async function runOwnedIssueCycle(
   // attach/dispose the widget on every cycle.
   const display = displayOverride ? attachWorkerDisplay(ctx, displayOverride) : undefined;
   display?.controllerActivity(undefined, initial.runId, "selecting next issue");
-  let state = initial;
+  let state = observeLoopHostMemory(coordinationCwd, initial, {
+    boundary: "auto_start",
+  });
+  if (state.status !== "running") return state;
   let prepared: LoopState;
   try {
     prepared = await claimLoopIssue(coordinationCwd, state, issueAuthority);
@@ -777,7 +781,10 @@ export async function runOwnedIssueCycle(
     }
     throw error;
   }
-  state = prepared;
+  state = observeLoopHostMemory(coordinationCwd, prepared, {
+    boundary: "issue_claimed",
+  });
+  prepared = state;
   // Candidate exhaustion is a normal terminal queue state. Do not enter the
   // worker controller after claim has durably settled the run as idle.
   if (prepared.status !== "running") {
@@ -962,7 +969,14 @@ export async function runOwnedIssueCycle(
         }
       } finally {
         await heartbeat?.stop();
-        if (!containedFailure && heartbeat && prepared.activeIssueNumber) {
+        let boundaryState = readLoopState(coordinationCwd, prepared.runId) || state;
+        if (boundaryState.status === "running") {
+          boundaryState = observeLoopHostMemory(coordinationCwd, boundaryState, {
+            boundary: "issue_release",
+          });
+        }
+        const preserveLeaseForMemoryRecovery = boundaryState.hostMemory?.status === "restart_required";
+        if (!containedFailure && !preserveLeaseForMemoryRecovery && heartbeat && prepared.activeIssueNumber) {
           try {
             await releaseIssueLease(
               issueAuthority,
@@ -975,6 +989,12 @@ export async function runOwnedIssueCycle(
               "warning",
             );
           }
+        }
+        if (preserveLeaseForMemoryRecovery) {
+          notifyLive(
+            `Issue #${prepared.activeIssueNumber ?? "?"} paused for host memory pressure; lease preserved for restart recovery`,
+            "warning",
+          );
         }
         trackCrashLoggerCwd(coordinationCwd);
       }

@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { HostMemoryPressure } from "./host-memory.ts";
 import type { IssueLease } from "./issue-authority.ts";
 import { execFile } from "node:child_process";
 import {
@@ -150,6 +151,17 @@ export interface SchedulerSkip {
   skippedAt: string;
 }
 
+export interface HostMemoryState {
+  status: HostMemoryPressure | "restart_required";
+  heapUsed: number;
+  heapLimit: number;
+  heapUsedDelta: number;
+  criticalStreak: number;
+  observedAt: string;
+  boundary: string;
+  reason?: string;
+}
+
 export interface LoopState {
   version: 1;
   runId: string;
@@ -189,6 +201,8 @@ export interface LoopState {
   activeLease?: Omit<IssueLease, "version"> & Partial<Pick<IssueLease, "version">>;
   /** Present while a canonical PLAN awaits bounded planning repair. */
   planRepair?: PlanRepairState;
+  /** Last payload-free parent-host memory boundary; restart_required preserves ownership for recovery. */
+  hostMemory?: HostMemoryState;
 }
 
 export interface LoopResult {

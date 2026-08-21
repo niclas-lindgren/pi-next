@@ -83,6 +83,11 @@ function boundedWidth(width: number | undefined): number {
   return Math.max(20, Math.floor(width || 80));
 }
 
+function memorySize(bytes: number): string {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  return `${Math.round(bytes / 1_000_000)} MB`;
+}
+
 /** Keep terminal reasons useful without copying the full diagnostic transcript. */
 function terminalReason(state: LoopState): string | undefined {
   if (state.status === "completed") return undefined;
@@ -91,6 +96,7 @@ function terminalReason(state: LoopState): string | undefined {
       ? "no eligible candidates"
       : undefined;
   }
+  if (state.hostMemory?.status === "restart_required") return "host memory pressure · restart required";
   const raw = state.lastReason?.replace(/\s+/g, " ").trim();
   // Outcome is authoritative here: scheduler yields are not worker recovery
   // failures, even when their diagnostic reason contains "exhausted".
@@ -141,6 +147,9 @@ export function renderAutoProgress(
   const retry = retryAttempt > 0
     ? `retry ${retryAttempt}/${state.recovery?.retryLimit || 3}`
     : undefined;
+  const memory = state.hostMemory
+    ? `host heap ${memorySize(state.hostMemory.heapUsed)}/${memorySize(state.hostMemory.heapLimit)} · ${state.hostMemory.status.replaceAll("_", " ")}`
+    : undefined;
   const session = `session ${state.sessionTransition || 0}/${state.sessionTransitionLimit || 3}`;
   const step = `step ${state.step}/${state.maxSteps}`;
   const width = boundedWidth(options.width);
@@ -159,7 +168,7 @@ export function renderAutoProgress(
   const counts = state.status === "idle"
     ? ` · ✓${completed} ↷${deferred} ⏭${schedulerSkips} · ${remaining} capacity remaining`
     : ` · ✓${completed} ↷${deferred} ⏭${schedulerSkips} · ${remaining} remaining`;
-  const diagnostics = [recovery, retry, session, step, elapsed]
+  const diagnostics = [recovery, retry, memory, session, step, elapsed]
     .filter(Boolean).join(" · ");
   const full = primary + current + counts + (diagnostics ? ` · ${diagnostics}` : "");
   if (full.length <= width) return full;
