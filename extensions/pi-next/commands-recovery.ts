@@ -14,6 +14,7 @@ import {
   ForegroundSupervisor,
 } from "./foreground-supervisor.ts";
 import { getLiveCtx, sessionIdentity, setLiveCtx } from "./live-ctx.ts";
+import { preflightWorkflowStateProvider } from "./workflow-state-provider.ts";
 import {
   listLoopStates,
   loopResultFile,
@@ -415,6 +416,20 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
           : undefined;
         try {
           if (auto) {
+            // Recovery can take over an abandoned lease and prepare its
+            // canonical worktree, so provider validation must precede it as
+            // well as the normal claim/worker path. Keep this failure separate
+            // from authority/recovery failures.
+            try {
+              await preflightWorkflowStateProvider(ctx.cwd);
+            } catch (error) {
+              safeNotify(
+                ctx,
+                `Workflow state provider preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+                "error",
+              );
+              return;
+            }
             try {
               // ForegroundSupervisor.recoverOnStart owns the authority-first
               // decision (fresh lease -> local run) and, when it finds a

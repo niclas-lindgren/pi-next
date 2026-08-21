@@ -114,6 +114,22 @@ export function formatWorkflowState(state: WorkflowState): string {
     .join("\n");
 }
 
+/**
+ * Validate and exercise the selected provider before autonomous work starts.
+ *
+ * Calling the provider (rather than only checking its path) is intentional:
+ * an explicitly configured helper is not usable until its output satisfies the
+ * same contract used by inspect/status. This boundary is diagnostic/config
+ * validation only; it does not claim leases or mutate issue worktrees.
+ */
+export async function preflightWorkflowStateProvider(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<"builtin" | "helper"> {
+  const result = await workflowState(cwd, "", signal);
+  return result.provider;
+}
+
 export async function workflowState(
   cwd: string,
   args = "",
