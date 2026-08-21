@@ -13,6 +13,24 @@ Pi's host currently cannot provide an OS sandbox for shell access, so review
 workspace isolation remains an additional adapter responsibility and the
 residual host permission threat is documented in `SECURITY.md`.
 
+## Worker freshness vs. Pi host sessions
+
+An isolated child worker process is Pi-next's normal **fresh model-context
+boundary**. Planning, implementation, repair, review, verification, and other
+model turns must reconstruct the current task from explicit dispatch inputs,
+the canonical worktree, configured workflow artifacts, and fresh authority
+rather than inheriting a previous issue's conversational state.
+
+The parent `/pi-next auto` Pi host session is a different lifecycle boundary and
+should normally remain stable across worker turns, issue changes, scheduler
+cycles, and maintenance. Do not call `ctx.newSession()` merely to obtain a
+fresh worker. Pi's session-replacement APIs tear down and replace the active
+host runtime; they are reserved for genuine Pi/user lifecycle operations.
+
+See [`HOST_SESSION_LIFECYCLE.md`](HOST_SESSION_LIFECYCLE.md) for the upstream Pi
+contract, replacement semantics, memory/UI implications, and required
+regression invariant.
+
 Methodology is selective. TDD, bug diagnosis, code review, and codebase design
 are loaded only for roles/tasks that need them. Skills are advisory and never
 define authority, ownership, promotion, or closure.

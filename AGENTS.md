@@ -40,6 +40,13 @@ before selecting the next issue.
   New limits and counters must be baselined or migrated rather than applied
   retroactively to historical measurements unless that behavior is explicitly
   safe and tested.
+- **Host-session lifetime and worker-context freshness are separate.** Normal
+  `/pi-next auto` execution keeps one stable parent Pi host session. Fresh model
+  context is provided by isolated child worker processes and explicit durable
+  state/authority rehydration, not by routine `ctx.newSession()` calls. Reserve
+  Pi host-session replacement for genuine Pi/user lifecycle operations and use
+  the replacement context after such a transition. See
+  `docs/HOST_SESSION_LIFECYCLE.md`.
 
 ## Required issue loop
 
@@ -82,18 +89,22 @@ before selecting the next issue.
    plan or verification artifact remains, and integration into `origin/main` is
    proven. Preserve the remote branch when it is useful for audit or recovery.
    Never delete dirty, unintegrated, foreign, or ambiguous workspaces.
-8. **Reset context between issues.** After every completed or explicitly
-   deferred issue, release its lease and clean or preserve its workspace
-   according to the cleanup rule above, then terminate the current issue
-   context before selecting another issue. Start the next issue in a fresh
-   agent/session context (use the harness context-clear operation, such as
-   `/clear`, when available). Do not carry the prior issue's plan, transcript,
-   assumptions, or authority snapshot into the next issue; re-read the live
-   issue and repository policy from scratch.
+8. **Reset the issue worker context, not the parent Pi host session.** After
+   every completed or explicitly deferred issue, release its lease and clean or
+   preserve its workspace according to the cleanup rule above, then terminate
+   the current isolated issue worker/context before selecting another issue.
+   Start the next issue in a fresh isolated child worker/model context and
+   re-read the live issue and repository policy from scratch. Do not carry the
+   prior issue's plan, transcript, assumptions, or authority snapshot into the
+   next worker. **Do not call `ctx.newSession()` merely to achieve this
+   freshness**; the `/pi-next auto` parent Pi host session should remain stable
+   during ordinary progression. `ctx.newSession()`/fork/switch/reload handling
+   is for genuine host lifecycle replacement and must use the replacement
+   context afterward. See `docs/HOST_SESSION_LIFECYCLE.md`.
 9. **Continue safely.** Re-query open GitHub issues after every completed,
    explicitly deferred, yielded, or safely contained issue and only after any
-   required context reset. Continue for issue-local failures that have been
-   safely preserved/released, repairable-but-contained workflow defects,
+   required worker-context reset. Continue for issue-local failures that have
+   been safely preserved/released, repairable-but-contained workflow defects,
    convergence yields, unavailable candidates, and fresh-owner conflicts that
    occur while claiming **newly selected candidates**. Such claim races are
    scheduler-local and must not terminate unrelated queue work. Stop globally
@@ -127,7 +138,12 @@ regression. Examples include:
 - restart -> abandoned-run discovery -> authority reconciliation -> canonical
   worktree resume;
 - upgrade from prior persisted state -> new scheduler/budget semantics applied
-  only after explicit baseline or migration.
+  only after explicit baseline or migration;
+- 20+ ordinary worker/controller transitions -> fresh isolated child workers ->
+  unchanged parent Pi host-session identity -> zero Pi-next-initiated
+  `ctx.newSession()` calls;
+- genuine external host-session replacement -> old context rejected/stale ->
+  replacement context rebound safely.
 
 A fix is not complete merely because the new helper behaves correctly in
 isolation while an earlier outer guard still rejects the same real execution
