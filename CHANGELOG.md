@@ -1,6 +1,40 @@
 # Changelog
 
-## 0.2.40 - pending release
+## 0.2.41 - pending release
+
+Release-gate reliability follow-up.
+
+### Material changes
+
+- Make the hosted release gate authenticate GitHub CLI calls and run the
+  temporary-repository test suite deterministically.
+- Treat a local checkout without a GitHub remote as an ordinary absent lease
+  during coordination status checks.
+
+### Compatibility/configuration/schema
+
+- No Pi API, package/config schema, or authority contract changes are intended.
+- The supported Node.js 22.19+ and Pi 0.84.2+ compatibility range is unchanged.
+
+### Breaking/behavior changes
+
+- The default test scripts now serialize test files to avoid shared temporary
+  fixture cleanup races; runtime worker behavior is unchanged.
+
+### Security/safety
+
+- GitHub Actions receives only its built-in read token for authority-bound
+  checks; no credential is stored in the repository.
+- Release verification remains tied to an immutable tag commit and pinned
+  consumers remain unchanged.
+
+### Upgrade guidance
+
+- This is release-gate reliability work. Consumers may wait for a later bundled
+  runtime release; when upgrading, inspect notes and run pin plus fresh-process
+  checks as documented.
+
+## 0.2.40 - 2026-08-21
 
 Release-evidence and consumer-release governance release.
 
