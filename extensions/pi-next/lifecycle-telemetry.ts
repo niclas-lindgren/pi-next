@@ -13,6 +13,7 @@ export type LifecycleEventName =
   | "build_classified"
   | "claim_acquired"
   | "claim_rejected"
+  | "scheduler_skip"
   | "claim_released"
   | "claim_expired"
   | "claim_taken_over"
