@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.52 - prepared release
+
+Bounded PLAN recovery follow-up release.
+
+### Material changes
+
+- Ship bounded recovery for correctly owned canonical PLAN files missing task `Files:` and `Approach:` metadata.
+- Preserve issue-local progress while planning-only repair revalidates workflow state before implementation.
+
+### Compatibility/configuration/schema
+
+- Loop-state v1 remains compatible; no new consumer configuration is required.
+- Existing authority adapters and configured workflow paths remain authoritative.
+
+### Breaking/behavior changes
+
+- Owned task metadata defects receive bounded planning repair instead of immediate containment; foreign or ambiguous artifacts remain fail-closed.
+
+### Security/safety
+
+- Repair remains lease- and canonical-worktree-bound, preserves requirements and dirty work, and records bounded recovery telemetry.
+
+### Upgrade guidance
+
+- Upgrade promptly for the PLAN-recovery correctness fix; no manual migration is required.
+
 ## 0.2.51 - prepared release
 
 Bounded PLAN recovery and workflow safety release.
