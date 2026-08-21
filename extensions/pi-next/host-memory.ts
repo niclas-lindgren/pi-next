@@ -61,6 +61,11 @@ export interface HostMemoryPolicy {
   criticalStreak?: number;
 }
 
+export interface HostMemoryObservationOptions {
+  /** Start a new process baseline while retaining the bounded sample history. */
+  resetBaseline?: boolean;
+}
+
 interface HostMemoryFile {
   version: 1;
   health: HostMemoryHealth;
@@ -128,9 +133,10 @@ export function observeHostMemory(
   usage: HostMemoryUsage = process.memoryUsage(),
   heapLimit = finite(getHeapStatistics().heap_size_limit),
   policy: HostMemoryPolicy = {},
+  options: HostMemoryObservationOptions = {},
 ): { sample: HostMemorySample; health: HostMemoryHealth } {
   const previous = readFile(cwd);
-  const sameRun = previous?.health.runId === context.runId;
+  const sameRun = previous?.health.runId === context.runId && !options.resetBaseline;
   const oldSample = sameRun ? previous?.samples.at(-1) : undefined;
   const baselineHeapUsed = sameRun ? previous!.health.baselineHeapUsed : finite(usage.heapUsed);
   const baselineRss = sameRun ? previous!.health.baselineRss : finite(usage.rss);
