@@ -2,6 +2,11 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { WorkerToolFailureObservation } from "./worker-activity.ts";
+import {
+  workerToolFailureFeedbackCategory,
+  workerToolFailureFeedbackSeverity,
+} from "./worker-activity.ts";
 import {
   createFeedbackEvent,
   FeedbackReporter,
@@ -109,6 +114,35 @@ export async function reportRuntimeFailure(cwd: string, input: RuntimeFailureInp
     return await instance.report(event);
   } catch {
     return undefined;
+  }
+}
+
+/** Report the already-normalized inner-tool observations without reparsing payloads. */
+export async function reportWorkerToolFailures(
+  cwd: string,
+  observations: readonly WorkerToolFailureObservation[] | undefined,
+  recoveredFingerprints: readonly string[] = [],
+): Promise<void> {
+  if (!observations?.length) return;
+  const recovered = new Set(recoveredFingerprints);
+  for (const observation of observations.slice(0, 100)) {
+    await reportRuntimeFailure(cwd, {
+      stage: observation.phase,
+      category: workerToolFailureFeedbackCategory(observation.failureClass),
+      severity: workerToolFailureFeedbackSeverity(observation.failureClass),
+      outcome: recovered.has(observation.fingerprint) ? "recovered" : "failed",
+      code: `tool_${observation.failureClass}_${observation.commandClass || "tool"}`,
+      summary: observation.summary,
+      error: observation.diagnosticExcerpt,
+      issueNumber: observation.issueNumber,
+      runId: observation.runId,
+      diagnosticRefs: observation.relatedPaths,
+      diagnostic: {
+        phase: observation.phase,
+        exitCode: observation.exitCode,
+        signal: observation.signal,
+      },
+    });
   }
 }
 

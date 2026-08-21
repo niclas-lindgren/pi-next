@@ -284,7 +284,11 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
   // `session` event telemetry parsing requires (was previously parsed from
   // `output` post-hoc via parseWorkerTelemetry(), which silently produced
   // `status: "unavailable"` for any run longer than a few seconds).
-  const telemetry = new IncrementalWorkerTelemetryParser();
+  const telemetry = new IncrementalWorkerTelemetryParser({
+    issueNumber: options.issueNumber,
+    runId: options.runId,
+    phase: options.phase,
+  });
   const appendOutput = (chunk: Buffer | string) => {
     lastActivityAt = Date.now();
     const value = String(chunk);

@@ -1,3 +1,10 @@
+import {
+  feedbackFingerprint,
+  sanitizeFeedbackText,
+  type FeedbackCategory,
+  type FeedbackSeverity,
+} from "../../src/coordination/feedback.ts";
+
 export type WorkerWorkLogPhase =
   | "planning"
   | "implementation"
@@ -15,6 +22,33 @@ export type WorkerWorkLogKind =
   | "tool"
   | "error";
 
+export type WorkerToolFailureClass =
+  | "expected_current_work"
+  | "repository_tooling"
+  | "environment"
+  | "runtime"
+  | "timeout"
+  | "ownership_integrity"
+  | "unknown";
+
+/** One safe, bounded observation shared by display, feedback, and health. */
+export interface WorkerToolFailureObservation {
+  issueNumber?: number;
+  runId?: string;
+  phase: WorkerWorkLogPhase;
+  tool: string;
+  commandClass?: string;
+  failureClass: WorkerToolFailureClass;
+  exitCode?: number;
+  signal?: string;
+  timedOut?: boolean;
+  durationMs?: number;
+  summary: string;
+  diagnosticExcerpt?: string;
+  relatedPaths?: string[];
+  fingerprint: string;
+}
+
 export interface WorkerWorkLogEvent {
   issueNumber?: number;
   runId?: string;
@@ -22,6 +56,7 @@ export interface WorkerWorkLogEvent {
   kind: WorkerWorkLogKind;
   summary: string;
   relatedPaths?: string[];
+  failureObservation?: WorkerToolFailureObservation;
 }
 
 export interface WorkerActivityContext {
@@ -44,6 +79,9 @@ const MAX_EVENTS_PER_WORKER = 300;
 const INLINE_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
 const BLOCK_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const SENSITIVE_VALUE = /(api[_ -]?key|access[_ -]?token|token|secret|password|authorization|bearer)\s*[:=]\s*[^\s,;]+/gi;
+const FAILURE_EXCERPT_LIMIT = 240;
+const FAILURE_SUMMARY_LIMIT = 300;
+const FAILURE_PATH_LIMIT = 4;
 
 const PHASES = new Set<WorkerWorkLogPhase>([
   "planning",
@@ -55,7 +93,7 @@ const PHASES = new Set<WorkerWorkLogPhase>([
 ]);
 
 function redact(value: string): string {
-  return value.replace(SENSITIVE_VALUE, "$1=[redacted]");
+  return sanitizeFeedbackText(value).replace(SENSITIVE_VALUE, "$1=[redacted]");
 }
 
 function cleanInline(value: string, limit: number): string {
@@ -116,6 +154,7 @@ function event(
   options: {
     phase?: unknown;
     relatedPaths?: unknown[];
+    failureObservation?: WorkerToolFailureObservation;
     block?: boolean;
   } = {},
 ): WorkerWorkLogEvent | undefined {
@@ -132,6 +171,7 @@ function event(
     kind,
     summary: boundedSummary,
     ...(paths.length ? { relatedPaths: paths } : {}),
+    ...(options.failureObservation ? { failureObservation: options.failureObservation } : {}),
   };
 }
 
@@ -146,6 +186,162 @@ function toolPath(args: Record<string, unknown> | undefined): string[] {
   return [args.path, args.filePath, args.file_path, args.cwd]
     .map(safePath)
     .filter((path): path is string => Boolean(path));
+}
+
+function toolCallId(value: Record<string, unknown>): string | undefined {
+  for (const key of ["toolCallId", "tool_call_id", "callId", "id"]) {
+    if (typeof value[key] === "string" && value[key]) return value[key] as string;
+  }
+  return undefined;
+}
+
+function numberField(value: unknown, keys: readonly string[]): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  for (const key of keys) {
+    const candidate = source[key];
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return Math.trunc(candidate);
+  }
+  return undefined;
+}
+
+function stringField(value: unknown, keys: readonly string[]): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  for (const key of keys) {
+    if (typeof source[key] === "string" && source[key]) return source[key] as string;
+  }
+  return undefined;
+}
+
+/** Read only diagnostic-shaped result fields; tool args and arbitrary payloads are excluded. */
+function diagnosticText(value: unknown, depth = 0): string {
+  if (depth > 3 || value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.slice(0, 12).map((item) => diagnosticText(item, depth + 1)).filter(Boolean).join("\n");
+  if (typeof value !== "object") return "";
+  const source = value as Record<string, unknown>;
+  const chunks: string[] = [];
+  for (const key of ["stderr", "error", "message", "reason", "summary", "output", "stdout", "text", "content"]) {
+    if (source[key] !== undefined) {
+      const chunk = diagnosticText(source[key], depth + 1);
+      if (chunk) chunks.push(chunk);
+    }
+  }
+  return chunks.join("\n");
+}
+
+function diagnosticExcerpt(value: unknown): string | undefined {
+  const lines = cleanBlock(diagnosticText(value), 1_200)
+    .split("\n")
+    .map((line) => cleanInline(line, 240))
+    .filter(Boolean);
+  if (!lines.length) return undefined;
+  const meaningful = lines.filter((line) => /error|fail|exception|fatal|cannot|unable|not found|missing|denied|invalid|timeout|timed out|killed|signal|exit/i.test(line));
+  return (meaningful.length ? meaningful.slice(-3) : lines.slice(-3)).join(" · ").slice(0, FAILURE_EXCERPT_LIMIT);
+}
+
+function commandClass(tool: string, command: string | undefined, excerpt: string): string {
+  const value = `${command || ""} ${excerpt}`.toLowerCase();
+  if (/\bnpm\s+run\b|missing script|package script/.test(value)) return "package-script";
+  if (/\b(tests?|verify|vitest|jest|playwright|pytest|specs?)\b/.test(value)) return "test";
+  if (/\b(lint|eslint|format|prettier)\b/.test(value)) return "lint";
+  if (/\b(build|compile|tsc|typecheck)\b/.test(value)) return "build";
+  if (/\bgit\b/.test(value) || tool === "git") return "git";
+  if (/\b(rg|grep|find|search)\b/.test(value)) return "search";
+  if (tool === "bash") return "shell";
+  return tool || "tool";
+}
+
+function classifyToolFailure(
+  tool: string,
+  command: string | undefined,
+  excerpt: string,
+  timedOut: boolean,
+  signal: string | undefined,
+): WorkerToolFailureClass {
+  if (timedOut) return "timeout";
+  const value = `${command || ""} ${excerpt}`;
+  if (/ownership|worktree|lease|authority|integrity|invariant|pi[- ]next.*(?:error|fail|exception)/i.test(value) || signal === "SIGABRT") return "ownership_integrity";
+  if (/(?:test|spec|assertion).*failed|\b\d+\s+(?:tests?|specs?)\s+failed|expect\(/i.test(value) || /^(?:pi_next_check|verify)/i.test(tool)) return "expected_current_work";
+  if (/missing script|unknown command|cannot find module|module not found|no such file or directory|tsc: not found|npm ERR!/i.test(value)) return "repository_tooling";
+  if (/command not found|enoent|eacces|network|connection|unavailable|rate limit|certificate|authentication/i.test(value)) return "environment";
+  if (signal || /runtime|exception|stack trace/i.test(value)) return "runtime";
+  return "unknown";
+}
+
+function feedbackCategory(failureClass: WorkerToolFailureClass): FeedbackCategory {
+  if (failureClass === "expected_current_work") return "work";
+  if (failureClass === "repository_tooling") return "repository";
+  if (failureClass === "environment" || failureClass === "timeout") return "external";
+  if (failureClass === "runtime") return "runtime";
+  if (failureClass === "ownership_integrity") return "integrity";
+  return "work";
+}
+
+export function workerToolFailureFeedbackCategory(failureClass: WorkerToolFailureClass): FeedbackCategory {
+  return feedbackCategory(failureClass);
+}
+
+export function workerToolFailureFeedbackSeverity(failureClass: WorkerToolFailureClass): FeedbackSeverity {
+  return failureClass === "runtime" || failureClass === "ownership_integrity" ? "error" : failureClass === "expected_current_work" ? "info" : "warning";
+}
+
+export interface WorkerToolStartContext {
+  toolName: string;
+  command?: string;
+  relatedPaths?: string[];
+}
+
+export function createWorkerToolFailureObservation(
+  raw: Record<string, unknown>,
+  context: WorkerActivityContext,
+  start: WorkerToolStartContext = { toolName: typeof raw.toolName === "string" ? raw.toolName : "tool" },
+): WorkerToolFailureObservation {
+  const tool = cleanInline(start.toolName || "tool", 80) || "tool";
+  const result = raw.result;
+  const details = result && typeof result === "object" ? (result as Record<string, unknown>).details : undefined;
+  const excerpt = diagnosticExcerpt(result ?? raw);
+  const command = start.command || (typeof raw.command === "string" ? raw.command : undefined);
+  const timedOut = raw.timedOut === true || raw.timeout === true || details && typeof details === "object" && ((details as Record<string, unknown>).timedOut === true || (details as Record<string, unknown>).timeout === true) || /timed out|timeout/i.test(excerpt || "");
+  const signal = stringField(raw, ["signal", "terminationSignal"]) || stringField(details, ["signal", "terminationSignal"]);
+  const exitCode = numberField(raw, ["exitCode", "exit_code", "code"]) ?? numberField(details, ["exitCode", "exit_code", "code"]);
+  const durationMs = numberField(raw, ["durationMs", "duration", "elapsedMs"]) ?? numberField(details, ["durationMs", "duration", "elapsedMs"]);
+  const failureClass = classifyToolFailure(tool, command, excerpt || "", Boolean(timedOut), signal);
+  const category = commandClass(tool, command, excerpt || "");
+  const reason = excerpt || (timedOut ? "timed out" : signal ? signal : exitCode === undefined ? "tool execution failed" : `exit ${exitCode}`);
+  const status = timedOut
+    ? `${tool} timed out${durationMs !== undefined ? ` · ${Math.round(durationMs / 1_000)}s` : ""}`
+    : `${tool} failed${exitCode !== undefined ? ` · exit ${exitCode}` : signal ? ` · ${signal}` : ""}`;
+  const summary = `${status} · ${reason}`.slice(0, FAILURE_SUMMARY_LIMIT);
+  const safeSummary = sanitizeFeedbackText(summary);
+  const fingerprint = feedbackFingerprint({
+    harness: "pi-next",
+    stage: phaseOf(context.phase),
+    category: feedbackCategory(failureClass),
+    code: `tool_${failureClass}_${category}`,
+    summary: safeSummary,
+  });
+  const paths = [...(start.relatedPaths || []), ...toolPath(argsOf(details))]
+    .map(safePath)
+    .filter((path): path is string => Boolean(path))
+    .slice(0, FAILURE_PATH_LIMIT);
+  return {
+    ...(context.issueNumber === undefined ? {} : { issueNumber: context.issueNumber }),
+    ...(context.runId ? { runId: sanitizeFeedbackText(context.runId).slice(0, 80) } : {}),
+    phase: phaseOf(context.phase),
+    tool,
+    commandClass: category,
+    failureClass,
+    ...(exitCode === undefined ? {} : { exitCode }),
+    ...(signal ? { signal: sanitizeFeedbackText(signal).slice(0, 32) } : {}),
+    ...(timedOut ? { timedOut: true } : {}),
+    ...(durationMs === undefined ? {} : { durationMs: Math.max(0, Math.min(86_400_000, durationMs)) }),
+    summary: safeSummary,
+    ...(excerpt ? { diagnosticExcerpt: sanitizeFeedbackText(excerpt).slice(0, FAILURE_EXCERPT_LIMIT) } : {}),
+    ...(paths.length ? { relatedPaths: paths } : {}),
+    fingerprint,
+  };
 }
 
 const PI_NEXT_INSPECT_ACTION_LABELS: Record<string, string> = {
@@ -225,6 +421,7 @@ function visibleAssistantText(message: Record<string, unknown> | undefined): str
 export function normalizeWorkerStreamEvent(
   raw: unknown,
   context: WorkerActivityContext,
+  startContext?: WorkerToolStartContext,
 ): WorkerWorkLogEvent | undefined {
   const value = argsOf(raw);
   if (!value || typeof value.type !== "string") return undefined;
@@ -237,7 +434,11 @@ export function normalizeWorkerStreamEvent(
   if (value.type === "tool_execution_end") {
     const toolName = typeof value.toolName === "string" ? value.toolName : "tool";
     if (value.isError === true) {
-      return event(context, "error", `${toolName} failed`);
+      const observation = createWorkerToolFailureObservation(value, context, startContext || { toolName });
+      return event(context, "error", observation.summary, {
+        relatedPaths: observation.relatedPaths,
+        failureObservation: observation,
+      });
     }
     if (toolName === "pi_next_check") {
       return event(context, "verify", "structured verification completed");
@@ -331,6 +532,8 @@ export class IncrementalWorkerActivityParser {
   private lastKey = "";
   private eventCount = 0;
   private liveDeltaCount = 0;
+  private readonly toolStarts = new Map<string, WorkerToolStartContext>();
+  private lastToolStart?: WorkerToolStartContext;
 
   constructor(
     private readonly context: WorkerActivityContext,
@@ -382,7 +585,26 @@ export class IncrementalWorkerActivityParser {
       }
     }
 
-    const next = normalizeWorkerStreamEvent(raw, this.context);
+    const value = argsOf(raw);
+    let startContext: WorkerToolStartContext | undefined;
+    if (value?.type === "tool_execution_start") {
+      const toolName = typeof value.toolName === "string" ? value.toolName : "tool";
+      const args = argsOf(value.args);
+      startContext = {
+        toolName,
+        ...(typeof args?.command === "string" ? { command: args.command } : {}),
+        relatedPaths: toolPath(args),
+      };
+      this.lastToolStart = startContext;
+      const id = toolCallId(value);
+      if (id) this.toolStarts.set(id, startContext);
+    } else if (value?.type === "tool_execution_end") {
+      const id = toolCallId(value);
+      startContext = (id ? this.toolStarts.get(id) : undefined) || this.lastToolStart;
+      if (id) this.toolStarts.delete(id);
+    }
+
+    const next = normalizeWorkerStreamEvent(raw, this.context, startContext);
     if (!next || this.eventCount >= MAX_EVENTS_PER_WORKER) return;
     const key = `${next.kind}\u0000${next.summary}\u0000${next.runId ?? ""}`;
     if (key === this.lastKey) return;

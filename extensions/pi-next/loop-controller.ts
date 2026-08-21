@@ -59,7 +59,7 @@ import { feedbackFingerprint } from "../../src/coordination/feedback.ts";
 import { isTransientAuthorityReadFailure } from "../../src/coordination/authority-read-policy.ts";
 import { observeManagedTransition } from "./self-assessment.ts";
 import { recentLifecycleEventNames, recordLifecycleEvent } from "./lifecycle-telemetry.ts";
-import { reportRuntimeFailure } from "./feedback-runtime.ts";
+import { reportRuntimeFailure, reportWorkerToolFailures } from "./feedback-runtime.ts";
 import {
   createWorkerFailureEvidence,
   WorkerFailureError,
@@ -885,6 +885,7 @@ async function runOneStep(
     );
     const result = await task;
     telemetry = result.telemetry;
+    await reportWorkerToolFailures(ctx.cwd, telemetry.toolFailures, telemetry.recoveredToolFailureFingerprints);
     if (!result.ok) {
       const evidence = result.failure ?? createWorkerFailureEvidence(
         { output: result.output, code: result.code, signal: result.signal },
@@ -956,6 +957,11 @@ async function runOneStep(
             summary: promptError instanceof Error ? promptError.message : String(promptError),
           })
         : undefined,
+      failureFingerprints: telemetry.toolFailures?.map((failure) => failure.fingerprint),
+      expectedFailureFingerprints: telemetry.toolFailures
+        ?.filter((failure) => failure.failureClass === "expected_current_work")
+        .map((failure) => failure.fingerprint),
+      recoveredFailureFingerprints: telemetry.recoveredToolFailureFingerprints,
       promptCount: telemetry.activity?.modelRounds,
       freshTokens: telemetry.usage ? telemetry.usage.input + telemetry.usage.output : 0,
       lifecycleEvents: [

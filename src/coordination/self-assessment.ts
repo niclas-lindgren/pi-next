@@ -63,6 +63,11 @@ export interface HealthObservation {
   headDiverged?: boolean;
   durableProgress?: boolean;
   failureFingerprint?: string;
+  /** Multiple bounded inner-tool failures observed in one worker turn. */
+  failureFingerprints?: readonly string[];
+  /** Productive red-test/verification evidence excluded from runtime escalation. */
+  expectedFailureFingerprints?: readonly string[];
+  recoveredFailureFingerprints?: readonly string[];
   qualityFingerprint?: string;
   qualityOk?: boolean;
   qualityCommandFingerprints?: string[];
@@ -151,8 +156,17 @@ export function evaluateHealth(
   state.noProgressStreak = noProgress ? state.noProgressStreak + 1 : 0;
   if (state.noProgressStreak >= policy.noProgressThreshold) signals.push(`no-progress streak ${state.noProgressStreak}`);
 
-  const failureCount = increment(state.failureCounts, observation.failureFingerprint);
-  if (failureCount >= policy.repeatedFailureThreshold) signals.push(`failure fingerprint repeated ${failureCount} times`);
+  const expectedFailures = new Set(observation.expectedFailureFingerprints || []);
+  const failureFingerprints = (observation.failureFingerprints?.length
+    ? observation.failureFingerprints
+    : observation.failureFingerprint ? [observation.failureFingerprint] : [])
+    .filter((fingerprint) => Boolean(fingerprint) && !expectedFailures.has(fingerprint));
+  let failureCount = 0;
+  for (const fingerprint of failureFingerprints) {
+    failureCount = Math.max(failureCount, increment(state.failureCounts, fingerprint));
+    const count = state.failureCounts[fingerprint];
+    if (count >= policy.repeatedFailureThreshold) signals.push(`failure fingerprint repeated ${count} times`);
+  }
 
   for (const command of (observation.qualityCommandFingerprints || []).slice(0, 12)) {
     const count = increment(state.commandCounts, command);
@@ -173,7 +187,8 @@ export function evaluateHealth(
   const recoveryCandidates = [
     ...(observation.lifecycleEvents || []),
     ...(observation.recoveryEvents || []),
-  ].filter((event) => /repair|quarantin|recover|migrat|reconcil/i.test(event));
+    ...(observation.recoveredFailureFingerprints || []).map((fingerprint) => `tool-recovery:${fingerprint}`),
+  ].filter((event) => /repair|quarantin|recover|migrat|reconcil|tool-recovery/i.test(event));
   const previousRecoveryKeys = new Set(state.recoveryKeys || []);
   const recoveries = recoveryCandidates.filter((event) => !previousRecoveryKeys.has(event));
   state.recoveryKeys = [...new Set([...(state.recoveryKeys || []), ...recoveryCandidates])].slice(-100);
@@ -203,7 +218,7 @@ export function evaluateHealth(
     state.recoveryCount >= policy.repeatedFailureThreshold;
   const strategy = severe ? "escalate" : signals.length ? "change_strategy" : "none";
   if (strategy !== "none") state.strategyChanges = Math.min(999, state.strategyChanges + 1);
-  state.lastFingerprint = observation.failureFingerprint || stableFingerprint(observation);
+  state.lastFingerprint = failureFingerprints[0] || observation.failureFingerprint || stableFingerprint(observation);
   return {
     state,
     signals: signals.slice(0, 12),
