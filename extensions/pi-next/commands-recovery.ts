@@ -13,7 +13,12 @@ import {
   currentSupervisorStatus,
   ForegroundSupervisor,
 } from "./foreground-supervisor.ts";
-import { getLiveCtx, sessionIdentity, setLiveCtx } from "./live-ctx.ts";
+import {
+  getLiveCtx,
+  liveAutoRunBinding,
+  sessionIdentity,
+  setLiveCtx,
+} from "./live-ctx.ts";
 import { preflightWorkflowStateProvider } from "./workflow-state-provider.ts";
 import {
   listLoopStates,
@@ -45,6 +50,110 @@ const AUTO_STATUS_INTERVAL_MS = 2_500;
 // completion, but do not cancel an active run merely because its UI context
 // was replaced.
 const autoStatusHeartbeatCancellations = new Set<() => void>();
+
+type AutoStatusBinding = {
+  cwd: string;
+  runId?: string;
+  ownerSessionId?: string;
+  sessionFile?: string;
+  targetSessionFile?: string;
+  active: boolean;
+  heartbeatActive: boolean;
+};
+
+/**
+ * Presentation identity is established by the running command, not inferred
+ * from durable history. Keep that identity separately so a replacement
+ * session can repaint it before session-scoped UI state is reconstructed.
+ */
+const autoStatusBindings = new Set<AutoStatusBinding>();
+const AUTO_STATUS_BINDING_VERSION = 1;
+
+function sessionFile(ctx: ExtensionCommandContext): string | undefined {
+  try {
+    const file = ctx.sessionManager?.getSessionFile?.();
+    return typeof file === "string" && file.trim() ? file : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function statusBindingFile(cwd: string, runId: string): string {
+  const state = readLoopState(cwd, runId);
+  return join(
+    runtimeDir(runtimeCwdFor(cwd, state || { coordinationCwd: undefined })),
+    "pi-next-loops",
+    runId,
+    "status-binding.json",
+  );
+}
+
+function persistStatusBinding(binding: AutoStatusBinding): void {
+  if (!binding.runId) return;
+  try {
+    writeJsonAtomic(statusBindingFile(binding.cwd, binding.runId), {
+      version: AUTO_STATUS_BINDING_VERSION,
+      runId: binding.runId,
+      ownerSessionId: binding.ownerSessionId,
+      sessionFile: binding.sessionFile,
+      targetSessionFile: binding.targetSessionFile,
+      active: binding.active,
+    });
+  } catch {
+    // Presentation persistence is best effort; the in-memory handoff remains
+    // authoritative for the current host process and never affects workflow.
+  }
+}
+
+function readPersistedStatusBinding(cwd: string, runId: string): AutoStatusBinding | undefined {
+  try {
+    const value = JSON.parse(readFileSync(statusBindingFile(cwd, runId), "utf8")) as Partial<AutoStatusBinding> & { version?: number };
+    if (value.version !== AUTO_STATUS_BINDING_VERSION || value.runId !== runId || value.active !== true) return undefined;
+    return {
+      cwd,
+      runId,
+      ownerSessionId: value.ownerSessionId,
+      sessionFile: value.sessionFile,
+      targetSessionFile: value.targetSessionFile,
+      active: true,
+      heartbeatActive: false,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function findReplacementBinding(
+  ctx: ExtensionCommandContext,
+  event: { previousSessionFile?: string },
+): AutoStatusBinding | undefined {
+  const currentFile = sessionFile(ctx);
+  const previousFile = event.previousSessionFile;
+  const currentSessionId = sessionIdentity(ctx);
+  const inMemory = [...autoStatusBindings].find((binding) =>
+    binding.active &&
+    binding.cwd === ctx.cwd &&
+    ((currentFile && binding.targetSessionFile === currentFile) ||
+      (previousFile && binding.sessionFile === previousFile) ||
+      (!currentFile && !previousFile && binding.ownerSessionId === currentSessionId)),
+  );
+  if (inMemory) return inMemory;
+
+  // The host reloads extension instances during session replacement. Recover
+  // the presentation-only handoff without treating it as workflow authority.
+  for (const state of listLoopStates(ctx.cwd)) {
+    const binding = readPersistedStatusBinding(ctx.cwd, state.runId);
+    if (!binding) continue;
+    if (
+      (currentFile && binding.targetSessionFile === currentFile) ||
+      (previousFile && binding.sessionFile === previousFile)
+    ) {
+      autoStatusBindings.add(binding);
+      return binding;
+    }
+  }
+  return undefined;
+}
 
 function processAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -156,12 +265,35 @@ export function startAutoStatusHeartbeat(
   const startedAt = Date.now();
   const version = piNextRuntimeIdentity().version;
   const ownerSessionId = sessionIdentity(ctx);
+  const initialRunId = preferredRunId();
+  const binding = initialRunId
+    ? [...autoStatusBindings].find((candidate) =>
+      candidate.active && candidate.cwd === cwd && candidate.runId === initialRunId,
+    ) || {
+      cwd,
+      runId: initialRunId,
+      ownerSessionId,
+      sessionFile: sessionFile(ctx),
+      active: true,
+      heartbeatActive: false,
+    }
+    : {
+      cwd,
+      ownerSessionId,
+      sessionFile: sessionFile(ctx),
+      active: true,
+      heartbeatActive: false,
+    };
+  autoStatusBindings.add(binding);
+  binding.active = true;
+  binding.heartbeatActive = true;
   let active = true;
   let firstUpdate = true;
-  let boundRunId: string | undefined;
+  let boundRunId: string | undefined = binding.runId;
   const cancel = () => {
     if (!active) return;
     active = false;
+    binding.heartbeatActive = false;
     clearInterval(timer);
     autoStatusHeartbeatCancellations.delete(cancel);
   };
@@ -172,6 +304,8 @@ export function startAutoStatusHeartbeat(
     // state is the useful handoff to the operator and to a replacement
     // session. Shutdown cancels first, so this never touches a disposed ctx.
     update();
+    binding.active = false;
+    persistStatusBinding(binding);
     cancel();
   };
   autoStatusHeartbeatCancellations.add(cancel);
@@ -185,11 +319,17 @@ export function startAutoStatusHeartbeat(
       // Bind once to this session's own durable run. Before that happens,
       // deliberately render a neutral state instead of borrowing the newest
       // run from the repository runtime directory.
-      boundRunId ||= preferredRunId() || activeAutoStatusRun(
+      boundRunId ||= preferredRunId() || liveAutoRunBinding(liveCtx) || activeAutoStatusRun(
         cwd,
         undefined,
         ownerSessionId,
       )?.runId;
+      if (boundRunId && binding.runId !== boundRunId) {
+        binding.runId = boundRunId;
+        binding.ownerSessionId = ownerSessionId;
+        binding.sessionFile = sessionFile(liveCtx);
+        persistStatusBinding(binding);
+      }
       setAutoStatusSafely(
         liveCtx,
         autoStatusText(
@@ -362,22 +502,68 @@ export async function prepareAbandonedAutoResume(
  */
 export function clearAutoStatus(ctx: ExtensionCommandContext): void {
   setAutoStatusSafely(ctx, undefined);
+  for (const binding of autoStatusBindings) {
+    if (binding.cwd === ctx.cwd && binding.ownerSessionId === sessionIdentity(ctx)) {
+      binding.active = false;
+      persistStatusBinding(binding);
+    }
+  }
 }
 
 export function registerPiNextCommands(pi: ExtensionAPI): void {
-  pi.on("session_shutdown", () => {
-    // Do not clear or cancel status here. The heartbeat resolves getLiveCtx()
-    // when it writes, and therefore follows the replacement session. Cancelling
-    // at this boundary made a live run lose its footer permanently as soon as
-    // it selected an issue and crossed its first session transition.
+  pi.on("session_shutdown", (event, ctx) => {
+    // Never clear the old context: the host owns teardown and may clear its
+    // session-scoped status between these two lifecycle callbacks. Record the
+    // exact bound run and destination so session_start can repaint it without
+    // consulting the ambiguous repository-wide selector.
+    const oldFile = sessionFile(ctx);
+    const oldSessionId = sessionIdentity(ctx);
+    const controllerBoundRunId = liveAutoRunBinding(ctx);
+    for (const binding of autoStatusBindings) {
+      const belongsToOldSession = oldFile
+        ? binding.sessionFile === oldFile ||
+          (Boolean(oldSessionId) && binding.ownerSessionId === oldSessionId)
+        : Boolean(oldSessionId) && binding.ownerSessionId === oldSessionId;
+      if (!binding.active || binding.cwd !== ctx.cwd || !belongsToOldSession) continue;
+      if (!binding.runId && controllerBoundRunId) binding.runId = controllerBoundRunId;
+      binding.sessionFile = oldFile || binding.sessionFile;
+      binding.targetSessionFile = event.targetSessionFile;
+      persistStatusBinding(binding);
+    }
   });
 
   // Status entries belong to the current UI context, not to the disposed
-  // context that created the run. Rebind the latest durable state as soon as
-  // Pi has installed the replacement session. Terminal states need one paint;
-  // a live local controller also gets a fresh heartbeat.
-  pi.on("session_start", (_event, ctx) => {
+  // context that created the run. A bound handoff is painted synchronously;
+  // only an unbound session uses conservative status discovery.
+  pi.on("session_start", (event, ctx) => {
     setLiveCtx(ctx);
+    const binding = findReplacementBinding(ctx, event);
+    if (binding?.runId) {
+      const ownerSessionId = sessionIdentity(ctx);
+      const state = activeAutoStatusRun(ctx.cwd, binding.runId, ownerSessionId);
+      // A missing exact state must not fall back to another historical run.
+      if (!state) return;
+      binding.ownerSessionId = ownerSessionId || binding.ownerSessionId;
+      binding.sessionFile = sessionFile(ctx) || binding.targetSessionFile || binding.sessionFile;
+      binding.targetSessionFile = undefined;
+      persistStatusBinding(binding);
+      setAutoStatusSafely(ctx, autoStatusText(
+        ctx.cwd,
+        Date.now(),
+        binding.runId,
+        ownerSessionId,
+        piNextRuntimeIdentity().version,
+      ));
+      if (
+        state.status === "running" &&
+        controllerPid(ctx.cwd, state) === process.pid &&
+        !binding.heartbeatActive
+      ) {
+        startAutoStatusHeartbeat(ctx, () => binding.runId);
+      }
+      return;
+    }
+
     const ownerSessionId = sessionIdentity(ctx);
     const state = activeAutoStatusRun(ctx.cwd, undefined, ownerSessionId);
     if (!state) return;

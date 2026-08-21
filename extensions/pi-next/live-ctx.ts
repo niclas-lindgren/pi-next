@@ -22,9 +22,28 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
  * variable, so it always targets whatever session is actually live.
  */
 let current: ExtensionCommandContext | undefined;
+const boundRunIds = new Map<string, string>();
+
+function runBindingKey(ctx: unknown): string | undefined {
+  const typed = ctx as { cwd?: string } | undefined;
+  const cwd = typed?.cwd;
+  const session = sessionIdentity(ctx);
+  return cwd && session ? `${cwd}\u0000${session}` : undefined;
+}
 
 export function setLiveCtx(ctx: ExtensionCommandContext): void {
   current = ctx;
+}
+
+/** Bind presentation to a run at the controller's creation boundary. */
+export function bindLiveAutoRun(ctx: ExtensionCommandContext, runId: string): void {
+  const key = runBindingKey(ctx);
+  if (key) boundRunIds.set(key, runId);
+}
+
+export function liveAutoRunBinding(ctx: unknown): string | undefined {
+  const key = runBindingKey(ctx);
+  return key ? boundRunIds.get(key) : undefined;
 }
 
 export function getLiveCtx(): ExtensionCommandContext | undefined {
@@ -55,4 +74,5 @@ export function sessionIdentity(ctx: unknown): string | undefined {
 /** Test-only reset so unrelated specs never observe a leaked singleton. */
 export function __resetLiveCtxForTests(): void {
   current = undefined;
+  boundRunIds.clear();
 }

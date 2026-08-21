@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { clearLiveCtx, getLiveCtx, sessionIdentity } from "./live-ctx.ts";
+import { bindLiveAutoRun, clearLiveCtx, getLiveCtx, sessionIdentity } from "./live-ctx.ts";
 import {
   prepareAbandonedAutoResume,
   recoverableAbandonedAutoRun,
@@ -306,6 +306,7 @@ export class ForegroundSupervisor {
     if (!state) {
       return { recovered: false, blockedReason: "Recovered run state disappeared" };
     }
+    bindLiveAutoRun(ctx, state.runId);
     await supervisor.launch(state);
     return {
       recovered: true,

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.62 - pending release
+
+Bound auto-footer session handoff release.
+
+### Material changes
+
+- Preserve the exact bound `/pi-next auto` footer run across repeated host session replacements.
+- Repaint replacement sessions immediately without weakening conservative ambiguous-run selection.
+- Add repeated lifecycle regression coverage for session isolation and heartbeat-independent repaint.
+
+### Compatibility/configuration/schema
+
+- Existing loop state, lease, and footer status contracts remain compatible.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Active bound auto status remains visible continuously across `ctx.newSession()` transitions.
+
+### Security/safety
+
+- Footer binding is presentation-only and never grants workflow authority or changes lease ownership.
+- Session-file and run identity matching prevents one session from borrowing another session's status.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.61 - pending release
 
 Parent-host memory safety release.
