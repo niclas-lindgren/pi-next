@@ -492,9 +492,9 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
 
 /**
  * One explicit lifecycle/supervisor object per pi-next extension generation
- * (#583). `runLoopSteps`/`ctx.newSession()` boundaries each start a new
- * generation. This gives that generation a stable identity, a single
- * `AbortSignal` background work (subprocesses, heartbeats, queued prompts)
+ * (#583). Each controller worker-batch boundary starts a new generation;
+ * host-session replacement is not part of ordinary loop progression. This
+ * gives that generation a stable identity, a single `AbortSignal` background work (subprocesses, heartbeats, queued prompts)
  * can observe, a registry so bounded teardown can wait for outstanding
  * tracked tasks instead of abandoning them mid-flight, and a disposed-check
  * host-facing callbacks can consult before mutating a replacement

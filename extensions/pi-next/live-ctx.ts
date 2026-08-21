@@ -3,23 +3,17 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 /**
  * Single source of truth for "the currently live session `ExtensionCommandContext`".
  *
- * The host replaces `ctx` wholesale on every `ctx.newSession()` / `fork()` /
- * `switchSession()` / `reload()` transition; a closure that keeps its own
- * captured `ctx` variable becomes invalid the instant one of those fires,
- * and throws "extension ctx is stale..." the next time it touches `ctx.ui`.
- * pi-next's step-transition loop (`driveLoop` in loop-controller.ts) calls
- * `ctx.newSession()` on essentially every step, so any callback that
- * outlives one step boundary — worker progress timers, worker-activity
- * events, lease-heartbeat notifications, the live worker-display widget —
- * was previously guaranteed to hit a stale `ctx` and get silently swallowed
- * by `guardedHostCall()` (visible only as `hostCallSwallowed` crash-log
- * noise, indistinguishable from an idle worker).
+ * The host replaces `ctx` wholesale on a genuine `/new`, fork, switch,
+ * reload, or resume transition; a closure that keeps its own captured `ctx`
+ * variable becomes invalid the instant one of those fires, and throws
+ * "extension ctx is stale..." the next time it touches `ctx.ui`.
  *
- * Fix: every place that receives a fresh `ctx` from the host (the initial
- * command invocation, and every `withSession` callback) calls
- * `setLiveCtx()`. Every callback that may fire after such a boundary
- * resolves `getLiveCtx()` at call time instead of closing over a `ctx`
- * variable, so it always targets whatever session is actually live.
+ * Worker/model freshness does not require this bridge: ordinary pi-next
+ * progression stays in one host session and launches isolated child workers.
+ * The bridge remains for callbacks that outlive a genuine host lifecycle
+ * boundary. Every place that receives a fresh `ctx` from the host calls
+ * `setLiveCtx()`, and callbacks resolve the live context at call time instead
+ * of closing over a context that may have been disposed.
  */
 let current: ExtensionCommandContext | undefined;
 const contexts = new Map<string, ExtensionCommandContext>();
@@ -78,11 +72,25 @@ export function clearLiveAutoRunBinding(cwd: string, runId: string): void {
   for (const [key, boundRunId] of boundRunIds) {
     if (boundRunId !== runId || !key.startsWith(`${cwd}\u0000`)) continue;
     boundRunIds.delete(key);
+    // Once the run settles, do not retain its host context graph. Keep a
+    // context only when another active run still owns the same session key.
+    if (![...boundRunIds.keys()].some((other) => other === key)) contexts.delete(key);
   }
 }
 
 export function getLiveCtx(): ExtensionCommandContext | undefined {
   return current;
+}
+
+/** Resolve the presentation context bound to one supervisor run. */
+export function getLiveCtxForRun(runId: string): ExtensionCommandContext | undefined {
+  if (current && liveAutoRunBinding(current) === runId) return current;
+  for (const [key, boundRunId] of boundRunIds) {
+    if (boundRunId !== runId) continue;
+    const ctx = contexts.get(key);
+    if (ctx) return ctx;
+  }
+  return undefined;
 }
 
 /** Clear the host-context reference once no foreground supervisor remains. */

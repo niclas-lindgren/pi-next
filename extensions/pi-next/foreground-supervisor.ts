@@ -5,6 +5,7 @@ import {
   clearLiveAutoRunBinding,
   clearLiveCtx,
   getLiveCtx,
+  getLiveCtxForRun,
   sessionIdentity,
 } from "./live-ctx.ts";
 import {
@@ -253,9 +254,10 @@ export class ForegroundSupervisor {
   private phase: SupervisorPhase = "idle";
   private runId: string | null = null;
   /**
-   * `ExtensionCommandContext` is session-scoped and becomes stale after
-   * `newSession()`.  Keep only its immutable data for status/lifecycle
-   * bookkeeping; host calls use the live-context registry at the boundary.
+   * `ExtensionCommandContext` is session-scoped and can become stale after a
+   * genuine host lifecycle replacement. Keep only its immutable data for
+   * status/lifecycle bookkeeping; host calls use the live-context registry at
+   * lifecycle boundaries.
    */
   private readonly cwd: string;
   /** Non-owning test/initialization fallback; never keeps the host graph alive. */
@@ -275,8 +277,8 @@ export class ForegroundSupervisor {
   ) {
     // ExtensionCommandContext owns the host session/history graph. Keep only
     // its immutable cwd; all later host calls resolve the current context at
-    // lifecycle boundaries so a long-lived supervisor cannot retain the first
-    // session after ctx.newSession() (#69).
+    // lifecycle boundaries so a long-lived supervisor cannot retain a disposed
+    // host session after an external replacement (#69).
     this.cwd = ctx.cwd;
     this.fallbackCtx = new WeakRef(ctx);
     this.runtime = createSupervisorRuntime();
@@ -406,17 +408,17 @@ export class ForegroundSupervisor {
       this.phase = "running";
       await withSupervisorRuntime(this.runtime, async () => {
         let state = initial;
-        const initialLiveCtx = getLiveCtx() ?? this.fallbackCtx.deref();
+        const initialLiveCtx = getLiveCtxForRun(initial.runId) ?? getLiveCtx() ?? this.fallbackCtx.deref();
         if (!initialLiveCtx) throw new Error("Cannot launch pi-next supervisor without a live host context");
         this.display = attachWorkerDisplay(initialLiveCtx, this.display);
         while (state.status === "running" && state.remainingIssues > 0) {
           this.cyclesStarted += 1;
           this.workerPhase = undefined;
           this.workerRuntime = null;
-          // A worker/session transition may have invalidated the context
-          // passed to the constructor. The cycle itself performs host calls,
+          // An external host lifecycle transition may have invalidated the
+          // context passed to the constructor. The cycle itself performs host calls,
           // so hand it the current live context while status remains data-only.
-          const liveCtx = getLiveCtx() ?? this.fallbackCtx.deref();
+          const liveCtx = getLiveCtxForRun(state.runId) ?? getLiveCtx() ?? this.fallbackCtx.deref();
           if (!liveCtx) throw new Error("Cannot run pi-next issue cycle without a live host context");
           state = await runOwnedIssueCycle(
             liveCtx,

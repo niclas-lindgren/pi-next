@@ -14,6 +14,7 @@ import {
   ForegroundSupervisor,
 } from "./foreground-supervisor.ts";
 import {
+  bindLiveAutoRun,
   getLiveCtx,
   getLiveCtxFor,
   liveAutoRunBinding,
@@ -553,7 +554,7 @@ export async function prepareAbandonedAutoResume(
       runId: state.runId,
       issueNumber,
       step: state.step,
-      sessionTransition: state.sessionTransition,
+      workerBatchTransition: state.workerBatchTransition ?? state.sessionTransition,
     },
     undefined,
     undefined,
@@ -645,6 +646,9 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
     setLiveCtx(ctx);
     const binding = findReplacementBinding(ctx, event);
     if (binding?.runId) {
+      // Rebind the supervisor run to the replacement context. This keeps
+      // concurrent runs from borrowing the process-global newest context.
+      bindLiveAutoRun(ctx, binding.runId);
       const ownerSessionId = sessionIdentity(ctx);
       const state = activeAutoStatusRun(ctx.cwd, binding.runId, ownerSessionId);
       // A missing exact state must not fall back to another historical run.

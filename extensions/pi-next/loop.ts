@@ -71,7 +71,7 @@ import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
-import { bindLiveAutoRun, getLiveCtx, sessionIdentity } from "./live-ctx.ts";
+import { bindLiveAutoRun, getLiveCtx, getLiveCtxForRun, sessionIdentity } from "./live-ctx.ts";
 import { renderLoopStatus } from "./loop-status.ts";
 import {
   createSupervisorRuntime,
@@ -111,14 +111,12 @@ function notifySafely(
 /**
  * For callbacks that can fire well after the ctx they closed over was
  * created — worker progress/activity timers, lease-heartbeat notifications
- * — a captured `ctx` is not safe to use directly (#616): `driveLoop`
- * replaces the live ctx via `ctx.newSession()` on essentially every step,
- * and the old one throws "stale" the next time `ctx.ui` is touched. These
- * callbacks resolve the actually-live ctx through the single registry in
- * `live-ctx.ts` instead, so they always target whichever session the host
- * has replaced it with. A missing live ctx (no command has attached one
- * yet, or the run has no UI) is a silent no-op, matching `safeNotify`'s
- * existing "diagnostic only" contract.
+ * — a captured `ctx` is not safe to use directly across a genuine host
+ * lifecycle replacement (#616). These callbacks resolve the actually-live
+ * ctx through the registry in `live-ctx.ts`; ordinary worker batches keep
+ * the original host session unchanged. A missing live ctx (no command has
+ * attached one yet, or the run has no UI) is a silent no-op, matching
+ * `safeNotify`'s existing "diagnostic only" contract.
  */
 async function authoritativeStatusRun(
   cwd: string,
@@ -145,8 +143,9 @@ async function authoritativeStatusRun(
 function notifyLive(
   message: string,
   level: "info" | "warning" | "error" = "info",
+  runId?: string,
 ): void {
-  const ctx = getLiveCtx();
+  const ctx = runId ? getLiveCtxForRun(runId) ?? getLiveCtx() : getLiveCtx();
   if (!ctx) return;
   safeNotify(ctx, message, level);
 }
@@ -156,8 +155,8 @@ function notifyLive(
  * The captured command context is deliberately not a fallback here: using it
  * would turn a disposed session into a silent replacement-worker failure.
  */
-export function replacementWorkerContext(issueNumber?: number): ExtensionCommandContext {
-  const live = getLiveCtx();
+export function replacementWorkerContext(issueNumber?: number, runId?: string): ExtensionCommandContext {
+  const live = (runId ? getLiveCtxForRun(runId) : undefined) ?? getLiveCtx();
   if (!live) {
     throw new Error(
       `Replacement worker startup failed for issue #${issueNumber ?? "?"}: no live host context is available after missing-result recovery`,
@@ -296,7 +295,7 @@ export async function containIssueLocalFailure(
       diagnosticRefs: failure.paths,
       diagnostic: { phase: failure.stage },
     });
-    notifyLive(reason + " Continuing with the next eligible issue.", "warning");
+    notifyLive(reason + " Continuing with the next eligible issue.", "warning", state.runId);
   }
   return cleared;
 }
@@ -330,7 +329,7 @@ async function yieldClaimedIssue(
     updatedAt: yieldedAt,
   };
   writeJsonAtomic(loopStateFile(cwd, state.runId), yielded);
-  notifyLive(yielded.lastReason || `Issue #${issueNumber} yielded`, "warning");
+  notifyLive(yielded.lastReason || `Issue #${issueNumber} yielded`, "warning", state.runId);
   return yielded;
 }
 
@@ -547,7 +546,7 @@ export async function claimLoopIssue(
       outcome: "skip",
       reasonCode: "fresh_owner",
     });
-    notifyLive(reason, "warning");
+    notifyLive(reason, "warning", state.runId);
     state = skipped;
     continue;
   }
@@ -813,6 +812,7 @@ export async function runOwnedIssueCycle(
                 notifyLive(
                   `Issue #${prepared.activeIssueNumber} lease renewal stopped: ${error instanceof Error ? error.message : String(error)}`,
                   "warning",
+                  prepared.runId,
                 ),
             },
           )
@@ -852,7 +852,7 @@ export async function runOwnedIssueCycle(
                 if (runtime.currentGeneration()?.isDisposed()) return;
                 display?.event(event);
                 if (onWorkLog) onWorkLog(event);
-                else notifyLive(workerActivityText(event), "info");
+                else notifyLive(workerActivityText(event), "info", prepared.runId);
               }),
             onWorkerState: options.onWorkerState ?? onWorkerState,
             display: options.display ?? display,
@@ -870,13 +870,13 @@ export async function runOwnedIssueCycle(
         const recoveryAuthority = issueAuthority;
         let replacementWorker = false;
         while (true) {
-          // The previous worker may have crossed ctx.newSession(), which
-          // invalidates the command context captured by this outer cycle.
-          // Initial entry may use the command context for compatibility with
-          // direct callers, but every replacement must prove that the shared
-          // lifecycle registry has a current host context.
+          // A genuine host lifecycle replacement may invalidate the command
+          // context captured by this outer cycle. Initial entry may use the
+          // command context for compatibility with direct callers, but every
+          // replacement must prove that the shared lifecycle registry has a
+          // current host context.
           const cycleCtx = replacementWorker
-            ? replacementWorkerContext(prepared.activeIssueNumber)
+            ? replacementWorkerContext(prepared.activeIssueNumber, prepared.runId)
             : getLiveCtx() ?? ctx;
           if (replacementWorker) {
             display?.controllerActivity(
@@ -987,6 +987,7 @@ export async function runOwnedIssueCycle(
             notifyLive(
               `Issue #${prepared.activeIssueNumber} lease release failed: ${error instanceof Error ? error.message : String(error)}`,
               "warning",
+              prepared.runId,
             );
           }
         }
@@ -994,6 +995,7 @@ export async function runOwnedIssueCycle(
           notifyLive(
             `Issue #${prepared.activeIssueNumber ?? "?"} paused for host memory pressure; lease preserved for restart recovery`,
             "warning",
+            prepared.runId,
           );
         }
         trackCrashLoggerCwd(coordinationCwd);
@@ -1047,10 +1049,10 @@ export async function runOwnedIssueCycle(
                 : String(error),
           };
           writeJsonAtomic(loopStateFile(coordinationCwd, prepared.runId), blocked);
-          // Fires after runLoopSteps() has returned, i.e. after any internal
-          // ctx.newSession() transitions already invalidated the outer `ctx`
-          // this function was called with (#616) — resolve live ctx instead.
-          notifyLive(blocked.lastReason || "Issue workspace cleanup failed", "warning");
+          // Fires after runLoopSteps() has returned; a genuine host lifecycle
+          // transition may have invalidated the outer `ctx` this function was
+          // called with (#616) — resolve live ctx instead.
+          notifyLive(blocked.lastReason || "Issue workspace cleanup failed", "warning", prepared.runId);
           return blocked;
         }
       }
@@ -1242,9 +1244,9 @@ export async function runPiNextLoop(
     coordinationCwd: ctx.cwd,
   };
   writeJsonAtomic(loopStateFile(ctx.cwd, state.runId), state);
-  // Establish presentation identity before the supervisor can cross its first
-  // ctx.newSession() boundary. This is not an ownership decision; the lease
-  // and canonical workspace remain the workflow authority.
+  // Establish presentation identity before the supervisor starts its first
+  // child-worker turn. This is not an ownership decision; the lease and
+  // canonical workspace remain the workflow authority.
   bindLiveAutoRun(ctx, state.runId);
   await new ForegroundSupervisor(ctx, onWorkLog, onWorkerState).launch(state);
 }
@@ -1255,7 +1257,7 @@ export function registerPiNextLoopCommand(
 ): void {
   pi.registerCommand("pi-next-loop", {
     description:
-      "Run token-bounded GitHub issue work with iterative fresh-session batches, issue deferral, reload recovery, and bounded same-issue reuse",
+      "Run token-bounded GitHub issue work with isolated fresh-worker turns, issue deferral, reload recovery, and bounded same-issue reuse",
     handler: async (args, ctx) => {
       try {
         await runPiNextLoop(args, ctx, onWorkLog);

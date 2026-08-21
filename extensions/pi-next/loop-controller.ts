@@ -25,7 +25,6 @@ import {
   runIssueBoundaryMaintenance,
 } from "./loop-maintenance.ts";
 import { currentTask, section } from "./plan.ts";
-import { setLiveCtx } from "./live-ctx.ts";
 import { buildLoopPrompt } from "./prompt.ts";
 import {
   PlanAuthorityError,
@@ -85,7 +84,8 @@ import {
   type HostMemoryBoundaryContext,
 } from "./host-memory.ts";
 
-const MAX_TRANSITIONS_PER_SESSION = 3;
+/** Bounded child-worker turns per controller batch; never a host-session limit. */
+export const MAX_WORKER_TRANSITIONS_PER_BATCH = 3;
 /** Maximum fresh workers for one normalized missing-result failure. */
 export const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3;
 /** Maximum planning-only attempts for one unchanged malformed PLAN. */
@@ -138,7 +138,7 @@ export function observeLoopHostMemory(
     runId: state.runId,
     issueNumber: context.issueNumber ?? state.activeIssueNumber,
     step: context.step ?? state.step,
-    sessionTransition: context.sessionTransition ?? state.sessionTransition,
+    workerBatchTransition: context.workerBatchTransition ?? state.workerBatchTransition ?? context.sessionTransition ?? state.sessionTransition,
   });
   const hostMemory: LoopState["hostMemory"] = {
     status: observed.health.restartRequired ? "restart_required" : observed.health.pressure,
@@ -940,7 +940,7 @@ async function recordPromptTelemetry(
   fallback: LoopState,
   telemetry: WorkerTelemetryReport,
   durationMs: number,
-  newSession: boolean,
+  hostSessionReplaced: boolean,
 ): Promise<LoopState> {
   const runtimeCwd = runtimeCwdFor(cwd, fallback);
   const current = readLoopState(runtimeCwd, fallback.runId) || fallback;
@@ -953,13 +953,13 @@ async function recordPromptTelemetry(
   const issueNumber = issueForTelemetry(cwd, runtimeCwd, fallback.runId);
   const next: LoopState = {
     ...current,
-    metrics: addPromptMetrics(current.metrics, delta, durationMs, newSession, available),
+    metrics: addPromptMetrics(current.metrics, delta, durationMs, hostSessionReplaced, available),
     issueMetrics: addIssuePromptMetrics(
       current.issueMetrics,
       issueNumber,
       delta,
       durationMs,
-      newSession,
+      hostSessionReplaced,
       available,
     ),
     updatedAt: loopNow(),
@@ -1033,7 +1033,7 @@ async function activePlanFreshness(cwd: string): Promise<{
 export async function runOneStep(
   ctx: ExtensionCommandContext,
   inputState: LoopState,
-  transitionInSession: number,
+  workerBatchTransition: number,
   worker: IssueWorkerRunner,
   runtime: SupervisorRuntime,
 ): Promise<StepSettlement> {
@@ -1072,8 +1072,12 @@ export async function runOneStep(
     ...controllerInput,
     status: "running",
     step: inputState.step + 1,
-    sessionTransition: transitionInSession,
-    sessionTransitionLimit: MAX_TRANSITIONS_PER_SESSION,
+    workerBatchTransition,
+    workerBatchTransitionLimit: MAX_WORKER_TRANSITIONS_PER_BATCH,
+    // The deprecated fields are intentionally omitted from new serialized
+    // state; their optional shape remains readable for v1 recovery.
+    sessionTransition: undefined,
+    sessionTransitionLimit: undefined,
     stepHead,
     stepStartedAt: loopNow(),
     updatedAt: loopNow(),
@@ -1368,7 +1372,7 @@ export async function runOneStep(
     state,
     telemetry,
     Date.now() - started,
-    transitionInSession === 1,
+    false,
   );
   const observedHead = await git(ctx.cwd, ["rev-parse", "HEAD"]);
   const completedIssue = state.activeIssueNumber;
@@ -1463,7 +1467,7 @@ export async function runOneStep(
   return settled;
 }
 
-async function runSessionBatch(
+async function runWorkerBatch(
   ctx: ExtensionCommandContext,
   initial: LoopState,
   worker: IssueWorkerRunner,
@@ -1472,7 +1476,7 @@ async function runSessionBatch(
   let state = initial;
   for (
     let transition = 1;
-    transition <= MAX_TRANSITIONS_PER_SESSION;
+    transition <= MAX_WORKER_TRANSITIONS_PER_BATCH;
     transition += 1
   ) {
     state = readLoopState(runtimeCwdFor(ctx.cwd, state), state.runId) || state;
@@ -1487,14 +1491,14 @@ async function runSessionBatch(
 
     state = observeLoopHostMemory(ctx.cwd, state, {
       boundary: "worker_start",
-      sessionTransition: transition,
+      workerBatchTransition: transition,
     });
     if (state.status !== "running") return;
     const settled = await runOneStep(ctx, state, transition, worker, runtime);
     state = settled.state;
     state = observeLoopHostMemory(ctx.cwd, state, {
       boundary: "worker_end",
-      sessionTransition: transition,
+      workerBatchTransition: transition,
     });
     if (state.status !== "running") return;
     if (settled.terminal) return;
@@ -1579,91 +1583,41 @@ async function driveLoop(
         continue;
       }
 
+      // Maintenance is another isolated child-worker turn, not a reason to
+      // tear down the interactive host runtime. Begin a fresh controller
+      // generation while retaining the same live ExtensionCommandContext.
       await runtime.beginGeneration(`driveLoop:maintenance:${state.runId}`, {
         cwd: ctx.cwd,
         runId: state.runId,
         issueNumber: state.activeIssueNumber,
       });
       state = observeLoopHostMemory(ctx.cwd, state, {
-        boundary: "before_session_transition",
-        sessionTransition: state.sessionTransition,
+        boundary: "before_maintenance",
+        workerBatchTransition: state.workerBatchTransition,
       });
       if (state.status !== "running") return;
-      const workerCwd = ctx.cwd;
-      await ctx.newSession({
-        withSession: async (next: ExtensionCommandContext) => {
-          const workerContext = { ...next, cwd: workerCwd } as ExtensionCommandContext;
-          setLiveCtx(workerContext);
-          state = observeLoopHostMemory(workerCwd, state, {
-            boundary: "after_session_transition",
-            sessionTransition: state.sessionTransition,
-          });
-          if (state.status !== "running") return;
-          // Every ctx.newSession() transition replaces the live ctx (#616);
-          // re-register it so long-lived callbacks (worker progress/activity,
-          // lease notifications, the live display widget) keep resolving the
-          // actually-live session instead of throwing on the torn-down one.
-          attachWorkerDisplay(workerContext, display);
-          try {
-            await runIssueBoundaryMaintenance(workerContext, state, decision, executeWorker);
-            const latest = readLoopState(runtimeCwdFor(workerCwd, state), state.runId) || state;
-            await driveLoop(workerContext, latest, executeWorker, runtime, display);
-          } catch (error) {
-            const classification = classifyFailure(error, {
-              stage: "execution",
-              issueNumber: state.activeIssueNumber,
-              workspace: workerCwd,
-              coordinationCwd: runtimeCwdFor(workerCwd, state),
-              ownershipProven: true,
-            });
-            if (classification.scope === "issue-local") throw error;
-            interruptLoop(workerContext, state, error);
-          }
-        },
-      });
-      return;
+      await runIssueBoundaryMaintenance(ctx, state, decision, executeWorker);
+      state = readLoopState(runtimeCwdFor(ctx.cwd, state), state.runId) || state;
+      continue;
     }
 
-    await runtime.beginGeneration(`driveLoop:transition:${state.runId}`, {
+    // Child workers are the freshness boundary. Controller transitions remain
+    // on the current host context so ordinary auto progression cannot invoke
+    // the host-runtime replacement primitive (`ctx.newSession()`).
+    await runtime.beginGeneration(`driveLoop:worker-batch:${state.runId}`, {
       cwd: ctx.cwd,
       runId: state.runId,
       issueNumber: state.activeIssueNumber,
     });
     state = observeLoopHostMemory(ctx.cwd, state, {
-      boundary: "before_session_transition",
-      sessionTransition: state.sessionTransition,
+      boundary: "before_worker_batch",
+      workerBatchTransition: state.workerBatchTransition,
     });
     if (state.status !== "running") return;
-    const workerCwd = ctx.cwd;
-    await ctx.newSession({
-      withSession: async (next: ExtensionCommandContext) => {
-        const workerContext = { ...next, cwd: workerCwd } as ExtensionCommandContext;
-        setLiveCtx(workerContext);
-        state = observeLoopHostMemory(workerCwd, state, {
-          boundary: "after_session_transition",
-          sessionTransition: state.sessionTransition,
-        });
-        if (state.status !== "running") return;
-        // See the identical note in the maintenance branch above (#616).
-        attachWorkerDisplay(workerContext, display);
-        try {
-          await runSessionBatch(workerContext, state, executeWorker, runtime);
-          const latest = readLoopState(runtimeCwdFor(workerCwd, state), state.runId) || state;
-          await driveLoop(workerContext, latest, executeWorker, runtime, display);
-        } catch (error) {
-          const classification = classifyFailure(error, {
-            stage: "execution",
-            issueNumber: state.activeIssueNumber,
-            workspace: workerCwd,
-            coordinationCwd: runtimeCwdFor(workerCwd, state),
-            ownershipProven: true,
-          });
-          if (classification.scope === "issue-local") throw error;
-          interruptLoop(workerContext, state, error);
-        }
-      },
-    });
-    return;
+    await runWorkerBatch(ctx, state, executeWorker, runtime);
+    state = readLoopState(runtimeCwdFor(ctx.cwd, state), state.runId) || state;
+    // Continue in this same host session for the next bounded worker batch.
+    continue;
   }
 }
 
@@ -1688,8 +1642,8 @@ export async function runLoopSteps(
   });
   if (initial.status !== "running") return;
   // Callers may supply the owner-bound sink from their command context;
-  // direct callers get a sink attached to this context. It is threaded through
-  // every newSession() boundary instead of being routed through a singleton.
+  // direct callers get a sink attached to this stable host context. It is
+  // threaded through isolated child-worker turns, never host replacements.
   const ownsDisplay = !observer?.display;
   const display = observer?.display ?? attachWorkerDisplay(ctx);
   const release = acquireControllerLock(
@@ -1727,11 +1681,10 @@ export async function runLoopSteps(
   } finally {
     const finalState = readLoopState(runtimeCwdFor(ctx.cwd, initial), initial.runId) || initial;
     observeLoopHostMemory(ctx.cwd, finalState, { boundary: finalMemoryBoundary });
-    // A driveLoop() chain that handed off to ctx.newSession() has already
-    // replaced this generation via beginGeneration() — which already
-    // recorded its teardown diagnostics — so teardown() below is a no-op in
-    // that case (idempotent, no duplicate telemetry) and a real bounded,
-    // recorded teardown when this run ended without a replacement.
+    // Each controller batch replaces the previous child-worker generation via
+    // beginGeneration(), which records bounded teardown diagnostics. The
+    // initial generation is therefore normally already disposed here; the
+    // fallback teardown covers a run that ended before its first batch.
     if (!generation.isDisposed()) {
       await runtime.teardown(
         generation,
