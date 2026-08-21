@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.55 - pending release
+
+Streaming worker display release.
+
+### Material changes
+
+- Preserve visible whitespace and newlines across streamed assistant text deltas so live worker prose remains readable.
+- Keep visible delta redaction, control-character handling, allowlisting, and bounded buffers intact.
+
+### Compatibility/configuration/schema
+
+- No configuration or schema changes.
+- Completed assistant messages continue to replace live previews authoritatively.
+
+### Breaking/behavior changes
+
+- Stream fragments are no longer independently trimmed or whitespace-collapsed before display concatenation.
+
+### Security/safety
+
+- Thinking and tool-call deltas remain excluded; visible secrets, URLs, paths, and unsafe controls remain sanitized.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.54 - pending release
 
 Canonical checkpoint branch release.

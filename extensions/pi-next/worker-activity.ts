@@ -79,6 +79,8 @@ const MAX_EVENTS_PER_WORKER = 300;
 const INLINE_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
 const BLOCK_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const SENSITIVE_VALUE = /(api[_ -]?key|access[_ -]?token|token|secret|password|authorization|bearer)\s*[:=]\s*[^\s,;]+/gi;
+const LIVE_SENSITIVE_VALUE = /(?:bearer\s+|token|password|passwd|secret|api[_ -]?key|authorization)\s*[=:]?\s*[^\s,;]+/gi;
+const LIVE_UNSAFE_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const FAILURE_EXCERPT_LIMIT = 240;
 const FAILURE_SUMMARY_LIMIT = 300;
 const FAILURE_PATH_LIMIT = 4;
@@ -105,6 +107,24 @@ function cleanInline(value: string, limit: number): string {
   )
     .slice(0, limit)
     .trim();
+}
+
+/**
+ * Sanitize one visible stream fragment without normalizing its boundaries.
+ * Applying the standalone feedback sanitizer to each delta would collapse
+ * spaces/newlines before the display can concatenate adjacent fragments.
+ */
+function cleanLiveDelta(value: string, limit: number): string {
+  const controlsReplaced = value
+    .replace(/\r\n?/g, "\n")
+    .replace(/\t/g, " ")
+    .replace(LIVE_UNSAFE_CONTROL_CHARACTERS, " ");
+  const redacted = controlsReplaced
+    .replace(LIVE_SENSITIVE_VALUE, "[REDACTED]")
+    .split(/(\s+)/)
+    .map((part) => /^\s+$/.test(part) ? part : sanitizeFeedbackText(part))
+    .join("");
+  return redacted.slice(0, limit);
 }
 
 function cleanBlock(value: string, limit: number): string {
@@ -520,7 +540,7 @@ export function extractLiveTextDelta(
   }
   const delta =
     typeof assistantMessageEvent.delta === "string"
-      ? cleanInline(assistantMessageEvent.delta, TOOL_SUMMARY_LIMIT)
+      ? cleanLiveDelta(assistantMessageEvent.delta, TOOL_SUMMARY_LIMIT)
       : "";
   if (!delta) return undefined;
   return { issueNumber: context.issueNumber, runId: context.runId, delta };
