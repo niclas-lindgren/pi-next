@@ -20,8 +20,13 @@ import {
   loopResultFile,
   loopStateFile,
   readLoopState,
+  runtimeCwdFor,
   type LoopState,
 } from "./loop-state.ts";
+import {
+  classifyLoopStates,
+  selectCurrentLoop,
+} from "./loop-status.ts";
 import { renderAutoProgress } from "./auto-progress.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
 import {
@@ -51,17 +56,17 @@ function processAlive(pid: number): boolean {
   }
 }
 
-function controllerLockFile(cwd: string, runId: string): string {
-  return join(runtimeDir(cwd), "pi-next-loops", runId, "controller.lock");
+function controllerLockFile(cwd: string, state: LoopState): string {
+  return join(runtimeDir(runtimeCwdFor(cwd, state)), "pi-next-loops", state.runId, "controller.lock");
 }
 
-function controllerPid(cwd: string, runId: string): number | undefined {
-  const path = controllerLockFile(cwd, runId);
+function controllerPid(cwd: string, state: LoopState): number | undefined {
+  const path = controllerLockFile(cwd, state);
   if (!existsSync(path)) return undefined;
   try {
     const lock = readFileSync(path, "utf8");
     const lockRunId = lock.match(/^run_id=(.+)$/m)?.[1]?.trim();
-    if (lockRunId && lockRunId !== runId) return undefined;
+    if (lockRunId !== state.runId) return undefined;
     const pid = Number.parseInt(lock.match(/^pid=(\d+)$/m)?.[1] || "0", 10);
     return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
@@ -70,7 +75,7 @@ function controllerPid(cwd: string, runId: string): number | undefined {
 }
 
 function locallyAbandoned(cwd: string, state: LoopState): boolean {
-  const pid = controllerPid(cwd, state.runId);
+  const pid = controllerPid(cwd, state);
   if (pid === undefined) {
     // A previous safe recovery attempt may already have converted the owner to
     // interrupted/stopped and removed its stale lock. A lockless `running`
@@ -91,19 +96,8 @@ export function activeAutoStatusRun(
   preferredRunId?: string,
   ownerSessionId?: string,
 ): LoopState | undefined {
-  const states = listLoopStates(cwd).filter((state) =>
-    ["running", "completed", "idle", "blocked", "failed", "stopped", "interrupted"].includes(state.status),
-  );
-  if (preferredRunId) return states.find((state) => state.runId === preferredRunId);
-  if (!ownerSessionId) return undefined;
-  return states
-    .filter((state) => state.sessionId === ownerSessionId)
-    .sort((a, b) => {
-      const updated = b.updatedAt.localeCompare(a.updatedAt);
-      if (updated !== 0) return updated;
-      const created = b.createdAt.localeCompare(a.createdAt);
-      return created !== 0 ? created : b.runId.localeCompare(a.runId);
-    })[0];
+  const records = classifyLoopStates(cwd, listLoopStates(cwd));
+  return selectCurrentLoop(records, preferredRunId, ownerSessionId).current?.state;
 }
 
 /**
@@ -396,7 +390,7 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
     ));
     if (
       state.status === "running" &&
-      controllerPid(ctx.cwd, state.runId) === process.pid &&
+      controllerPid(ctx.cwd, state) === process.pid &&
       autoStatusHeartbeatCancellations.size === 0
     ) {
       startAutoStatusHeartbeat(ctx, () => state.runId);
