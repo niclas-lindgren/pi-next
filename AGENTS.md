@@ -19,23 +19,34 @@ before selecting the next issue.
    policy, keep a durable issue plan, make the smallest complete change, and
    run the required typecheck/tests (plus issue-specific checks) before
    integration. A model's report or a checked plan is not completion evidence.
-4. **Commit, merge, and push in that order.** Create a reviewable candidate
+4. **Re-query before finalization.** Fetch the complete live issue again after
+   implementation and verification, immediately before closing it. Compare the
+   title, body, comments, labels/status, and other authority data with the
+   snapshot used for verification. This check must happen even when the issue
+   appeared unchanged during the worker run.
+5. **Commit, merge, and push in that order.** Create a reviewable candidate
    commit on `agent/issue-N`. Use the guarded finalization path to re-check
    ownership, freshness, candidate identity, and authority state; merge it into
    `main` without rewriting history; push `main` to `origin`; and prove the
-   candidate is reachable from `origin/main`. Never force-push. Do not close or
-   mark the issue complete before the pushed integration is proven.
-5. **Close through authority.** After the pushed commit and final verification
+   candidate is reachable from `origin/main`. The finalization path must make
+   one more fresh authority read after the push and immediately before closure.
+   Never force-push. Do not close or mark the issue complete before the pushed
+   integration and this final query are both proven.
+6. **Close through authority.** After the pushed commit and final verification
    are current, close the GitHub issue (or use the configured authority's
    completion operation) and leave a useful closing comment when appropriate.
-   If authority or verification changed, leave the issue open and preserve the
-   recovery evidence instead of claiming success.
-6. **Clean up only after integration.** Remove completed workflow artifacts and
+   If the pre-close query finds any addition or change—including a new comment,
+   label, body/title edit, or status change—do not close. Reconcile the new
+   requirements, update the implementation/plan, create and verify a new
+   candidate, integrate it, and repeat the fresh query immediately before
+   attempting closure again. If authority or verification changed, leave the
+   issue open and preserve the recovery evidence instead of claiming success.
+7. **Clean up only after integration.** Remove completed workflow artifacts and
    the local issue worktree/branch only after the worktree is clean, no active
    plan or verification artifact remains, and integration into `origin/main` is
    proven. Preserve the remote branch when it is useful for audit or recovery.
    Never delete dirty, unintegrated, foreign, or ambiguous workspaces.
-7. **Continue safely.** Re-query open GitHub issues after every completed or
+8. **Continue safely.** Re-query open GitHub issues after every completed or
    explicitly deferred issue. Continue only for an issue-local, safely released
    failure; stop for ownership, authority, verification, merge, push, or other
    loop-global failures. At exhaustion, report what was completed, deferred,
