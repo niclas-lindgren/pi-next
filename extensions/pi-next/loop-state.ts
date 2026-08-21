@@ -105,6 +105,16 @@ export interface LoopIssueMetrics extends LoopMetrics {
   disposition: LoopIssueDisposition;
   updatedAt: string;
   reason?: string;
+  transitions?: number;
+  workerLaunches?: number;
+  headAdvancingCommits?: number;
+  verificationCycles?: number;
+  wallClockMs?: number;
+  planTasksAtSelection?: number;
+  planTasksRemaining?: number;
+  budgetStartedAt?: string;
+  softBudgetWarned?: boolean;
+  repeatedTaskFingerprints?: Record<string, number>;
 }
 
 export interface DeferredIssue {
@@ -258,6 +268,16 @@ export function addIssuePromptMetrics(
     disposition: previous?.disposition || "active",
     updatedAt: loopNow(),
     reason: previous?.reason,
+    transitions: previous?.transitions || 0,
+    workerLaunches: previous?.workerLaunches || 0,
+    headAdvancingCommits: previous?.headAdvancingCommits || 0,
+    verificationCycles: previous?.verificationCycles || 0,
+    wallClockMs: previous?.wallClockMs || 0,
+    planTasksAtSelection: previous?.planTasksAtSelection,
+    planTasksRemaining: previous?.planTasksRemaining,
+    budgetStartedAt: previous?.budgetStartedAt,
+    softBudgetWarned: previous?.softBudgetWarned,
+    repeatedTaskFingerprints: { ...(previous?.repeatedTaskFingerprints || {}) },
   };
   if (index >= 0) current.splice(index, 1);
   current.push(next);
@@ -279,8 +299,74 @@ export function markIssueDisposition(
     disposition,
     updatedAt: loopNow(),
     reason: reason?.trim() || previous?.reason,
+    transitions: previous?.transitions || 0,
+    workerLaunches: previous?.workerLaunches || 0,
+    headAdvancingCommits: previous?.headAdvancingCommits || 0,
+    verificationCycles: previous?.verificationCycles || 0,
+    wallClockMs: previous?.wallClockMs || 0,
+    planTasksAtSelection: previous?.planTasksAtSelection,
+    planTasksRemaining: previous?.planTasksRemaining,
+    budgetStartedAt: previous?.budgetStartedAt,
+    softBudgetWarned: previous?.softBudgetWarned,
+    repeatedTaskFingerprints: { ...(previous?.repeatedTaskFingerprints || {}) },
   };
   if (index >= 0) current.splice(index, 1);
+  current.push(next);
+  return current.slice(-MAX_ISSUE_METRICS);
+}
+
+export function markIssueTransition(
+  metrics: LoopIssueMetrics[] | undefined,
+  issueNumber: number,
+  planTasks: { total: number; remaining: number },
+  fingerprint?: string,
+): LoopIssueMetrics[] {
+  const current = [...(metrics || [])];
+  const index = current.findIndex((item) => item.issueNumber === issueNumber);
+  const previous = index >= 0 ? current[index] : undefined;
+  const repeats = { ...(previous?.repeatedTaskFingerprints || {}) };
+  if (fingerprint) repeats[fingerprint] = (repeats[fingerprint] || 0) + 1;
+  const next: LoopIssueMetrics = {
+    ...(previous || emptyLoopMetrics()),
+    issueNumber,
+    disposition: previous?.disposition || "active",
+    updatedAt: loopNow(),
+    transitions: (previous?.transitions || 0) + 1,
+    workerLaunches: (previous?.workerLaunches || 0) + 1,
+    headAdvancingCommits: previous?.headAdvancingCommits || 0,
+    verificationCycles: previous?.verificationCycles || 0,
+    wallClockMs: previous?.wallClockMs || 0,
+    planTasksAtSelection: previous?.planTasksAtSelection ?? planTasks.total,
+    planTasksRemaining: planTasks.remaining,
+    budgetStartedAt: previous?.budgetStartedAt || loopNow(),
+    softBudgetWarned: previous?.softBudgetWarned || false,
+    repeatedTaskFingerprints: repeats,
+    reason: previous?.reason,
+  };
+  if (index >= 0) current.splice(index, 1);
+  current.push(next);
+  return current.slice(-MAX_ISSUE_METRICS);
+}
+
+export function recordIssueTransitionResult(
+  metrics: LoopIssueMetrics[] | undefined,
+  issueNumber: number,
+  durationMs: number,
+  headAdvanced: boolean,
+  verification = false,
+): LoopIssueMetrics[] {
+  const current = [...(metrics || [])];
+  const index = current.findIndex((item) => item.issueNumber === issueNumber);
+  if (index < 0) return current.slice(-MAX_ISSUE_METRICS);
+  const previous = current[index];
+  const next: LoopIssueMetrics = {
+    ...previous,
+    updatedAt: loopNow(),
+    wallClockMs: (previous.wallClockMs || 0) + Math.max(0, durationMs),
+    headAdvancingCommits: (previous.headAdvancingCommits || 0) + (headAdvanced ? 1 : 0),
+    verificationCycles: (previous.verificationCycles || 0) + (verification ? 1 : 0),
+  };
+  current.splice(index, 1);
   current.push(next);
   return current.slice(-MAX_ISSUE_METRICS);
 }

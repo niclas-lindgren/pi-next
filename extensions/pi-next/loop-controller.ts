@@ -23,7 +23,7 @@ import {
   maintenanceOwed,
   runIssueBoundaryMaintenance,
 } from "./loop-maintenance.ts";
-import { currentTask } from "./plan.ts";
+import { currentTask, section } from "./plan.ts";
 import { setLiveCtx } from "./live-ctx.ts";
 import { buildLoopPrompt } from "./prompt.ts";
 import {
@@ -42,6 +42,8 @@ import {
   loopResultFile,
   loopStateFile,
   markIssueDisposition,
+  markIssueTransition,
+  recordIssueTransitionResult,
   notifyLoopState,
   readLoopState,
   runtimeCwdFor,
@@ -129,6 +131,46 @@ function issueForTelemetry(
   runId: string,
 ): number | undefined {
   return currentPlanIssue(cwd) || pendingResultIssue(runtimeCwd, runId);
+}
+
+function planTaskCounts(cwd: string): { total: number; remaining: number } {
+  const file = planFile(cwd);
+  if (!existsSync(file)) return { total: 0, remaining: 0 };
+  const tasks = section(readFileSync(file, "utf8"), "## Tasks").split(/\r?\n/);
+  const topLevel = tasks.filter((line) => /^- \[[ xX]\] /.test(line));
+  return {
+    total: topLevel.length,
+    remaining: topLevel.filter((line) => /^- \[ \] /.test(line)).length,
+  };
+}
+
+function issueBudgetDecision(
+  metric: import("./loop-state.ts").LoopIssueMetrics | undefined,
+  policy: ReturnType<typeof loadPiNextConfig>["convergence"],
+): { soft: boolean; hard: boolean; percent: number; reason: string } {
+  if (!metric) return { soft: false, hard: false, percent: 0, reason: "no issue budget recorded yet" };
+  const ratios = [
+    (metric.transitions || 0) / policy.hardTransitions,
+    (metric.wallClockMs || 0) / policy.hardWallMs,
+    metric.totalTokens / policy.hardTokens,
+  ];
+  const percent = Math.min(1, Math.max(0, Math.max(...ratios)));
+  const hardReasons = [
+    (metric.transitions || 0) >= policy.hardTransitions ? `${metric.transitions || 0} transitions` : "",
+    (metric.wallClockMs || 0) >= policy.hardWallMs ? `${Math.round((metric.wallClockMs || 0) / 60_000)}m wall time` : "",
+    metric.totalTokens >= policy.hardTokens ? `${metric.totalTokens} tokens` : "",
+  ].filter(Boolean);
+  const softReasons = [
+    (metric.transitions || 0) >= policy.softTransitions ? `${metric.transitions || 0} transitions` : "",
+    (metric.wallClockMs || 0) >= policy.softWallMs ? `${Math.round((metric.wallClockMs || 0) / 60_000)}m wall time` : "",
+    metric.totalTokens >= policy.softTokens ? `${metric.totalTokens} tokens` : "",
+  ].filter(Boolean);
+  return {
+    soft: softReasons.length > 0,
+    hard: hardReasons.length > 0,
+    percent,
+    reason: hardReasons.length ? hardReasons.join(", ") : softReasons.join(", "),
+  };
 }
 
 function planNeedsFinalLifecycle(cwd: string): boolean {
@@ -265,6 +307,15 @@ async function applyResult(
       lastReason: `Yielded issue #${issue}: ${result.reason.trim()}`,
     };
     writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), yielded);
+    if (/issue convergence budget exhausted/i.test(result.reason || "")) {
+      recordLifecycleEvent(runtimeCwd, {
+        event: "issue_budget_yielded",
+        issueNumber: issue,
+        runId: state.runId,
+        outcome: "recovered",
+        reasonCode: "issue_convergence_budget_exhausted",
+      });
+    }
     removeFile(loopResultFile(runtimeCwd, state.runId));
     return { state: yielded, terminal: false, outcome: result.outcome };
   }
@@ -890,6 +941,7 @@ async function runOneStep(
       writtenAt: loopNow(),
     });
   }
+  const config = loadPiNextConfig(ctx.cwd);
   const shortlist =
     hasPlan || state.activeIssueNumber
       ? { exhausted: false, text: undefined }
@@ -898,12 +950,44 @@ async function runOneStep(
           deferredIssues: state.deferredIssues.map((item) => item.issueNumber),
           leaseAuthority: new GitHubIssueLeaseAuthority(ctx.cwd),
         });
+  const issueNumber = state.activeIssueNumber;
+  if (hasPlan && issueNumber) {
+    const metric = state.issueMetrics.find((item) => item.issueNumber === issueNumber);
+    const budget = issueBudgetDecision(metric, config.convergence);
+    if (budget.hard) {
+      return applyResult(ctx.cwd, state, {
+        runId: state.runId,
+        step: state.step,
+        issueNumber,
+        outcome: "yield_issue",
+        reason: `issue convergence budget exhausted: ${budget.reason}; preserving PLAN/worktree for a later run`,
+        writtenAt: loopNow(),
+      });
+    }
+    const tasks = planTaskCounts(ctx.cwd);
+    const task = currentTask(readFileSync(planFile(ctx.cwd), "utf8"));
+    const taskFingerprint = task
+      ? feedbackFingerprint({ harness: "pi-next", stage: "controller", category: "runtime", code: "issue_task", summary: task.task })
+      : undefined;
+    const checkpoint = budget.soft || tasks.total > config.convergence.maxPlanTasksWarning;
+    state = {
+      ...state,
+      issueMetrics: markIssueTransition(state.issueMetrics, issueNumber, tasks, taskFingerprint).map((item) =>
+        item.issueNumber === issueNumber && checkpoint ? { ...item, softBudgetWarned: true } : item,
+      ),
+      lastReason: checkpoint
+        ? `Issue #${issueNumber} convergence checkpoint: ${budget.reason || `${tasks.total} PLAN tasks`}; ${tasks.remaining}/${tasks.total} tasks remain`
+        : undefined,
+      updatedAt: loopNow(),
+    };
+    writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), state);
+  }
   const started = Date.now();
   let promptError: unknown;
   let telemetry: WorkerTelemetryReport = { status: "unavailable" };
+  let phase: "planning" | "implementation";
   try {
-    const phase = hasPlan ? "implementation" : "planning" as const;
-    const config = loadPiNextConfig(ctx.cwd);
+    phase = hasPlan ? "implementation" : "planning";
     // A child Pi process does not inherit the parent's selected model. Use the
     // explicit role policy when configured, otherwise carry the active parent
     // model across so `pi --model provider/model` also works for workers.
@@ -994,11 +1078,26 @@ async function runOneStep(
     Date.now() - started,
     transitionInSession === 1,
   );
+  const observedHead = await git(ctx.cwd, ["rev-parse", "HEAD"]);
+  const completedIssue = state.activeIssueNumber;
+  if (completedIssue) {
+    state = {
+      ...state,
+      issueMetrics: recordIssueTransitionResult(
+        state.issueMetrics,
+        completedIssue,
+        Date.now() - started,
+        Boolean(state.stepHead && observedHead !== state.stepHead),
+        hasPlan && planNeedsFinalLifecycle(ctx.cwd),
+      ),
+      updatedAt: loopNow(),
+    };
+    writeJsonAtomic(loopStateFile(runtimeCwdFor(ctx.cwd, state), state.runId), state);
+  }
   // Health is evaluated online, before issue-boundary maintenance. It only
   // records deterministic evidence and may create a held finding; it cannot
   // grant authority, weaken verification, or turn a failed transition into a
   // success.
-  const observedHead = await git(ctx.cwd, ["rev-parse", "HEAD"]);
   let reportedTransition = promptError ? "failed" : "transition";
   try {
     const resultPath = loopResultFile(runtimeCwdFor(ctx.cwd, state), state.runId);

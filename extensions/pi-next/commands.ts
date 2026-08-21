@@ -194,7 +194,11 @@ async function issueQueueStatusText(cwd: string, sessionId: string | undefined, 
       : disposition.startsWith(filter);
     if (filter !== "all" && filter !== "summary" && !filterMatch) continue;
     const shortlistMark = shortlist.candidateIssueNumber === item.number ? " shortlist=next" : "";
-    rows.push(`#${item.number} ${item.priority || "-"} ${disposition}${shortlistMark} ${boundedStatusText(item.title, 160)}`);
+    const metric = active.find((state) => state.activeIssueNumber === item.number)?.issueMetrics.find((entry) => entry.issueNumber === item.number);
+    const budget = metric
+      ? ` transitions=${metric.transitions || 0} workers=${metric.workerLaunches || 0} tasks=${metric.planTasksRemaining ?? 0}/${metric.planTasksAtSelection ?? 0}`
+      : "";
+    rows.push(`#${item.number} ${item.priority || "-"} ${disposition}${budget}${shortlistMark} ${boundedStatusText(item.title, 160)}`);
   }
   const counts = {
     eligible: rows.filter((row) => row.includes(" eligible")).length,

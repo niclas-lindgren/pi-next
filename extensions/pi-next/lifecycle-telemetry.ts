@@ -29,7 +29,8 @@ export type LifecycleEventName =
   | "plan_reconciled"
   | "workflow_artifact_quarantined"
   | "worker_recovery"
-  | "issue_contained";
+  | "issue_contained"
+  | "issue_budget_yielded";
 
 export interface LifecycleEvent {
   event: LifecycleEventName;

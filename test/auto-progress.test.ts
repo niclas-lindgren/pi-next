@@ -7,7 +7,7 @@ import {
   settledIssueCount,
   settledIssuePercent,
 } from "../extensions/pi-next/auto-progress.ts";
-import { emptyLoopMetrics, type LoopState } from "../extensions/pi-next/loop-state.ts";
+import { emptyLoopMetrics, markIssueTransition, recordIssueTransitionResult, type LoopState } from "../extensions/pi-next/loop-state.ts";
 
 function state(overrides: Partial<LoopState> = {}): LoopState {
   return {
@@ -49,6 +49,29 @@ test("completed, deferred, and blocked issues all count as settled", () => {
   assert.equal(settledIssuePercent(5, 3), 60);
   assert.match(renderAutoProgress(current, { width: 120 }), /3\/5 settled 60%/);
   assert.match(renderAutoProgress(current, { width: 120 }), /✓1 ↷2/);
+});
+
+test("issue convergence metrics count micro-progress and survive metric updates", () => {
+  let metrics = markIssueTransition([], 7, { total: 4, remaining: 4 }, "task-a");
+  metrics = recordIssueTransitionResult(metrics, 7, 1_000, true);
+  metrics = markIssueTransition(metrics, 7, { total: 4, remaining: 3 }, "task-b");
+  const metric = metrics[0];
+  assert.equal(metric.transitions, 2);
+  assert.equal(metric.workerLaunches, 2);
+  assert.equal(metric.headAdvancingCommits, 1);
+  assert.equal(metric.wallClockMs, 1_000);
+  assert.equal(metric.planTasksAtSelection, 4);
+  assert.equal(metric.planTasksRemaining, 3);
+  assert.equal(metric.repeatedTaskFingerprints?.["task-a"], 1);
+});
+
+test("yielded issues remain outstanding for run progress", () => {
+  const current = state({
+    deferredIssues: [{ issueNumber: 2, reason: "budget", deferredAt: new Date().toISOString(), kind: "yielded" }],
+    lastOutcome: "yield_issue",
+  });
+  assert.equal(settledIssueCount(current), 0);
+  assert.match(renderAutoProgress(current, { width: 120 }), /yielded/);
 });
 
 test("active issue and worker phase are visible", () => {
