@@ -286,7 +286,7 @@ async function applyResult(
       lastOutcome: "yield_issue",
       lastReason: result.reason.trim(),
     };
-    writeJsonAtomic(runtimeCwd, yielded);
+    writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), yielded);
     removeFile(loopResultFile(runtimeCwd, state.runId));
     return { state: yielded, terminal: false, outcome: result.outcome };
   }
@@ -907,7 +907,7 @@ async function activePlanFreshness(cwd: string): Promise<{
   };
 }
 
-async function runOneStep(
+export async function runOneStep(
   ctx: ExtensionCommandContext,
   inputState: LoopState,
   transitionInSession: number,

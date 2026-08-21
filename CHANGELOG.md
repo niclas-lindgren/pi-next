@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.57 - pending release
+
+Scheduler-only convergence yield persistence release.
+
+### Material changes
+
+- Persist post-baseline hard-budget yields to the run-scoped loop state file so genuine convergence exhaustion remains durable and non-destructive.
+- Add a controller-path regression proving zero-worker scheduler accounting and preservation of issue workflow state.
+
+### Compatibility/configuration/schema
+
+- Existing convergence baselines, policy versions, loop-state compatibility, and configured workflow paths remain unchanged.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Scheduler-only convergence yields now complete as run-local yielded state instead of attempting to rename a temporary file over the runtime directory.
+
+### Security/safety
+
+- Budget exhaustion continues to preserve the PLAN/worktree and does not mark the authoritative issue failed or blocked.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.56 - pending release
 
 Configured workflow dispatch release.
