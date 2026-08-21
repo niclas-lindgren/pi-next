@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.67 - prepared release
+
+Stable parent-host auto lifecycle release.
+
+### Material changes
+
+- Keep normal auto progression on one interactive Pi host session while isolated child workers provide fresh planning, implementation, repair, review, verification, and maintenance context.
+- Remove routine host-session rotation and expose worker/controller/host-replacement telemetry separately.
+- Preserve genuine host lifecycle rebinding, memory-pressure fencing, and concurrent run isolation.
+
+### Compatibility/configuration/schema
+
+- Legacy session and transition fields remain readable with additive telemetry migration defaults.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Ordinary worker, scheduler, maintenance, and issue transitions no longer call `ctx.newSession()` or display worker batches as host sessions.
+
+### Security/safety
+
+- Child workers continue to reconstruct state from explicit durable artifacts, authority, configuration, and canonical worktree inputs.
+- Host memory pressure remains a restart-required safety fence.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.66 - pending release
 
 Bound auto-footer host-lifecycle handoff release.
