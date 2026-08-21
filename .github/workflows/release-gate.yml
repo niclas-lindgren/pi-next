@@ -1,0 +1,49 @@
+name: Release gate
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing immutable release tag to verify"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-release:
+    name: Verify exact release candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the immutable tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify tag, commit, and release notes
+        env:
+          PI_NEXT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: node scripts/verify-release.mjs
+
+      - name: Run authoritative typecheck
+        run: npm run typecheck
+
+      - name: Run authoritative test suite
+        run: npm test
+
+      - name: Run fresh-consumer/package smoke
+        run: npm run package-smoke

@@ -40,7 +40,12 @@ stops the original push safely; rerun `git push --follow-tags`. Set
 `PI_NEXT_RELEASE_LEVEL=minor` or `major` before the push when appropriate.
 Releases can also be prepared explicitly with `make release` or
 `npm run release -- patch|minor|major`; use `--push` and `--publish` explicitly
-when desired. Tests must use temporary repositories and bare remotes for every Git mutation.
+when desired. Release preparation requires complete current and next-version
+notes in [`CHANGELOG.md`](CHANGELOG.md); the exact-tag GitHub Actions gate
+then independently repeats typecheck, tests, and package smoke. See
+[`docs/RELEASES.md`](docs/RELEASES.md) for batching and the consumer pin-bump
+contract. Tests must use temporary repositories and bare remotes for every
+Git mutation.
 They must not push to `origin`, the pi-next checkout, or an arbitrary consumer
 repository. Prefer deterministic in-memory authority fixtures over network
 calls. Add regression coverage at the real controller/loop boundary when a

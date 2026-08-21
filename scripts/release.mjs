@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateReleaseNotes } from "./release-notes.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -54,12 +55,15 @@ try {
 
   const current = packageVersion();
   const version = nextVersion(current, level);
+  const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+  validateReleaseNotes(changelog, current, version);
   const tag = `v${version}`;
   if (git("tag", "--list", tag) === tag) {
     throw new Error(`tag ${tag} already exists`);
   }
 
   console.log(`Release ${current} -> ${version}`);
+  console.log("Release notes validated for the shipped and prepared versions.");
   if (flags.has("--dry-run")) {
     console.log("Dry run: no files, commits, tags, pushes, or publishes changed.");
     process.exit(0);

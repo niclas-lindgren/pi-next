@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.2.40 - pending release
+
+Release-evidence and consumer-release governance release.
+
+### Material changes
+
+- Add an exact-tag GitHub Actions release gate that repeats the authoritative
+  typecheck, test suite, and fresh-consumer/package smoke checks.
+- Make release preparation require bounded notes for both the shipped release
+  and the next consumer-facing release.
+- Document release batching, urgent-fix handling, and the deterministic
+  downstream immutable-pin workflow.
+
+### Compatibility/configuration/schema
+
+- No Pi API, package/config schema, or authority contract changes are intended.
+- The release workflow requires Node.js 22.19+ and the locked npm dependency
+  tree, matching the supported development environment.
+
+### Breaking/behavior changes
+
+- Release preparation now fails before changing package.json or creating a tag
+  when required release-note metadata is absent.
+- No runtime worker or consumer configuration behavior changes.
+
+### Security/safety
+
+- Release verification is tied to the exact immutable tag commit and does not
+  trust a moving branch.
+- Pinned consumers remain responsible for reviewing notes and running their own
+  fresh-process integration checks; no floating or automatic upgrade is added.
+
+### Upgrade guidance
+
+- This is a maintainer/release-process improvement. Consumers may wait for the
+  next bundled runtime change, but should use the documented immutable
+  pin-bump and fresh-process checks for every upgrade.
+
+## 0.2.39 - 2026-08-21
+
+Bounded consumer release covering the compatible 0.2.x work since 0.1.5.
+
+### Material changes
+
+- Added issue-queue status and self-assessment visibility for operators.
+- Hardened worker, recovery, state-provider, and lifecycle behavior across the
+  0.2.x maintenance releases.
+- Added pending-verification handling and stronger authority/finalization
+  fences for issue completion.
+
+### Compatibility/configuration/schema
+
+- Pi 0.84.2+ and Node.js 22.19+ remain supported.
+- Configuration and authority contracts remain version 1; no package install
+  or consumer pin format change is required.
+
+### Breaking/behavior changes
+
+- Minor pre-1.0 behavior changes are documented in the individual commits and
+  should be reviewed before upgrading; no intentional breaking schema change
+  is included in this bounded release.
+
+### Security/safety
+
+- Ownership, freshness, worktree recovery, and terminal completion remain
+  fail-closed; consumers continue to install immutable revisions.
+
+### Upgrade guidance
+
+- Consumers should upgrade when they want the bundled 0.2.x fixes, inspect
+  compatibility notes, then run their integration and fresh-process checks.
+  Non-urgent consumers may wait for a later bundled release.
+
 ## 0.1.5 - 2026-08-20
 
 Operational issue-boundary learning release.
