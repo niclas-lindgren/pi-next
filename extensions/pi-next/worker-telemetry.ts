@@ -1,4 +1,10 @@
 import type { LoopUsage } from "./loop-state.ts";
+import {
+  createWorkerToolFailureObservation,
+  type WorkerActivityContext,
+  type WorkerToolFailureObservation,
+  type WorkerToolStartContext,
+} from "./worker-activity.ts";
 import type { WorkerDispatchPolicy } from "../../src/coordination/worker-dispatch.ts";
 
 /** Aggregate model-round/tool-call activity for one issue-worker invocation. */
@@ -22,6 +28,10 @@ export interface WorkerTelemetryReport {
   status: WorkerTelemetryStatus;
   usage?: LoopUsage;
   activity?: WorkerActivity;
+  /** Bounded structured inner-tool failures; never raw tool payloads. */
+  toolFailures?: WorkerToolFailureObservation[];
+  /** Failures for which a later tool execution succeeded in this worker. */
+  recoveredToolFailureFingerprints?: string[];
   model?: string;
   /** Controller-selected metadata, never prompt text or transcript content. */
   dispatch?: Pick<WorkerDispatchPolicy, "version" | "role" | "skills" | "capabilityProfile">;
@@ -76,13 +86,34 @@ interface TelemetryAccumulator {
   usage?: LoopUsage;
   activity?: WorkerActivity;
   model?: string;
+  toolFailures: WorkerToolFailureObservation[];
+  recoveredToolFailureFingerprints: string[];
+  toolStarts: Map<string, WorkerToolStartContext>;
+  lastToolStart?: WorkerToolStartContext;
+  lastFailureByTool: Map<string, WorkerToolFailureObservation>;
+  context: WorkerActivityContext;
 }
 
-function emptyAccumulator(): TelemetryAccumulator {
-  return { sawSessionHeader: false, sawAgentEnd: false };
+function emptyAccumulator(context: WorkerActivityContext = {}): TelemetryAccumulator {
+  return {
+    sawSessionHeader: false,
+    sawAgentEnd: false,
+    toolFailures: [],
+    recoveredToolFailureFingerprints: [],
+    toolStarts: new Map(),
+    lastFailureByTool: new Map(),
+    context,
+  };
 }
 
 /** Consume one already-JSON-parsed session event into `acc`, in place. */
+function toolId(event: Record<string, unknown>): string | undefined {
+  for (const key of ["toolCallId", "tool_call_id", "callId", "id"]) {
+    if (typeof event[key] === "string" && event[key]) return event[key] as string;
+  }
+  return undefined;
+}
+
 function consumeTelemetryEvent(
   acc: TelemetryAccumulator,
   event: Record<string, unknown>,
@@ -112,11 +143,35 @@ function consumeTelemetryEvent(
   if (type === "tool_execution_start") {
     acc.activity = acc.activity || { modelRounds: 0, toolCalls: 0, toolResults: 0 };
     acc.activity.toolCalls += 1;
+    const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
+    const args = event.args && typeof event.args === "object" ? event.args as Record<string, unknown> : undefined;
+    const start: WorkerToolStartContext = {
+      toolName,
+      ...(typeof args?.command === "string" ? { command: args.command } : {}),
+    };
+    acc.lastToolStart = start;
+    const id = toolId(event);
+    if (id) acc.toolStarts.set(id, start);
     return;
   }
   if (type === "tool_execution_end") {
     acc.activity = acc.activity || { modelRounds: 0, toolCalls: 0, toolResults: 0 };
     acc.activity.toolResults += 1;
+    const id = toolId(event);
+    const start = (id ? acc.toolStarts.get(id) : undefined) || acc.lastToolStart || { toolName: typeof event.toolName === "string" ? event.toolName : "tool" };
+    if (id) acc.toolStarts.delete(id);
+    const tool = start.toolName;
+    if (event.isError === true) {
+      const observation = createWorkerToolFailureObservation(event, acc.context, start);
+      if (acc.toolFailures.length < 100) acc.toolFailures.push(observation);
+      acc.lastFailureByTool.set(tool, observation);
+    } else {
+      const previous = acc.lastFailureByTool.get(tool);
+      if (previous && acc.recoveredToolFailureFingerprints.length < 100) {
+        acc.recoveredToolFailureFingerprints.push(previous.fingerprint);
+        acc.lastFailureByTool.delete(tool);
+      }
+    }
     return;
   }
 }
@@ -135,11 +190,16 @@ function consumeTelemetryLine(acc: TelemetryAccumulator, line: string): void {
 }
 
 function finishAccumulator(acc: TelemetryAccumulator): WorkerTelemetryReport {
-  if (!acc.sawSessionHeader) return { status: "unavailable" };
+  if (!acc.sawSessionHeader) return {
+    status: "unavailable",
+    ...(acc.toolFailures.length ? { toolFailures: acc.toolFailures } : {}),
+  };
   return {
     status: acc.sawAgentEnd ? "complete" : "partial",
     usage: acc.usage,
     activity: acc.activity,
+    ...(acc.toolFailures.length ? { toolFailures: acc.toolFailures } : {}),
+    ...(acc.recoveredToolFailureFingerprints.length ? { recoveredToolFailureFingerprints: [...new Set(acc.recoveredToolFailureFingerprints)] } : {}),
     model: acc.model,
   };
 }
@@ -161,8 +221,8 @@ function finishAccumulator(acc: TelemetryAccumulator): WorkerTelemetryReport {
  * This function remains the batch entry point for tests and any caller that
  * already holds a complete, untruncated capture.
  */
-export function parseWorkerTelemetry(output: string): WorkerTelemetryReport {
-  const acc = emptyAccumulator();
+export function parseWorkerTelemetry(output: string, context: WorkerActivityContext = {}): WorkerTelemetryReport {
+  const acc = emptyAccumulator(context);
   for (const line of output.split(/\r?\n/)) consumeTelemetryLine(acc, line);
   return finishAccumulator(acc);
 }
@@ -176,8 +236,12 @@ export function parseWorkerTelemetry(output: string): WorkerTelemetryReport {
  * a long-running worker's leading `session` header is never lost.
  */
 export class IncrementalWorkerTelemetryParser {
-  private readonly acc = emptyAccumulator();
+  private readonly acc: TelemetryAccumulator;
   private pending = "";
+
+  constructor(context: WorkerActivityContext = {}) {
+    this.acc = emptyAccumulator(context);
+  }
 
   push(chunk: string | Buffer): void {
     this.pending += String(chunk);

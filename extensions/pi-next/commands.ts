@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import { sessionIdentity } from "./live-ctx.ts";
-import { reportRuntimeFailure } from "./feedback-runtime.ts";
+import { reportRuntimeFailure, reportWorkerToolFailures } from "./feedback-runtime.ts";
 import { LocalIssueLeaseAuthority } from "./local-lease.ts";
 import {
   CandidateDiscoveryError,
@@ -135,6 +135,7 @@ async function executeIssueWorker(
   const result = generation
     ? await generation.track(task, { kind: "subprocess" })
     : await task;
+  await reportWorkerToolFailures(cwd, result.telemetry.toolFailures, result.telemetry.recoveredToolFailureFingerprints);
   if (!result.ok) {
     const evidence = result.failure ?? createWorkerFailureEvidence(
       { output: result.output, code: result.code, signal: result.signal },

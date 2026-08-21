@@ -71,6 +71,21 @@ test("reversible regression is explicitly rollback-eligible", () => {
   assert.equal(result.rollback, true);
 });
 
+test("repeated inner-tool failures escalate while productive red tests stay evidence", () => {
+  const repeated = evaluateHealth(emptyHealthState(), {
+    transitionType: "transition",
+    failureFingerprints: ["same-tool-failure", "same-tool-failure"],
+  });
+  assert.equal(repeated.strategy, "escalate");
+
+  const expected = evaluateHealth(emptyHealthState(), {
+    transitionType: "transition",
+    failureFingerprints: ["red-test", "red-test"],
+    expectedFailureFingerprints: ["red-test"],
+  });
+  assert.equal(expected.strategy, "none");
+});
+
 test("systemic findings persist and remain held for authority review", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-next-assessment-"));
   try {
