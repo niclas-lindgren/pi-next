@@ -13,8 +13,13 @@ import {
 } from "../src/coordination/self-assessment.ts";
 import {
   observeManagedTransition,
+  persistSelfAssessmentFinding,
+  publishSelfAssessmentFindings,
   readSelfAssessmentFindings,
+  refreshFindingApprovals,
 } from "../extensions/pi-next/self-assessment.ts";
+import type { SelfAssessmentFinding } from "../src/coordination/self-assessment.ts";
+import type { WorkAuthorityAdapter } from "../src/coordination/work-authority.ts";
 
 const policy = {
   enabled: true,
@@ -27,6 +32,8 @@ const policy = {
   findingLabels: ["agent:finding"],
   heldStates: ["pending_review"],
   approvedStates: ["approved"],
+  rejectedStates: ["rejected"],
+  supersededStates: ["superseded"],
 };
 
 test("online health escalates repeated failures without changing workflow authority", () => {
@@ -84,6 +91,43 @@ test("repeated inner-tool failures escalate while productive red tests stay evid
     expectedFailureFingerprints: ["red-test"],
   });
   assert.equal(expected.strategy, "none");
+});
+
+test("publication and approval failures remain bounded and retryable diagnostics", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-assessment-publication-"));
+  const finding: SelfAssessmentFinding = {
+    fingerprint: "finding-1",
+    title: "bounded finding",
+    category: "runtime",
+    severity: "P2",
+    confidence: "high",
+    evidence: ["safe evidence"],
+    affectedRuns: ["run-1"],
+    affectedIssues: [7],
+    recurrence: 3,
+    proposedAction: "review",
+    approvalState: "pending_review",
+    authorityId: "7",
+  };
+  const authority = {
+    name: "fixture",
+    capabilities: { discovery: false, freshness: false, completion: false, atomicOwnership: false, projectStatus: false },
+    publishFinding: async () => { throw new Error("label missing; token=secret-value"); },
+    readFindingApproval: async () => { throw new Error("approval service unavailable"); },
+  } as unknown as WorkAuthorityAdapter;
+  try {
+    persistSelfAssessmentFinding(cwd, finding);
+    await publishSelfAssessmentFindings(cwd, authority, { assessment: policy });
+    let saved = readSelfAssessmentFindings(cwd)[0];
+    assert.equal(saved?.publication?.status, "publication_failed");
+    assert.doesNotMatch(saved?.publication?.reason || "", /secret-value/);
+    await refreshFindingApprovals(cwd, { ...authority, readFindingApproval: authority.readFindingApproval }, { assessment: policy });
+    saved = readSelfAssessmentFindings(cwd)[0];
+    assert.equal(saved?.publication?.status, "approval_refresh_failed");
+    assert.equal(saved?.publication?.retry, "next issue boundary");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("systemic findings persist and remain held for authority review", async () => {

@@ -17,6 +17,7 @@ import {
 } from "../../src/coordination/self-assessment.ts";
 import type { WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
+import { sanitizeFeedbackText } from "../../src/coordination/feedback.ts";
 import { runtimeDir, writeJsonAtomic } from "./util.ts";
 
 const MAX_FINDINGS = 100;
@@ -149,21 +150,56 @@ export async function publishSelfAssessmentFindings(
   authority: WorkAuthorityAdapter,
   config: Pick<PiNextConfig, "assessment">,
 ): Promise<SelfAssessmentFinding[]> {
-  if (!authority.publishFinding) return readSelfAssessmentFindings(cwd);
   const findings = readSelfAssessmentFindings(cwd);
-  const next = [...findings];
-  for (const finding of findings) {
-    if (!findingPublicationEligible(finding, {
+  const next = findings.map((finding) => {
+    const eligible = findingPublicationEligible(finding, {
       recurrenceThreshold: config.assessment.findingRecurrenceThreshold,
       minConfidence: config.assessment.findingMinConfidence,
-    })) continue;
+    });
+    return finding.authorityId ? finding : { ...finding, publication: {
+      status: eligible ? "eligible_not_attempted" as const : "not_eligible" as const,
+      reason: eligible ? "publication adapter unavailable" : `recurrence ${finding.recurrence}/${config.assessment.findingRecurrenceThreshold} or confidence below ${config.assessment.findingMinConfidence}`,
+      retry: "next issue boundary",
+    } };
+  });
+  if (!authority.publishFinding) {
+    saveFindings(cwd, next);
+    return next;
+  }
+  for (const finding of findings) {
+    const eligible = findingPublicationEligible(finding, {
+      recurrenceThreshold: config.assessment.findingRecurrenceThreshold,
+      minConfidence: config.assessment.findingMinConfidence,
+    });
+    if (!eligible) {
+      const index = next.findIndex((item) => item.fingerprint === finding.fingerprint);
+      if (index >= 0 && !finding.authorityId) {
+        next[index] = { ...finding, publication: {
+          status: "not_eligible" as const,
+          reason: `recurrence ${finding.recurrence}/${config.assessment.findingRecurrenceThreshold} or confidence below ${config.assessment.findingMinConfidence}`,
+          retry: "next issue boundary",
+        } };
+      }
+      continue;
+    }
+    const attemptedAt = new Date().toISOString();
     try {
-      const result = finding.authorityId && authority.updateFinding
-        ? await authority.updateFinding(finding.authorityId, finding, config)
+      const updating = Boolean(finding.authorityId && authority.updateFinding);
+      const result = updating
+        ? await authority.updateFinding!(finding.authorityId!, finding, config)
         : await authority.publishFinding(finding, config);
       const index = next.findIndex((item) => item.fingerprint === finding.fingerprint);
-      if (index >= 0) next[index] = { ...finding, authorityId: result.id, authorityUrl: result.url };
-    } catch {
+      if (index >= 0) next[index] = { ...finding, authorityId: result.id, authorityUrl: result.url, publication: {
+        status: updating ? ("updated" as const) : ("published" as const), attemptedAt, adapter: authority.name,
+        authorityId: result.id, authorityUrl: result.url,
+      } };
+    } catch (error) {
+      const index = next.findIndex((item) => item.fingerprint === finding.fingerprint);
+      if (index >= 0) next[index] = { ...finding, publication: {
+        status: "publication_failed" as const, attemptedAt, adapter: authority.name,
+        reason: sanitizeFeedbackText(error instanceof Error ? error.message : String(error)).slice(0, 240),
+        retry: "next issue boundary",
+      } };
       // Publication is best effort. The evidence remains local and can be
       // retried at the next bounded review without duplicating an issue.
     }
@@ -182,8 +218,16 @@ export async function refreshFindingApprovals(
   const findings = readSelfAssessmentFindings(cwd);
   const next = await Promise.all(findings.map(async (finding) => {
     if (!finding.authorityId) return finding;
-    try { return { ...finding, approvalState: await authority.readFindingApproval!(finding.authorityId, config) }; }
-    catch { return finding; }
+    try {
+      return { ...finding, approvalState: await authority.readFindingApproval!(finding.authorityId, config) };
+    } catch (error) {
+      return { ...finding, publication: {
+        status: "approval_refresh_failed" as const, attemptedAt: new Date().toISOString(),
+        adapter: authority.name,
+        reason: sanitizeFeedbackText(error instanceof Error ? error.message : String(error)).slice(0, 240),
+        retry: "next issue boundary",
+      } };
+    }
   }));
   saveFindings(cwd, next);
   return next;
