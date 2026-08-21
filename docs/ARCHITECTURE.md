@@ -115,6 +115,14 @@ already-owned canonical workspace. The parent process supplies the workspace
 as the child process cwd. Host-supported reviewer restrictions should be used
 where available, but Pi-next does not claim OS sandboxing by prompt convention.
 
+An owned canonical PLAN with only missing task `Files:`/`Approach:` metadata is
+not immediately contained. Mechanical and live-authority reconciliation run
+first, then the controller may launch at most two bounded planning-only repair
+turns. The repair prompt is restricted to the configured workflow artifact and
+must preserve requirements, completed progress, logs, and dirty issue-local
+work. The PLAN is validated again before any implementation worker can run;
+foreign, ambiguous, or other structurally unsafe artifacts remain fail-closed.
+
 ## Extension contracts
 
 Extension points should be explicit in versioned configuration or adapter

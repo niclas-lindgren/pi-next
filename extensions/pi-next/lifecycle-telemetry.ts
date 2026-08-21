@@ -27,6 +27,7 @@ export type LifecycleEventName =
   | "generation_teardown"
   | "plan_repaired"
   | "plan_reconciled"
+  | "plan_repair_requested"
   | "workflow_artifact_quarantined"
   | "worker_recovery"
   | "issue_contained"

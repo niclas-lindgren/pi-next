@@ -13,7 +13,12 @@ import {
   type IssueLeaseAuthority,
 } from "../src/coordination/index.ts";
 import { claimLoopIssue } from "../extensions/pi-next/loop.ts";
-import { reconcileWorkspacePlan, validateWorkspacePlan } from "../extensions/pi-next/execution-boundary.ts";
+import {
+  isPlanTaskMetadataDefect,
+  pendingPlanRepair,
+  reconcileWorkspacePlan,
+  validateWorkspacePlan,
+} from "../extensions/pi-next/execution-boundary.ts";
 import { PlanAuthorityError } from "../extensions/pi-next/util-core.ts";
 import { lifecycleTelemetryFile } from "../extensions/pi-next/lifecycle-telemetry.ts";
 import { emptyLoopMetrics, type LoopState } from "../extensions/pi-next/loop-state.ts";
@@ -209,6 +214,37 @@ test("mechanical repair runs before an authority failure", async () => {
     );
     const repaired = await readFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "utf8");
     assert.match(repaired, /## Log/);
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("owned task metadata defects remain repairable after live reconciliation", async () => {
+  const fixtureState = await fixture();
+  try {
+    const incomplete = plan("\n## Log\n")
+      .replace("  - Files: src/example.ts\n", "")
+      .replace("  - Approach: keep the existing task and acceptance text\n", "");
+    await writeFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), incomplete);
+    const authority = {
+      name: "fixture",
+      capabilities: { discovery: true, freshness: true, completion: false, atomicOwnership: false, projectStatus: false },
+      listCandidates: async () => [],
+      get: async () => ({
+        id: "7", number: 7, title: "Live bounded repair", body: "## Acceptance Criteria\n- [ ] Existing requirements remain intact", state: "open", updatedAt: "2026-01-01T00:00:00Z", states: [], comments: [],
+      }),
+      fingerprint: (item: { title: string; body: string }) => `${item.title}:${item.body}`,
+      close: async () => undefined,
+    };
+    await reconcileWorkspacePlan(fixtureState.workspace, 7, { runId: "run-task-repair", authority });
+    const repair = pendingPlanRepair(fixtureState.workspace, 7);
+    assert.ok(repair);
+    assert.equal(isPlanTaskMetadataDefect(repair.errors), true);
+    assert.equal(repair.fingerprint, "task-metadata:files=1;approaches=1");
+    assert.doesNotThrow(() => validateWorkspacePlan(fixtureState.workspace, 7, { allowTaskMetadata: true }));
+    const repaired = await readFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "utf8");
+    assert.match(repaired, /## Log/);
+    assert.match(repaired, /Existing requirements remain intact/);
   } finally {
     await rm(fixtureState.root, { recursive: true, force: true });
   }
