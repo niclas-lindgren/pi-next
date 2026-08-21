@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.51 - prepared release
+
+Bounded PLAN recovery and workflow safety release.
+
+### Material changes
+
+- Repair correctly owned canonical PLAN task metadata through a bounded planning-only worker before containing an otherwise ready issue.
+- Preserve completed task state, logs, dirty issue-local work, and live authority identity while recovering missing `Files:` and `Approach:` fields.
+
+### Compatibility/configuration/schema
+
+- Loop-state v1 remains compatible; optional bounded PLAN-repair state is ignored by older readers.
+- No new consumer configuration is required; repair workers use the existing configured workflow paths and authority adapter.
+
+### Breaking/behavior changes
+
+- Missing task `Files:`/`Approach:` metadata no longer immediately makes an owned ready issue ineligible.
+- Foreign, ambiguous, or otherwise unsafe PLAN ownership remains fail-closed, and repeated invalid repairs are contained after a bounded budget.
+
+### Security/safety
+
+- Planning repair runs only after canonical lease/worktree ownership and live-authority reconciliation; implementation workers never start while task metadata remains invalid.
+- Repair telemetry is bounded and sanitized; no workspace reset, stash, deletion, or requirement narrowing is performed.
+
+### Upgrade guidance
+
+- Upgrade promptly for the PLAN-recovery correctness fix; no manual migration or configuration change is required.
+
 ## 0.2.50 - pending release
 
 Convergence budget compatibility release.
