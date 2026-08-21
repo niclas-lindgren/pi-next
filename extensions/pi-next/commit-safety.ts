@@ -30,6 +30,7 @@ import {
   assertWorkflowCommitAllowed,
   classifyCommitPaths,
   type CommitKind,
+  type CorrectnessTransition,
   recordCommit,
 } from "./workflow-commit-policy.ts";
 import {
@@ -182,11 +183,82 @@ export async function assertArchiveReady(
   return { plan, issue, fingerprint, authorityFingerprint: liveIssue.fingerprint };
 }
 
+function authorityReconciliationTransition(
+  cwd: string,
+  issue: number | undefined,
+  paths: readonly string[],
+): CorrectnessTransition | undefined {
+  if (!issue) return undefined;
+  const planPath = normalizeRepoPath(relative(cwd, planFile(cwd)));
+  const verifyPath = normalizeRepoPath(relative(cwd, verifyFile(cwd)));
+  if (!paths.includes(planPath) || paths.some((path) => path !== planPath && path !== verifyPath)) {
+    return undefined;
+  }
+  if (!existsSync(verifyFile(cwd))) return undefined;
+  const verify = readFileSync(verifyFile(cwd), "utf8");
+  const fingerprint = verify.match(/^ISSUE_FINGERPRINT:\s*(\S+)$/m)?.[1];
+  if (
+    !fingerprint ||
+    !/^STATUS:\s*FAIL$/m.test(verify) ||
+    !/^FAIL_DISPOSITION:\s*RECONCILE$/m.test(verify) ||
+    !/^AUTHORITY_ACCEPTANCE_STATUS:\s*MISMATCH$/m.test(verify)
+  ) return undefined;
+  return { reason: "authority_reconciliation", fingerprint };
+}
+
+function validateCorrectnessTransition(
+  cwd: string,
+  paths: readonly string[],
+  transition: CorrectnessTransition,
+  inferred: CorrectnessTransition | undefined,
+): void {
+  if (!transition.fingerprint.trim() || transition.fingerprint.trim().length > 256) {
+    throw new Error("Correctness transition fingerprint is missing or unbounded");
+  }
+  if (transition.reason === "authority_reconciliation") {
+    if (!inferred || inferred.fingerprint !== transition.fingerprint) {
+      throw new Error("Authority reconciliation requires an unambiguous failing verification/authority mismatch");
+    }
+    return;
+  }
+  const planPath = normalizeRepoPath(relative(cwd, planFile(cwd)));
+  const verifyPath = normalizeRepoPath(relative(cwd, verifyFile(cwd)));
+  if (transition.reason === "post_integration_cleanup") {
+    if (paths.length !== 1 || paths[0] !== verifyPath || !existsSync(verifyFile(cwd))) {
+      throw new Error("Post-integration cleanup may remove only the canonical VERIFY.md");
+    }
+    const verify = readFileSync(verifyFile(cwd), "utf8");
+    const fingerprint = verify.match(/^ISSUE_FINGERPRINT:\s*(\S+)$/m)?.[1];
+    if (!/^STATUS:\s*PASS$/m.test(verify) || fingerprint !== transition.fingerprint) {
+      throw new Error("Post-integration cleanup requires passing verification bound to the same authority");
+    }
+    return;
+  }
+  if (transition.reason === "terminal_transition") {
+    const archiveDir = normalizeRepoPath(relative(cwd, workflowPath(cwd, "archiveDir")));
+    const historyPath = normalizeRepoPath(relative(cwd, workflowPath(cwd, "stateDir"))) + "/HISTORY.md";
+    if (
+      !paths.includes(planPath) ||
+      !paths.includes(historyPath) ||
+      !paths.some((path) => path.startsWith(`${archiveDir}/`))
+    ) {
+      throw new Error("Terminal correctness transitions require the complete configured archive path set");
+    }
+    return;
+  }
+  throw new Error("Recovery correctness transitions require a controller-owned durable request");
+}
+
 export async function commitExplicitPaths(
   cwd: string,
   paths: string[],
   message: string,
-  options: { issueNumber?: number; kind?: CommitKind; allowCoordinationMigration?: boolean } = {},
+  options: {
+    issueNumber?: number;
+    kind?: CommitKind;
+    allowCoordinationMigration?: boolean;
+    correctness?: CorrectnessTransition;
+  } = {},
 ): Promise<string> {
   const normalized = [...new Set(paths.map(normalizeRepoPath))];
   const actualKind = classifyCommitPaths(normalized, cwd);
@@ -209,7 +281,17 @@ export async function commitExplicitPaths(
   const issue = options.issueNumber ||
     (existsSync(planFile(cwd)) ? issueNumber(readFileSync(planFile(cwd), "utf8")) : null) ||
     undefined;
-  if (kind === "workflow-only" || kind === "lifecycle") assertWorkflowCommitAllowed(cwd, issue);
+  const inferredCorrectness = authorityReconciliationTransition(cwd, issue, normalized);
+  const correctness = options.correctness || inferredCorrectness;
+  if (correctness) {
+    if (kind === "substantive") {
+      throw new Error("Correctness transitions are restricted to explicit workflow/lifecycle paths");
+    }
+    validateCorrectnessTransition(cwd, normalized, correctness, inferredCorrectness);
+  }
+  if (kind === "workflow-only" || kind === "lifecycle") {
+    assertWorkflowCommitAllowed(cwd, issue, correctness);
+  }
   if (!normalized.length) {
     throw new Error("At least one explicit commit path is required");
   }
@@ -269,7 +351,7 @@ export async function commitExplicitPaths(
     throw error;
   }
   const hash = await git(cwd, ["rev-parse", "--short", "HEAD"]);
-  recordCommit(cwd, issue, kind);
+  recordCommit(cwd, issue, kind, correctness);
   return hash;
 }
 
@@ -320,7 +402,14 @@ export async function archiveAndCommit(
       cwd,
       paths,
       `chore(agent): archive issue #${ready.issue} plan`,
-      { issueNumber: ready.issue, kind: "lifecycle" },
+      {
+        issueNumber: ready.issue,
+        kind: "lifecycle",
+        correctness: {
+          reason: "terminal_transition",
+          fingerprint: ready.authorityFingerprint,
+        },
+      },
     );
     if (!hash) throw new Error("Archive produced no commit");
   } catch (error) {

@@ -10,6 +10,18 @@ export const WORKFLOW_ONLY_COMMIT_LIMIT = 2;
 
 export type CommitKind = "substantive" | "workflow-only" | "lifecycle";
 export type TransitionKind = "verification" | "lifecycle" | "repair" | "issue-switch" | "task";
+export type CorrectnessTransitionReason =
+  | "authority_reconciliation"
+  | "recovery_state"
+  | "terminal_transition"
+  | "post_integration_cleanup";
+
+/** A narrowly classified exception to the ordinary workflow-only budget. */
+export interface CorrectnessTransition {
+  reason: CorrectnessTransitionReason;
+  /** Stable authority/code fingerprint; never a timestamp or raw output. */
+  fingerprint: string;
+}
 
 export interface IssueCommitTelemetry {
   total: number;
@@ -19,6 +31,8 @@ export interface IssueCommitTelemetry {
   verificationAttempts: number;
   lifecycleTransitions: number;
   hookExecutions: number;
+  correctnessTransitions: number;
+  correctnessByFingerprint: Record<string, number>;
   transitionCounts: Record<string, number>;
 }
 
@@ -40,6 +54,8 @@ function emptyIssue(): IssueCommitTelemetry {
     verificationAttempts: 0,
     lifecycleTransitions: 0,
     hookExecutions: 0,
+    correctnessTransitions: 0,
+    correctnessByFingerprint: {},
     transitionCounts: {},
   };
 }
@@ -49,6 +65,9 @@ function normalizeIssue(value: Partial<IssueCommitTelemetry> | undefined): Issue
   return {
     ...base,
     ...value,
+    correctnessByFingerprint: value?.correctnessByFingerprint && typeof value.correctnessByFingerprint === "object"
+      ? value.correctnessByFingerprint
+      : {},
     transitionCounts: value?.transitionCounts && typeof value.transitionCounts === "object"
       ? value.transitionCounts
       : {},
@@ -94,12 +113,31 @@ export function classifyCommitPaths(paths: string[], cwd = process.cwd()): Commi
   return workflowOnly ? "workflow-only" : "substantive";
 }
 
-export function assertWorkflowCommitAllowed(cwd: string, issue: number | undefined): void {
+function correctnessKey(transition: CorrectnessTransition): string {
+  return `${transition.reason}:${transition.fingerprint}`;
+}
+
+export function assertWorkflowCommitAllowed(
+  cwd: string,
+  issue: number | undefined,
+  correctness?: CorrectnessTransition,
+): void {
   if (!issue) return;
   const current = normalizeIssue(readCommitTelemetry(cwd).issues[String(issue)]);
-  if (current.workflowOnly + current.lifecycle >= WORKFLOW_ONLY_COMMIT_LIMIT) {
+  if (current.workflowOnly + current.lifecycle < WORKFLOW_ONLY_COMMIT_LIMIT) return;
+  if (
+    !correctness ||
+    !correctness.fingerprint.trim() ||
+    correctness.fingerprint.trim().length > 256
+  ) {
     throw new Error(
       `Workflow-only/lifecycle commit bound reached for issue #${issue} (${WORKFLOW_ONLY_COMMIT_LIMIT}); batch bookkeeping with substantive work or one lifecycle checkpoint`,
+    );
+  }
+  const key = correctnessKey(correctness);
+  if (current.correctnessByFingerprint[key]) {
+    throw new Error(
+      `Correctness transition already recorded for issue #${issue} (${correctness.reason}, ${correctness.fingerprint}); refusing duplicate terminal escape`,
     );
   }
 }
@@ -108,6 +146,7 @@ export function recordCommit(
   cwd: string,
   issue: number | undefined,
   kind: CommitKind,
+  correctness?: CorrectnessTransition,
 ): void {
   if (!issue) return;
   const state = readCommitTelemetry(cwd);
@@ -120,6 +159,13 @@ export function recordCommit(
     workflowOnly: current.workflowOnly + (kind === "workflow-only" ? 1 : 0),
     lifecycle: current.lifecycle + (kind === "lifecycle" ? 1 : 0),
     hookExecutions: current.hookExecutions + 1,
+    correctnessTransitions: current.correctnessTransitions + (correctness ? 1 : 0),
+    correctnessByFingerprint: correctness
+      ? {
+          ...current.correctnessByFingerprint,
+          [correctnessKey(correctness)]: (current.correctnessByFingerprint[correctnessKey(correctness)] || 0) + 1,
+        }
+      : current.correctnessByFingerprint,
   };
   writeJsonAtomic(commitTelemetryFile(cwd), state);
 }

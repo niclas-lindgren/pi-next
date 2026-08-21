@@ -465,12 +465,25 @@ export async function removeCompletedWorkflowArtifacts(
       [verify.path],
     );
   }
+  const verifyText = readFileSync(verifyFile(workspaceCwd), "utf8");
+  const authorityFingerprint = verifyText.match(/^ISSUE_FINGERPRINT:\s*(\S+)$/m)?.[1];
   unlinkSync(verify.path);
   await commitExplicitPaths(
     workspaceCwd,
     [relative(workspaceCwd, verifyFile(workspaceCwd))],
     `chore(agent): remove completed issue #${issueNumber} verification artifact`,
-    { issueNumber, kind: "lifecycle" },
+    {
+      issueNumber,
+      kind: "lifecycle",
+      ...(authorityFingerprint
+        ? {
+            correctness: {
+              reason: "post_integration_cleanup" as const,
+              fingerprint: authorityFingerprint,
+            },
+          }
+        : {}),
+    },
   );
 }
 
