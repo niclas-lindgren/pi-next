@@ -47,8 +47,8 @@
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts",
-    "package-smoke": "tsx --test test/package.test.ts",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "package-smoke": "tsx --test --test-concurrency=1 test/package.test.ts",
     "lint": "tsc --noEmit",
     "coordination-cli": "tsx src/coordination/bin.ts",
     "skills:sync": "tsx src/skills/bin.ts sync",

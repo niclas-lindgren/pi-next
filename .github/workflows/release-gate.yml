@@ -18,6 +18,8 @@ jobs:
   verify-release:
     name: Verify exact release candidate
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out the immutable tag
         uses: actions/checkout@v4

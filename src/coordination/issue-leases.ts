@@ -114,7 +114,7 @@ function isMissingLeaseRefError(error: unknown): boolean {
     .filter((part) => part !== undefined)
     .map(String)
     .join(" ");
-  return /\b404\b|not found|no git remotes found|unable to determine github repository/i.test(text);
+  return /\b404\b|not found|not a git repository|no git remotes found|unable to determine github repository/i.test(text);
 }
 
 /**
