@@ -22,6 +22,7 @@ import {
   readLoopState,
   type LoopState,
 } from "./loop-state.ts";
+import { classifyLoopStates, selectCurrentLoop } from "./loop-status.ts";
 import { writeJsonAtomic } from "./util.ts";
 import type {
   ExtensionGeneration,
@@ -198,14 +199,16 @@ export function currentSupervisorStatus(
   // Never infer a display owner from the repository's newest running record.
   // A caller without an explicit run must first provide its session identity.
   if (!ownerSessionId) return null;
-  const running = listLoopStates(cwd)
-    .filter((state) => state.status === "running" && state.sessionId === ownerSessionId)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const running = selectCurrentLoop(
+    classifyLoopStates(cwd, listLoopStates(cwd)),
+    undefined,
+    ownerSessionId,
+  ).current;
   if (!running) return null;
-  const live = liveSupervisors.get(supervisorKey(cwd, running.runId));
+  const live = liveSupervisors.get(supervisorKey(cwd, running.state.runId));
   return live
     ? live.status()
-    : buildSupervisorStatus(cwd, running.runId, "running");
+    : buildSupervisorStatus(cwd, running.state.runId, running.presentation === "running" ? "running" : "aborted");
 }
 
 /**

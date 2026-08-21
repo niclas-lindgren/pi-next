@@ -143,7 +143,7 @@ the command:
 | `/pi-next [#N]` | Run one issue-scoped transition, using the live shortlist when no issue is given. |
 | `/pi-next-doctor` | Validate package identity, project configuration, and the configured workflow helper. |
 | `/pi-next-status` | Show local PLAN/loop state without invoking a model. |
-| `/pi-next-loop status\|stop\|resume` | Inspect, stop, or recover a bounded loop. |
+| `/pi-next-loop status [verbose\|history] [run ID]` | Inspect the session-bound run, live/abandoned controller evidence, or bounded history; stop or recover a bounded loop. |
 | `/pi-next-handoff` | Check whether the current checkout is safe to hand off. |
 | `/pi-next-view all\|off\|#N\|run ID\|compact\|verbose\|status` | Filter the worker display/transcript or select its density. |
 

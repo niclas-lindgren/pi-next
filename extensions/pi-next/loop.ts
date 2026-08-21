@@ -33,6 +33,7 @@ import {
   ensureIssueWorktree,
   GitHubIssueLeaseAuthority,
   ISSUE_LEASE_DURATION_MS,
+  type IssueLease,
   releaseIssueLease,
   reconcileIssueLeaseForResume,
   parseLeaseFromAuthority,
@@ -46,7 +47,6 @@ import {
   loopStateFile,
   markIssueDisposition,
   MAX_STEPS,
-  notifyLoopState,
   parseLoopLimit,
   readLoopState,
   safeLoopBoundary,
@@ -69,11 +69,13 @@ import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
 import { getLiveCtx, sessionIdentity } from "./live-ctx.ts";
+import { renderLoopStatus } from "./loop-status.ts";
 import {
   createSupervisorRuntime,
   type SupervisorRuntime,
 } from "./supervisor-runtime.ts";
 import { ForegroundSupervisor } from "./foreground-supervisor.ts";
+import { issueLeaseMatchesOwner } from "./issue-authority.ts";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { createWorkAuthority } from "../../src/coordination/work-authority.ts";
 import {
@@ -115,6 +117,28 @@ function notifySafely(
  * yet, or the run has no UI) is a silent no-op, matching `safeNotify`'s
  * existing "diagnostic only" contract.
  */
+async function authoritativeStatusRun(
+  cwd: string,
+): Promise<{ authoritativeRunId?: string; authorityUnavailable: boolean }> {
+  const candidates = listLoopStates(cwd)
+    .filter((state) => state.activeIssueNumber && state.activeLease)
+    .slice(0, 20);
+  if (!candidates.length) return { authorityUnavailable: false };
+  const authority = new GitHubIssueLeaseAuthority(cwd);
+  let unavailable = false;
+  for (const state of candidates) {
+    try {
+      const lease = await authority.read(state.activeIssueNumber!);
+      if (lease && issueLeaseMatchesOwner(lease, state.activeLease as IssueLease)) {
+        return { authoritativeRunId: state.runId, authorityUnavailable: false };
+      }
+    } catch {
+      unavailable = true;
+    }
+  }
+  return { authorityUnavailable: unavailable };
+}
+
 function notifyLive(
   message: string,
   level: "info" | "warning" | "error" = "info",
@@ -907,7 +931,9 @@ export async function runPiNextLoop(
   onWorkLog?: WorkerWorkLogSink,
   onWorkerState?: (runtime: import("./util-core.ts").IssueWorkerRuntime) => void,
 ): Promise<void> {
-  const [command, requestedRunId] = args.trim().split(/\s+/, 2);
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const command = tokens[0];
+  const requestedRunId = tokens[1];
   const input = (command || "").toLowerCase();
   const runs = listLoopStates(ctx.cwd);
   const selectRun = (
@@ -932,20 +958,16 @@ export async function runPiNextLoop(
     return;
   }
   if (input === "status") {
-    if (requestedRunId)
-      notifyLoopState(ctx, readLoopState(ctx.cwd, requestedRunId));
-    else if (runs.length)
-      notifySafely(
-        ctx,
-        runs
-          .map(
-            (run) =>
-              `${run.runId}: ${run.status}, issue progress ${run.completedIssues.length}/${run.requestedIssues}`,
-          )
-          .join("\n"),
-        "info",
-      );
-    else notifySafely(ctx, "No pi-next loop runs found.", "info");
+    const mode = requestedRunId === "verbose" || requestedRunId === "history" || requestedRunId === "all"
+      ? "verbose"
+      : "summary";
+    const explicitRunId = mode === "verbose" ? tokens[2] : requestedRunId;
+    const authority = await authoritativeStatusRun(ctx.cwd);
+    notifySafely(
+      ctx,
+      renderLoopStatus(ctx.cwd, sessionIdentity(ctx), explicitRunId, mode, authority),
+      "info",
+    );
     return;
   }
   if (input === "stop") {
