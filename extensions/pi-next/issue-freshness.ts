@@ -9,6 +9,10 @@ import {
   type WorkAuthorityAdapter,
 } from "../../src/coordination/work-authority.ts";
 import { runtimeDir, writeJsonAtomic } from "./util-core";
+import {
+  classifyAuthorityEligibility,
+  type AuthorityEligibilityResult,
+} from "./issue-candidates.ts";
 const MAX_RECORDS = 100;
 
 interface FreshnessRecord {
@@ -29,7 +33,10 @@ export interface IssueFreshnessResult {
   reason: string;
   fingerprint?: string;
   githubUpdatedAt?: string;
+  /** Live authority disposition; ineligibility always wins over freshness. */
+  eligibility: AuthorityEligibilityResult;
 }
+
 
 export interface LiveIssueFingerprint {
   title: string;
@@ -37,6 +44,7 @@ export interface LiveIssueFingerprint {
   githubUpdatedAt?: string;
   acceptanceCriteria: string[];
   risk: "low" | "normal" | "high" | "critical";
+  eligibility: AuthorityEligibilityResult;
 }
 
 function freshnessFile(cwd: string): string {
@@ -115,6 +123,7 @@ export async function getLiveIssueFingerprint(
       ? "high"
       : "normal";
   const bodyCriteria = extractIssueAcceptanceCriteria(item.body);
+  const eligibility = classifyAuthorityEligibility(item, config);
   const commentCriteria = adapter.projectRequirements
     ? adapter.projectRequirements(item)
     : extractAuthorityCommentRequirements(item.comments);
@@ -125,6 +134,7 @@ export async function getLiveIssueFingerprint(
     githubUpdatedAt: item.updatedAt,
     acceptanceCriteria: [...new Set(criteria.map((criterion) => criterion.trim()).filter(Boolean))],
     risk,
+    eligibility,
   };
 }
 
@@ -148,9 +158,12 @@ export async function checkIssueFreshness(
         checked: true,
         needsReconcile: true,
         reason:
-          "No trusted live-issue baseline exists for this active plan; reconcile the plan before implementation.",
+          live.eligibility.disposition === "eligible"
+            ? "No trusted live-issue baseline exists for this active plan; reconcile the plan before implementation."
+            : live.eligibility.reason,
         fingerprint: live.fingerprint,
         githubUpdatedAt: live.githubUpdatedAt,
+        eligibility: live.eligibility,
       };
     }
     if (previous.fingerprint !== live.fingerprint) {
@@ -158,17 +171,23 @@ export async function checkIssueFreshness(
         checked: true,
         needsReconcile: true,
         reason:
-          "The live GitHub issue or its comments/labels changed since the previous transition; reconcile PLAN.md before implementation.",
+          live.eligibility.disposition === "eligible"
+            ? "The live GitHub issue or its comments/labels changed since the previous transition; reconcile PLAN.md before implementation."
+            : live.eligibility.reason,
         fingerprint: live.fingerprint,
         githubUpdatedAt: live.githubUpdatedAt,
+        eligibility: live.eligibility,
       };
     }
     return {
       checked: true,
-      needsReconcile: false,
-      reason: "Live GitHub issue fingerprint matches the previous transition.",
+      needsReconcile: live.eligibility.disposition !== "eligible",
+      reason: live.eligibility.disposition === "eligible"
+        ? "Live GitHub issue fingerprint matches the previous transition."
+        : live.eligibility.reason,
       fingerprint: live.fingerprint,
       githubUpdatedAt: live.githubUpdatedAt,
+      eligibility: live.eligibility,
     };
   } catch {
     return {
@@ -176,6 +195,11 @@ export async function checkIssueFreshness(
       needsReconcile: true,
       reason:
         "Controller could not verify live GitHub issue freshness; the model must fetch the live issue and comments before using PLAN.md.",
+      eligibility: {
+        disposition: "unavailable",
+        eligible: false,
+        reason: "authority eligibility could not be verified",
+      },
     };
   }
 }

@@ -41,6 +41,7 @@ export type LoopOutcome =
   | "archived"
   | "defer_issue"
   | "block_issue"
+  | "yield_issue"
   | "blocked"
   | "idle"
   | "failed";
@@ -73,7 +74,7 @@ export interface LoopMetrics extends LoopUsage {
   telemetryUnavailable: number;
 }
 
-export type LoopIssueDisposition = "active" | "completed" | "deferred" | "blocked";
+export type LoopIssueDisposition = "active" | "completed" | "deferred" | "blocked" | "yielded";
 
 /** Durable, bounded recovery evidence for a worker boundary without a result. */
 export interface LoopRecoveryState {
@@ -110,7 +111,7 @@ export interface DeferredIssue {
   issueNumber: number;
   reason: string;
   deferredAt: string;
-  kind?: "deferred" | "blocked";
+  kind?: "deferred" | "blocked" | "yielded";
   parkedPlan?: string;
 }
 
@@ -396,12 +397,12 @@ export function writeLoopResult(authorityCwd: string, result: LoopResult): strin
     );
   }
   if (
-    ["archived", "defer_issue", "block_issue"].includes(result.outcome) &&
+    ["archived", "defer_issue", "block_issue", "yield_issue"].includes(result.outcome) &&
     (!Number.isInteger(result.issueNumber) || (result.issueNumber || 0) <= 0)
   ) {
     throw new Error(`issueNumber is required for a ${result.outcome} loop step`);
   }
-  if (["defer_issue", "block_issue"].includes(result.outcome) && !result.reason?.trim()) {
+  if (["defer_issue", "block_issue", "yield_issue"].includes(result.outcome) && !result.reason?.trim()) {
     throw new Error(`reason is required for a ${result.outcome} loop step`);
   }
   const path = loopResultFile(authorityCwd, scopedState ? result.runId : undefined);

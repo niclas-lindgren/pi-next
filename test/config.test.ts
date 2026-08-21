@@ -11,7 +11,7 @@ import {
   type PiNextConfig,
   type SelfAssessmentFinding,
 } from "../src/coordination/index.ts";
-import { candidateShortlist } from "../extensions/pi-next/issue-candidates.ts";
+import { candidateShortlist, classifyAuthorityEligibility } from "../extensions/pi-next/issue-candidates.ts";
 import { buildAutoPrompt, buildLoopMaintenancePrompt } from "../extensions/pi-next/prompt.ts";
 
 const config = {
@@ -86,6 +86,23 @@ test("a non-GitHub authority can provide configurable candidates", async () => {
   });
   assert.match(result.text || "", /urgent:\n- #7 local work item/);
   assert.doesNotMatch(result.text || "", /paused work item/);
+});
+
+test("selection and active-plan authority classification share readiness and blocker policy", () => {
+  const item = (states: string[], state = "open") => ({
+    id: "policy-item",
+    number: 7,
+    title: "policy item",
+    body: "",
+    state,
+    priority: "urgent",
+    states,
+    comments: [],
+  });
+  assert.equal(classifyAuthorityEligibility(item(["prepared"]), validatedConfig).disposition, "eligible");
+  assert.equal(classifyAuthorityEligibility(item(["paused"]), validatedConfig).disposition, "blocked");
+  assert.equal(classifyAuthorityEligibility(item([], "closed"), validatedConfig).disposition, "closed");
+  assert.equal(classifyAuthorityEligibility(item(["other"]), validatedConfig).disposition, "not_ready");
 });
 
 test("awaiting external verification is excluded until authoritative PASS/FAIL evidence", async () => {

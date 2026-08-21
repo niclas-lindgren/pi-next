@@ -10,10 +10,12 @@ export interface AutoProgressRenderOptions {
   width?: number;
 }
 
-/** Issues settled for this run, including deferred and blocked issues. */
+/** Issues settled for this run; scheduler-yielded issues remain outstanding. */
 export function settledIssueCount(state: Pick<LoopState, "completedIssues" | "deferredIssues">): number {
   const settled = new Set<number>(state.completedIssues);
-  for (const issue of state.deferredIssues) settled.add(issue.issueNumber);
+  for (const issue of state.deferredIssues) {
+    if (issue.kind !== "yielded") settled.add(issue.issueNumber);
+  }
   return settled.size;
 }
 
@@ -58,6 +60,7 @@ function phaseLabel(
   }
   if (supervisor?.workerAlive) return "working";
   if (state.recovery?.lastOutcome === "resuming_same_issue") return "recovering";
+  if (state.lastOutcome === "yield_issue") return "yielded";
   return state.activeIssueNumber ? "claiming" : "selecting";
 }
 

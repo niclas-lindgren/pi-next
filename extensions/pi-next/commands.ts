@@ -17,8 +17,7 @@ import { LocalIssueLeaseAuthority } from "./local-lease.ts";
 import {
   CandidateDiscoveryError,
   candidateShortlist,
-  isBlockedCandidate,
-  isHeldSelfAssessmentFinding,
+  classifyAuthorityEligibility,
   type CandidateShortlist,
 } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
@@ -177,15 +176,18 @@ async function issueQueueStatusText(cwd: string, sessionId: string | undefined, 
     if (!item.number) continue;
     let lease;
     try { lease = await leases.read(item.number); } catch { unknown = true; }
-    const labels = item.states.map((name) => ({ name }));
-    const pseudo = { number: item.number, title: item.title, updatedAt: item.updatedAt, labels };
-    const currentDisposition = current === item.number ? "current/owned-by-this-run" : undefined;
+    const eligibility = classifyAuthorityEligibility(item, config);
+    const currentDisposition = current === item.number
+      ? eligibility.eligible
+        ? "current/owned-by-this-run"
+        : `current/yielded-${eligibility.disposition}: ${boundedStatusText(eligibility.reason, 100)}`
+      : undefined;
     const disposition = currentDisposition
       || (lease && isIssueLeaseFresh(lease) ? `leased-other/${boundedStatusText(lease.agent, 40)}` : undefined)
       || (unknown ? "ownership-unknown" : undefined)
-      || (isBlockedCandidate(pseudo, config.selection.blockedStates) ? "blocked/excluded" : undefined)
-      || (isHeldSelfAssessmentFinding(pseudo, config) ? "held-finding/excluded" : undefined)
-      || (!config.selection.readyStates.some((state) => item.states.some((value) => value.toLowerCase() === state.toLowerCase())) ? "not-ready/excluded" : undefined)
+      || (!eligibility.eligible
+        ? `${eligibility.disposition === "not_ready" ? "not-ready" : eligibility.disposition}/excluded`
+        : undefined)
       || (active.some((state) => state.deferredIssues.some((issue) => issue.issueNumber === item.number)) ? "deferred-this-run" : "eligible");
     const filterMatch = filter === "active"
       ? disposition.startsWith("current/") || disposition.startsWith("leased-other")
@@ -197,7 +199,7 @@ async function issueQueueStatusText(cwd: string, sessionId: string | undefined, 
   const counts = {
     eligible: rows.filter((row) => row.includes(" eligible")).length,
     leased: rows.filter((row) => row.includes("leased-other")).length,
-    blocked: rows.filter((row) => row.includes("blocked") || row.includes("not-ready") || row.includes("held-finding")).length,
+    blocked: rows.filter((row) => row.includes("blocked") || row.includes("not-ready") || row.includes("deferred") || row.includes("held-finding")).length,
     deferred: rows.filter((row) => row.includes("deferred")).length,
   };
   const lines = [

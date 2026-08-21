@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.46 - pending release
+
+Live authority eligibility gate release.
+
+### Material changes
+
+- Reapply configured readiness, blocker, closed, deferred, and authority-availability policy before active PLAN transitions.
+- Preserve issue PLAN/worktree state and yield safely when live authority becomes ineligible.
+
+### Compatibility/configuration/schema
+
+- Add controller-facing authority eligibility dispositions and a run-local yielded transition.
+- Existing configuration remains compatible; readiness and blocker policy continue to be consumer-configured.
+
+### Breaking/behavior changes
+
+- Active plans no longer launch autonomous workers when live authority is blocked, closed, deferred, not ready, or unavailable.
+
+### Security/safety
+
+- Lease ownership cannot override a live authoritative stop condition; dirty issue work is preserved without destructive cleanup.
+
+### Upgrade guidance
+
+- Consumers should review configured readiness and blocker states before enabling unattended execution.
+
 ## 0.2.45 - pending release
 
 Release-gate Git fixture portability release.
