@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.2.41 - pending release
+## 0.2.42 - pending release
+
+Release-gate fixture reliability release.
+
+### Material changes
+
+- Keep the exact-tag release gate green by serializing the finalize integration
+  fixture suite and preserving deterministic temporary-repository cleanup.
+- Retain authenticated GitHub CLI authority checks and no-remote fixture
+  handling from the previous release-gate follow-up.
+
+### Compatibility/configuration/schema
+
+- No Pi API, package/config schema, or authority contract changes are intended.
+- The supported Node.js 22.19+ and Pi 0.84.2+ compatibility range is unchanged.
+
+### Breaking/behavior changes
+
+- No runtime behavior or consumer configuration changes are intended.
+- Test execution is more conservative to avoid nondeterministic fixture races.
+
+### Security/safety
+
+- The release workflow uses only its built-in read token and verifies the exact
+  immutable tag commit.
+- Pinned consumers and downstream ownership remain unchanged.
+
+### Upgrade guidance
+
+- This is verification infrastructure work. Consumers may wait for a later
+  bundled runtime release; follow the documented immutable pin and smoke-test
+  workflow when upgrading.
+
+## 0.2.41 - 2026-08-21
 
 Release-gate reliability follow-up.
 
