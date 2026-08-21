@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.63 - pending release
+
+Restart recovery reliability release.
+
+### Material changes
+
+- Reactivate explicitly recoverable `restart_required` memory stops even when the prior step was already settled.
+- Re-baseline current-process host memory before recovery and preserve the exact issue lease/worktree when pressure remains critical.
+- Report truthful recovered, immediately re-stopped, blocked, and no-op recovery outcomes.
+
+### Compatibility/configuration/schema
+
+- Existing loop-state and lease contracts remain compatible; bounded historical memory samples are retained while recovery starts a fresh baseline.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Generic operator-stopped runs are no longer automatically reactivated merely because they retain an issue lease.
+
+### Security/safety
+
+- Recovery remains authority-first and canonical-workspace-bound; no product/workflow files are reset, stashed, or auto-committed.
+- Current critical host pressure re-stops the run before another worker/model turn and preserves recovery ownership.
+
+### Upgrade guidance
+
+- Restarted memory-pressure runs resume their preserved issue automatically when the new process is below the critical threshold.
+
 ## 0.2.62 - pending release
 
 Bound auto-footer session handoff release.

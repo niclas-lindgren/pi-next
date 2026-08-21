@@ -110,12 +110,14 @@ export interface SupervisorStatus {
 }
 
 export interface RecoveryOutcome {
-  /** True when an authoritative-lease-owned interrupted run was resumed. */
+  /** True only when the recovered supervisor entered a real issue cycle. */
   recovered: boolean;
   runId?: string;
   issueNumber?: number;
   /** Uncommitted issue-worktree files preserved (never reset/stashed) for the fresh worker to inspect. */
   dirtyFiles?: string[];
+  /** Actual recovery result for truthful command/UI messaging. */
+  recoveryStatus?: "resumed" | "restopped_host_memory" | "blocked" | "no_runnable_transition";
   /** Set when a candidate run existed but recovery could not proceed safely. */
   blockedReason?: string;
 }
@@ -254,6 +256,7 @@ export class ForegroundSupervisor {
   private readonly runtime: SupervisorRuntime;
   private workerRuntime: IssueWorkerRuntime | null = null;
   private workerPhase: WorkerWorkLogPhase | undefined;
+  private cyclesStarted = 0;
   /** One visual owner for the complete supervisor run, not one per issue. */
   private display: WorkerDisplayController | undefined;
 
@@ -299,21 +302,56 @@ export class ForegroundSupervisor {
       sessionIdentity(ctx),
     );
     if (!prepared.ok) {
-      return { recovered: false, blockedReason: prepared.reason };
+      return {
+        recovered: false,
+        recoveryStatus: "blocked",
+        blockedReason: prepared.reason,
+      };
     }
     const supervisor = new ForegroundSupervisor(ctx);
     const state = readLoopState(ctx.cwd, abandoned.runId);
     if (!state) {
-      return { recovered: false, blockedReason: "Recovered run state disappeared" };
+      return {
+        recovered: false,
+        recoveryStatus: "blocked",
+        blockedReason: "Recovered run state disappeared",
+      };
     }
     bindLiveAutoRun(ctx, state.runId);
-    await supervisor.launch(state);
+    if (prepared.immediatelyRestopped) {
+      return {
+        recovered: false,
+        recoveryStatus: "restopped_host_memory",
+        runId: abandoned.runId,
+        issueNumber: abandoned.activeIssueNumber ?? undefined,
+        dirtyFiles: prepared.dirtyFiles,
+        blockedReason: readLoopState(ctx.cwd, abandoned.runId)?.lastReason,
+      };
+    }
+    const launched = await supervisor.launch(state);
+    const finalState = readLoopState(ctx.cwd, abandoned.runId) || launched;
+    if (!launched || !finalState || supervisor.launchCyclesStarted === 0) {
+      return {
+        recovered: false,
+        recoveryStatus: "no_runnable_transition",
+        runId: abandoned.runId,
+        issueNumber: abandoned.activeIssueNumber ?? undefined,
+        dirtyFiles: prepared.dirtyFiles,
+        blockedReason: "Recovered run did not execute an issue cycle",
+      };
+    }
     return {
       recovered: true,
+      recoveryStatus: "resumed",
       runId: abandoned.runId,
       issueNumber: abandoned.activeIssueNumber ?? undefined,
       dirtyFiles: prepared.dirtyFiles,
     };
+  }
+
+  /** Number of issue cycles entered by the most recent launch. */
+  get launchCyclesStarted(): number {
+    return this.cyclesStarted;
   }
 
   /** Begin a worker turn owned by this supervisor (useful to lifecycle adapters). */
@@ -348,6 +386,7 @@ export class ForegroundSupervisor {
    */
   async launch(initial: LoopState): Promise<LoopState | null> {
     this.runId = initial.runId;
+    this.cyclesStarted = 0;
     liveSupervisors.set(supervisorKey(this.cwd, this.runId), this);
     this.phase = "launching";
     try {
@@ -356,6 +395,7 @@ export class ForegroundSupervisor {
         let state = initial;
         this.display = attachWorkerDisplay(getLiveCtx() ?? this.ctx, this.display);
         while (state.status === "running" && state.remainingIssues > 0) {
+          this.cyclesStarted += 1;
           this.workerPhase = undefined;
           this.workerRuntime = null;
           // A worker/session transition may have invalidated the context
