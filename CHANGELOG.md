@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.47 - pending release
+
+Per-issue convergence budget release.
+
+### Material changes
+
+- Add durable per-issue transition, worker, time, token, task, fingerprint, and commit convergence metrics.
+- Add configurable soft checkpoints and hard fairness yields that preserve PLAN/worktree state.
+
+### Compatibility/configuration/schema
+
+- Add optional `convergence` configuration with soft/hard transition, wall-time, token, and PLAN task warning limits.
+- Existing configuration remains compatible through conservative defaults.
+
+### Breaking/behavior changes
+
+- A single issue can now yield at a bounded run-local fairness boundary instead of monopolizing an unattended loop.
+
+### Security/safety
+
+- Budget exhaustion is scheduler yield only; it does not mark the authority issue blocked, deferred, failed, or closed.
+- Existing run-wide step and ownership safety bounds remain in force.
+
+### Upgrade guidance
+
+- Review convergence limits for repositories with unusually large but cohesive issues; later runs resume preserved PLAN state.
+
 ## 0.2.46 - pending release
 
 Live authority eligibility gate release.
