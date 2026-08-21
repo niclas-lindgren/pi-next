@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.59 - pending release
+
+PLAN repair execution-boundary release.
+
+### Material changes
+
+- Allow the outer loop controller preflight to reach bounded planning-only repair for owned task metadata defects.
+- Preserve pre-existing issue-local work across repair turns while rejecting product-source mutations from planning repair workers.
+
+### Compatibility/configuration/schema
+
+- Existing PLAN ownership, lease, canonical worktree, and workflow-path contracts remain unchanged.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- A correctly owned PLAN missing only task `Files:`/`Approach:` metadata is no longer contained by the outer preflight before repair can run.
+
+### Security/safety
+
+- Foreign, ambiguous, and otherwise malformed PLAN ownership remains fail-closed.
+- Planning-only repair cannot add or rewrite product-source paths.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.58 - pending release
 
 Bounded PLAN repair recovery release.
