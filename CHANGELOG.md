@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.2.44 - pending release
+## 0.2.45 - pending release
+
+Release-gate Git fixture portability release.
+
+### Material changes
+
+- Make temporary bare repositories advertise `main` and use explicit HEAD
+  refspecs so the exact-tag gate is portable across Git runner defaults.
+- Preserve exact-tag verification, authenticated authority checks, and the
+  deterministic package smoke gate.
+
+### Compatibility/configuration/schema
+
+- No Pi API, package/config schema, or authority contract changes are intended.
+- The supported Node.js 22.19+ and Pi 0.84.2+ compatibility range is unchanged.
+
+### Breaking/behavior changes
+
+- No runtime or consumer configuration behavior changes are intended.
+- Test-only Git fixture setup is explicit about its default branch.
+
+### Security/safety
+
+- Exact release verification remains bound to the immutable tag commit.
+- GitHub Actions uses its built-in read token and consumers remain pinned to
+  immutable revisions.
+
+### Upgrade guidance
+
+- Consumers may wait for a later bundled runtime release. Review the release
+  notes and run the documented immutable pin plus fresh-process checks when
+  upgrading.
+
+## 0.2.44 - 2026-08-21
 
 Release-gate test cleanup reliability release.
 

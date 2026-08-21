@@ -100,6 +100,7 @@ function setupRepo(): { origin: string; root: string } {
   git(root, ["commit", "-qm", "baseline"]);
   git(root, ["branch", "-M", "main"]);
   git(root, ["push", "-q", "-u", "origin", "main"]);
+  execFileSync("git", ["--git-dir", origin, "symbolic-ref", "HEAD", "refs/heads/main"]);
   return { origin, root };
 }
 
@@ -429,7 +430,7 @@ describe("finalizeIssue", { concurrency: false }, () => {
     git(otherClone, ["add", "unrelated.txt"]);
     git(otherClone, ["commit", "-qm", "feat: unrelated issue lands first"]);
     const unrelatedSha = git(otherClone, ["rev-parse", "HEAD"]);
-    git(otherClone, ["push", "-q", "origin", "main"]);
+    git(otherClone, ["push", "-q", "origin", "HEAD:refs/heads/main"]);
 
     const leaseAuthority = new MemoryLeaseAuthority();
     leaseAuthority.seed(freshLease(608));
@@ -504,7 +505,7 @@ describe("finalizeIssue", { concurrency: false }, () => {
     writeFileSync(join(otherClone, "unrelated-b.txt"), "b\n");
     git(otherClone, ["add", "unrelated-b.txt"]);
     git(otherClone, ["commit", "-qm", "feat: B lands"]);
-    git(otherClone, ["push", "-q", "origin", "main"]);
+    git(otherClone, ["push", "-q", "origin", "HEAD:refs/heads/main"]);
 
     const leaseAuthority = new MemoryLeaseAuthority();
     leaseAuthority.seed(freshLease(620));
@@ -532,7 +533,7 @@ describe("finalizeIssue", { concurrency: false }, () => {
     writeFileSync(join(otherClone, "unrelated-d.txt"), "d\n");
     git(otherClone, ["add", "unrelated-d.txt"]);
     git(otherClone, ["commit", "-qm", "feat: D lands after M1 was verified"]);
-    git(otherClone, ["push", "-q", "origin", "main"]);
+    git(otherClone, ["push", "-q", "origin", "HEAD:refs/heads/main"]);
 
     // Retrying with proof of the now-stale M1 must NOT close: the live
     // integrated main tree (M2) was never reverified.
