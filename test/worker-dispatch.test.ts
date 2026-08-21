@@ -53,10 +53,10 @@ test("dispatch envelope binds identity and exposes bounded metadata", () => {
     workflowPaths: {
       plan: ".workflow/PLAN.md",
       verify: ".workflow/VERIFY.md",
-      state: ".workflow",
+      state: ".workflow/state.sh",
       diagnostics: ".workflow/diagnostics",
     },
-  }), /PLAN=\.workflow\/PLAN\.md VERIFY=\.workflow\/VERIFY\.md/);
+  }), /PLAN=\.workflow\/PLAN\.md VERIFY=\.workflow\/VERIFY\.md STATE=\.workflow\/state\.sh/);
   assert.equal(dispatchBindingMatches(policy, policy), true);
   assert.equal(dispatchBindingMatches(policy, { ...policy, candidateSha: "candidate-2" }), false);
 });
@@ -72,8 +72,28 @@ test("custom workflow paths are bound into the worker prompt", async () => {
     config.workflow.diagnosticsPath = ".workflow/diagnostics";
     await writeFile(join(cwd, ".pi-next", "config.json"), JSON.stringify(config));
     const prompt = buildPiNextPrompt(cwd, "continue");
-    assert.match(prompt, /PLAN=\.workflow\/PLAN\.md VERIFY=\.workflow\/VERIFY\.md STATE=\.workflow/);
-    assert.match(prompt, /never probe root or another harness/);
+    assert.match(prompt, /PLAN=\.workflow\/PLAN\.md VERIFY=\.workflow\/VERIFY\.md STATE=provider-backed \(no STATE file\) DIAGNOSTICS=\.workflow\/diagnostics/);
+    assert.match(prompt, /never probe root, uppercase conventional names, or another harness/);
+    assert.doesNotMatch(prompt, /\.workflow\/STATE|\.workflow\/DIAGNOSTICS|\.ps-next/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("custom helper state and diagnostics contracts stay exact", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-dispatch-state-paths-"));
+  try {
+    await mkdir(join(cwd, ".pi-next"), { recursive: true });
+    const config = structuredClone(DEFAULT_PI_NEXT_CONFIG);
+    config.workflow.planPath = ".workflow/plan.md";
+    config.workflow.verifyPath = ".workflow/verify.md";
+    config.workflow.stateDir = ".workflow";
+    config.workflow.stateProvider = { type: "helper", path: ".workflow/state-command" };
+    config.workflow.diagnosticsPath = ".workflow/diagnostics";
+    await writeFile(join(cwd, ".pi-next", "config.json"), JSON.stringify(config));
+    const prompt = buildPiNextPrompt(cwd, "inspect state");
+    assert.match(prompt, /PLAN=\.workflow\/plan\.md VERIFY=\.workflow\/verify\.md STATE=\.workflow\/state-command DIAGNOSTICS=\.workflow\/diagnostics/);
+    assert.doesNotMatch(prompt, /\.workflow\/STATE|\.workflow\/DIAGNOSTICS/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -108,6 +128,6 @@ test("default issue prompt is compact and does not inject legacy long-form polic
   });
   assert.match(prompt, /role=implementation/);
   assert.match(prompt, /Selected skills:/);
-  assert.match(prompt, /Authoritative workflow paths: PLAN=\.pi-next\/PLAN\.md VERIFY=\.pi-next\/VERIFY\.md/);
-  assert.doesNotMatch(prompt, /The complete long-form/);
+  assert.match(prompt, /Authoritative workflow contracts: PLAN=\.pi-next\/PLAN\.md VERIFY=\.pi-next\/VERIFY\.md STATE=provider-backed/);
+  assert.doesNotMatch(prompt, /\.pi-next\/STATE|\.pi-next\/DIAGNOSTICS|The complete long-form/);
 });

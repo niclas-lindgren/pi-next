@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.56 - pending release
+
+Configured workflow dispatch release.
+
+### Material changes
+
+- Bind worker prompts and dispatch envelopes to exact configured PLAN/VERIFY/diagnostics contracts.
+- Represent provider-backed state explicitly so workers do not invent uppercase STATE or DIAGNOSTICS files.
+
+### Compatibility/configuration/schema
+
+- Existing workflow configuration remains authoritative, including custom state-provider and diagnostics paths.
+- No new configuration is required; helper-provider failures remain typed and fail closed.
+
+### Breaking/behavior changes
+
+- Normal Pi-next worker guidance no longer authorizes fallback probing of root, uppercase conventional, or other-harness workflow artifacts.
+
+### Security/safety
+
+- Pi-next and foreign harness workflow namespaces remain isolated; `.ps-next` state is never fallback authority.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.55 - pending release
 
 Streaming worker display release.

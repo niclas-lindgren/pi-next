@@ -38,9 +38,17 @@ function workflowPaths(workflow: PiNextConfig["workflow"]): WorkerWorkflowPaths 
   return {
     plan: workflow.planPath,
     verify: workflow.verifyPath,
-    state: workflow.stateDir,
+    state: workflow.stateProvider.type === "helper"
+      ? workflow.stateProvider.path || "provider-backed"
+      : "provider-backed",
     diagnostics: workflow.diagnosticsPath,
   };
+}
+
+function replaceBareWorkflowNames(text: string, workflow: PiNextConfig["workflow"]): string {
+  return text
+    .replace(/(?<![\/\w.-])PLAN\.md\b/g, workflow.planPath)
+    .replace(/(?<![\/\w.-])VERIFY\.md\b/g, workflow.verifyPath);
 }
 
 function loopTuningOverlay(cwd?: string): string {
@@ -143,7 +151,9 @@ Efficiency and safety:
 - Do not start a second issue or a second implementation task in this invocation.
 
 Return a concise status and the durable progress made.${shortlist}`;
-  return prompt.replaceAll("GitHub", policy.authorityName).replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy);
+  return replaceBareWorkflowNames(prompt, policy.workflow)
+    .replaceAll("GitHub", policy.authorityName)
+    .replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy);
 }
 
 export function buildLoopPrompt(input: {
@@ -205,7 +215,9 @@ export function buildLoopPrompt(input: {
     tokenSafeStepInstructions(input),
   ]
     .filter(Boolean)
-    .map((part) => part.replaceAll("GitHub", policy.authorityName).replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy))
+    .map((part) => replaceBareWorkflowNames(part, policy.workflow)
+      .replaceAll("GitHub", policy.authorityName)
+      .replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy))
     .join("\n\n");
 }
 
@@ -255,7 +267,9 @@ Perform an evidence-based, bounded Pi-next telemetry review using the selected m
 Return only a concise maintenance result after the tracked diagnostic is committed, pushed, verified on the remote branch, and the runtime JSON file has been written.
 
 ${methodology}`;
-  return prompt.replaceAll("GitHub", policy.authorityName).replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy);
+  return replaceBareWorkflowNames(prompt, policy.workflow)
+    .replaceAll("GitHub", policy.authorityName)
+    .replaceAll("AGENTS.md and the canonical docs it references are authoritative.", policy.repositoryPolicy);
 }
 
 export function tokenSafeStepInstructions(input: {
