@@ -8,6 +8,7 @@ import { changeFiles, conflictFiles, stagedFiles, workingFingerprint } from "./c
 import { failureReasonCode, recordLifecycleEvent } from "./lifecycle-telemetry";
 import { syncProjectStatus, type ProjectStatusAuthority } from "./project-status";
 import { commitsReachableFromRef, formatUnreachableCommitDetails } from "./util-core";
+import { issueWorkspaceIdentity } from "./issue-authority.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -66,17 +67,19 @@ async function commitExplicitPaths(cwd: string, paths: string[], message: string
   return git(cwd, ["rev-parse", "--short", "HEAD"]);
 }
 
-const BRANCH_PREFIX = "pi-next/issue-";
+const BRANCH_PREFIX = "agent/issue-";
 
+/**
+ * Checkpoints share the leased issue branch. Run IDs remain caller metadata;
+ * they must still be present and branch-safe, but never create a competing
+ * issue identity.
+ */
 export function checkpointBranchName(issueNumber: number, runId: string): string {
-  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
-    throw new Error("issueNumber must be a positive integer");
-  }
+  const identity = issueWorkspaceIdentity(issueNumber);
   const normalizedRun = runId.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   if (!normalizedRun) throw new Error("runId must contain a branch-safe identifier");
-  const branch = `${BRANCH_PREFIX}${issueNumber}/${normalizedRun}`;
-  if (branch.length > 200) throw new Error("runId produces an excessively long checkpoint branch");
-  return branch;
+  if (normalizedRun.length > 200) throw new Error("runId produces an excessively long checkpoint branch");
+  return identity.branch;
 }
 
 export async function assertCleanGitState(cwd: string, allowUnstaged = false): Promise<void> {
