@@ -11,7 +11,7 @@ import {
   renderWorkerEnvelope,
   selectWorkerSkills,
 } from "../src/coordination/worker-dispatch.ts";
-import { buildPiNextPrompt, resolveWorkerSkill } from "../extensions/pi-next/prompt.ts";
+import { buildLoopPrompt, buildPiNextPrompt, resolveWorkerSkill } from "../extensions/pi-next/prompt.ts";
 import { DEFAULT_PI_NEXT_CONFIG } from "../src/coordination/config.ts";
 
 test("worker role and capability are derived from controller phase", () => {
@@ -77,6 +77,28 @@ test("custom workflow paths are bound into the worker prompt", async () => {
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test("plan repair dispatch is planning-only and bounded", () => {
+  const prompt = buildLoopPrompt({
+    mode: "resume",
+    runId: "repair-run",
+    step: 2,
+    maxSteps: 10,
+    remainingIssues: 1,
+    hasPlan: true,
+    planRepair: {
+      issueNumber: 641,
+      errors: ["Task missing Files: render marketing root", "Task missing Approach: render marketing root"],
+      attempt: 1,
+      maxAttempts: 2,
+    },
+    dispatch: createWorkerDispatch({ phase: "planning", hasPlan: true, issueNumber: 641 }),
+  });
+  assert.match(prompt, /PLAN REPAIR MODE \(attempt 1\/2\)/);
+  assert.match(prompt, /Do not edit product source, tests, or requirements/);
+  assert.match(prompt, /Do not implement any product task/);
+  assert.match(prompt, /Task missing Files/);
 });
 
 test("default issue prompt is compact and does not inject legacy long-form policy", () => {

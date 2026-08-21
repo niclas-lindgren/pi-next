@@ -422,7 +422,13 @@ export async function claimLoopIssue(
         runId: state.runId,
         authority: workAuthorityOverride,
       });
-      validateWorkspacePlan(workspace, activeIssueNumber, { runId: state.runId });
+      // Missing task Files/Approach is a bounded planning defect after
+      // canonical ownership has been proven; the worker gets one repair turn
+      // instead of this handoff containing an otherwise ready issue.
+      validateWorkspacePlan(workspace, activeIssueNumber, {
+        runId: state.runId,
+        allowTaskMetadata: true,
+      });
     } catch (error) {
       throw new IssueHandoffError({
         issueNumber: activeIssueNumber,
@@ -528,7 +534,10 @@ export async function claimLoopIssue(
       runId: state.runId,
       authority: workAuthorityOverride,
     });
-    validateWorkspacePlan(workspace, resolvedIssueNumber, { runId: state.runId });
+    validateWorkspacePlan(workspace, resolvedIssueNumber, {
+      runId: state.runId,
+      allowTaskMetadata: true,
+    });
   } catch (error) {
     try {
       await releaseIssueLease(authority, lease, {
@@ -563,6 +572,7 @@ export async function claimLoopIssue(
     activeIssueNumber: resolvedIssueNumber,
     activeWorkspace: workspace,
     activeLease: lease,
+    planRepair: undefined,
     updatedAt: loopNow(),
   };
   writeJsonAtomic(loopStateFile(cwd, state.runId), next);

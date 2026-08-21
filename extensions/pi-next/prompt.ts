@@ -159,6 +159,13 @@ export function buildLoopPrompt(input: {
   planFreshness?: string;
   /** Controller-authored recovery context; never infer recovery from prose. */
   recoveryReason?: string;
+  /** A malformed owned PLAN gets a planning-only, bounded repair turn. */
+  planRepair?: {
+    issueNumber: number;
+    errors: string[];
+    attempt: number;
+    maxAttempts: number;
+  };
   dispatch?: WorkerDispatchPolicy;
 }): string {
   const policy = promptPolicy(input.cwd ? loadPiNextConfig(input.cwd) : undefined);
@@ -190,6 +197,9 @@ export function buildLoopPrompt(input: {
     freshness,
     input.recoveryReason?.trim()
       ? `AUTOMATIC RECOVERY: The prior worker exited without a loop_result. The controller preserved the same issue lease and worktree. Inspect and continue the existing issue work; do not reset, stash, discard, or switch issues. Recovery note: ${input.recoveryReason.trim()}`
+      : "",
+    input.planRepair
+      ? `PLAN REPAIR MODE (attempt ${input.planRepair.attempt}/${input.planRepair.maxAttempts}) for issue #${input.planRepair.issueNumber}: the canonical owned PLAN is structurally valid but task metadata is incomplete. Repair only the configured PLAN path and related workflow evidence. Do not edit product source, tests, or requirements; preserve completed checkboxes, logs, dirty issue-local work, and every task/acceptance criterion. Inspect the repository and live authority as needed to supply exact Files and Approach values for every listed defect:\n${input.planRepair.errors.map((error) => `- ${error}`).join("\\n")}\nDo not implement any product task. Revalidate the complete PLAN, commit only the workflow repair with explicit paths, and report loop_result=continue. If the metadata cannot be determined safely, leave the PLAN unchanged and report a concrete bounded failure.`
       : "",
     overlay,
     tokenSafeStepInstructions(input),

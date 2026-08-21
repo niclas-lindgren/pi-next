@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 import {
+  pendingPlanRepair,
   validateCanonicalExecutionState,
   validateWorkspacePlan,
 } from "./execution-boundary.ts";
@@ -74,6 +75,8 @@ import { classifyFailure, IssueBoundaryFailure } from "./failure-scope.ts";
 const MAX_TRANSITIONS_PER_SESSION = 3;
 /** Maximum fresh workers for one normalized missing-result failure. */
 export const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3;
+/** Maximum planning-only attempts for one unchanged malformed PLAN. */
+export const DEFAULT_MAX_PLAN_REPAIR_ATTEMPTS = 2;
 
 /**
  * Kept as a controller export for existing integrations; the policy itself is
@@ -955,7 +958,10 @@ async function runOneStep(
     lastReason: undefined,
   };
   validateCanonicalExecutionState(ctx.cwd, state);
-  validateWorkspacePlan(ctx.cwd, state.activeIssueNumber as number, { runId: state.runId });
+  validateWorkspacePlan(ctx.cwd, state.activeIssueNumber as number, {
+    runId: state.runId,
+    allowTaskMetadata: true,
+  });
   const runtimeCwd = runtimeCwdFor(ctx.cwd, state);
   writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), state);
   removeFile(loopResultFile(runtimeCwd, state.runId));
@@ -986,6 +992,50 @@ async function runOneStep(
       "Issue-plan execution requires an active lease and canonical workspace before model execution",
       plan.kind === "resolved" ? [plan.path] : [],
     );
+  }
+  const activeIssueNumber = state.activeIssueNumber;
+  const pendingRepair = hasPlan && activeIssueNumber
+    ? pendingPlanRepair(ctx.cwd, activeIssueNumber)
+    : undefined;
+  let planRepair = state.planRepair;
+  if (pendingRepair) {
+    const attempts = (planRepair?.attempts || 0) + 1;
+    const maxAttempts = planRepair?.maxAttempts || DEFAULT_MAX_PLAN_REPAIR_ATTEMPTS;
+    if (attempts > maxAttempts) {
+      const reason = `PLAN task metadata repair exhausted after ${maxAttempts} bounded attempts (${pendingRepair.errors.join("; ")})`;
+      recordLifecycleEvent(runtimeCwdFor(ctx.cwd, state), {
+        event: "issue_contained",
+        issueNumber: activeIssueNumber as number,
+        runId: state.runId,
+        outcome: "failure",
+        reasonCode: "plan_repair_exhausted",
+        containment: {
+          scope: "issue-local",
+          stage: "workspace-validation",
+          code: "plan_repair_exhausted",
+          paths: [pendingRepair.path],
+          leaseReleased: false,
+        },
+      });
+      throw new IssueBoundaryFailure(
+        activeIssueNumber as number,
+        "workspace-validation",
+        reason,
+        [pendingRepair.path],
+      );
+    }
+    planRepair = {
+      attempts,
+      maxAttempts,
+      fingerprint: pendingRepair.fingerprint,
+      lastErrors: pendingRepair.errors,
+      updatedAt: loopNow(),
+    };
+    state = { ...state, planRepair, updatedAt: loopNow() };
+    writeJsonAtomic(runtimeCwdFor(ctx.cwd, state), state);
+  } else if (planRepair) {
+    state = { ...state, planRepair: undefined, updatedAt: loopNow() };
+    writeJsonAtomic(runtimeCwdFor(ctx.cwd, state), state);
   }
   const planFreshnessResult = hasPlan
     ? await activePlanFreshness(ctx.cwd)
@@ -1048,7 +1098,10 @@ async function runOneStep(
   let telemetry: WorkerTelemetryReport = { status: "unavailable" };
   let phase: "planning" | "implementation";
   try {
-    phase = hasPlan ? "implementation" : "planning";
+    // An owned but semantically incomplete PLAN is never handed to an
+    // implementation worker. The planning role is deliberately reused for a
+    // bounded metadata-only repair turn.
+    phase = pendingRepair ? "planning" : hasPlan ? "implementation" : "planning";
     // A child Pi process does not inherit the parent's selected model. Use the
     // explicit role policy when configured, otherwise carry the active parent
     // model across so `pi --model provider/model` also works for workers.
@@ -1064,7 +1117,7 @@ async function runOneStep(
       : undefined;
     const dispatch = createWorkerDispatch({
       phase,
-      hasPlan,
+      hasPlan: hasPlan && !pendingRepair,
       issueNumber: state.activeIssueNumber,
       modelPolicy,
     });
@@ -1082,6 +1135,14 @@ async function runOneStep(
         candidateShortlist: shortlist.text,
         candidateSearchExhausted: shortlist.exhausted,
         planFreshness,
+        planRepair: pendingRepair && planRepair
+          ? {
+              issueNumber: state.activeIssueNumber as number,
+              errors: pendingRepair.errors,
+              attempt: planRepair.attempts,
+              maxAttempts: planRepair.maxAttempts,
+            }
+          : undefined,
         recoveryReason:
           state.recovery?.lastOutcome === "resuming_same_issue"
             ? state.recovery.lastReason

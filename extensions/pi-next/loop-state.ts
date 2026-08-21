@@ -79,6 +79,15 @@ export type LoopIssueDisposition = "active" | "completed" | "deferred" | "blocke
 /** Increment this when the meaning of convergence counters changes. */
 export const CONVERGENCE_BUDGET_POLICY_VERSION = 1;
 
+/** Bounded planning-only repair evidence for an owned malformed PLAN. */
+export interface PlanRepairState {
+  attempts: number;
+  maxAttempts: number;
+  fingerprint?: string;
+  lastErrors?: string[];
+  updatedAt?: string;
+}
+
 /** Durable, bounded recovery evidence for a worker boundary without a result. */
 export interface LoopRecoveryState {
   missingLoopResults: number;
@@ -168,6 +177,8 @@ export interface LoopState {
   activeIssueNumber?: number;
   activeWorkspace?: string;
   activeLease?: Omit<IssueLease, "version"> & Partial<Pick<IssueLease, "version">>;
+  /** Present while a canonical PLAN awaits bounded planning repair. */
+  planRepair?: PlanRepairState;
 }
 
 export interface LoopResult {

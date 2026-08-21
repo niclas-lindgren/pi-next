@@ -71,6 +71,45 @@ interface PlanRepair {
   fields: string[];
 }
 
+/**
+ * Task metadata is workflow structure, not product authority. It may be
+ * repaired by the bounded planning worker, but every other validation defect
+ * remains fail-closed until it is reconciled from live authority.
+ */
+export function isPlanTaskMetadataDefect(errors: readonly string[]): boolean {
+  return errors.length > 0 && errors.every((error) =>
+    /^Task missing (?:Files|Approach): /.test(error),
+  );
+}
+
+export interface PendingPlanRepair {
+  path: string;
+  errors: string[];
+  /** Stable across task-name/line-number changes for bounded retry accounting. */
+  fingerprint: string;
+}
+
+export function pendingPlanRepair(
+  workspace: string,
+  issueNumber: number,
+): PendingPlanRepair | undefined {
+  const plan = resolvePlanIdentity(workspace);
+  if (
+    plan.kind !== "resolved" ||
+    plan.issueNumber !== issueNumber ||
+    plan.provenance !== "canonical"
+  ) return undefined;
+  const errors = validatePlan(readFileSync(plan.path, "utf8"));
+  if (!isPlanTaskMetadataDefect(errors)) return undefined;
+  const files = errors.filter((error) => error.startsWith("Task missing Files:")).length;
+  const approaches = errors.filter((error) => error.startsWith("Task missing Approach:")).length;
+  return {
+    path: plan.path,
+    errors,
+    fingerprint: `task-metadata:files=${files};approaches=${approaches}`,
+  };
+}
+
 /** Repair only formatting that cannot change issue authority or task meaning. */
 function repairPlanStructure(
   path: string,
@@ -133,7 +172,7 @@ function validateArtifactOwnership(workspace: string, issueNumber: number): Retu
 export function validateWorkspacePlan(
   workspace: string,
   issueNumber: number,
-  options: { runId?: string; allowSemantic?: boolean } = {},
+  options: { runId?: string; allowSemantic?: boolean; allowTaskMetadata?: boolean } = {},
 ): void {
   const artifacts = validateArtifactOwnership(workspace, issueNumber);
   const plans = artifacts.filter((artifact) => artifact.kind === "plan");
@@ -189,7 +228,11 @@ export function validateWorkspacePlan(
   const repair = repairPlanStructure(plan.path, contents, issueNumber);
   if (repair) {
     const repairedErrors = validatePlan(readFileSync(plan.path, "utf8"));
-    if (repairedErrors.length && !options.allowSemantic) {
+    if (
+      repairedErrors.length &&
+      !options.allowSemantic &&
+      !(options.allowTaskMetadata && isPlanTaskMetadataDefect(repairedErrors))
+    ) {
       throw new PlanAuthorityError("unresolved", `PLAN.md could not be safely repaired: ${repairedErrors.join("; ")}`, [plan.path]);
     }
     recordLifecycleEvent(workspace, {
@@ -203,7 +246,11 @@ export function validateWorkspacePlan(
     return;
   }
   const errors = validatePlan(contents);
-  if (errors.length && !options.allowSemantic) {
+  if (
+    errors.length &&
+    !options.allowSemantic &&
+    !(options.allowTaskMetadata && isPlanTaskMetadataDefect(errors))
+  ) {
     throw new PlanAuthorityError(
       "unresolved",
       `PLAN.md contains unsafe or ambiguous structure and cannot be safely repaired: ${errors.join("; ")}`,
@@ -273,12 +320,27 @@ export async function reconcileWorkspacePlan(
     if (existsSync(temporary)) unlinkSync(temporary);
   }
   const remaining = validatePlan(readFileSync(planPath, "utf8"));
-  if (remaining.length) {
+  if (remaining.length && !isPlanTaskMetadataDefect(remaining)) {
     throw new PlanAuthorityError(
       "unresolved",
       `PLAN.md could not be reconciled from live authority: ${remaining.join("; ")}`,
       [planPath],
     );
+  }
+  if (remaining.length) {
+    // Missing task metadata is intentionally left for the planning-repair
+    // worker. It has already passed canonical ownership and live-authority
+    // reconciliation, so containing the issue here would make a ready issue
+    // permanently ineligible before repository reasoning can occur.
+    recordLifecycleEvent(workspace, {
+      event: "plan_repair_requested",
+      issueNumber,
+      runId: options.runId || "unknown",
+      outcome: "recovered",
+      reasonCode: "plan_task_metadata_missing",
+      repair: { paths: [planPath], fields: ["task metadata"] },
+    });
+    return;
   }
   recordLifecycleEvent(workspace, {
     event: "plan_reconciled",
