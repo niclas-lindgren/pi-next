@@ -136,6 +136,7 @@ export class WorkerDisplayController implements WorkerDisplaySink {
   private readonly workers = new Map<string, WorkerDisplayState>();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private settledTimers = new Set<ReturnType<typeof setTimeout>>();
+  private settledTimersByKey = new Map<string, ReturnType<typeof setTimeout>>();
   private renderScheduled = false;
   private disposed = false;
   private hostContext: ExtensionCommandContext | undefined;
@@ -187,6 +188,8 @@ export class WorkerDisplayController implements WorkerDisplaySink {
   liveDelta(delta: WorkerLiveTextDelta): void {
     if (this.disposed) return;
     this.increment("visibleTextDeltas");
+    const key = keyOf(delta.issueNumber, delta.runId);
+    this.revive(key);
     const state = this.ensure(delta.issueNumber, delta.runId);
     state.status = "running";
     // Always retain the larger (verbose) buffer; compact rendering trims its
@@ -199,6 +202,7 @@ export class WorkerDisplayController implements WorkerDisplaySink {
 
   event(logEvent: WorkerWorkLogEvent): void {
     if (this.disposed) return;
+    this.revive(keyOf(logEvent.issueNumber, logEvent.runId));
     const state = this.ensure(logEvent.issueNumber, logEvent.runId);
     state.phase = logEvent.phase;
     state.lastActivityAt = Date.now();
@@ -237,15 +241,42 @@ export class WorkerDisplayController implements WorkerDisplaySink {
     this.scheduleRender();
     // Keep the settled summary visible briefly instead of vanishing
     // instantly, then drop it so the widget never accumulates dead runs.
+    const previousTimer = this.settledTimersByKey.get(key);
+    if (previousTimer) clearTimeout(previousTimer);
     const timer = setTimeout(() => {
       this.settledTimers.delete(timer);
+      this.settledTimersByKey.delete(key);
       if (!this.disposed && this.workers.get(key) === state) {
         this.workers.delete(key);
         this.scheduleRender();
       }
     }, SETTLED_RETENTION_MS);
     this.settledTimers.add(timer);
+    this.settledTimersByKey.set(key, timer);
     timer.unref?.();
+  }
+
+  /** Publish deterministic parent-controller activity under the same issue/run identity. */
+  controllerActivity(
+    issueNumber: number | undefined,
+    runId: string | undefined,
+    summary: string,
+  ): void {
+    this.event({
+      issueNumber,
+      runId,
+      phase: "recovery",
+      kind: "tool",
+      summary: summary.slice(0, 300),
+    });
+  }
+
+  private revive(key: string): void {
+    const timer = this.settledTimersByKey.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.settledTimers.delete(timer);
+    this.settledTimersByKey.delete(key);
   }
 
   private ensure(
@@ -448,6 +479,7 @@ export class WorkerDisplayController implements WorkerDisplaySink {
     this.heartbeat = undefined;
     for (const timer of this.settledTimers) clearTimeout(timer);
     this.settledTimers.clear();
+    this.settledTimersByKey.clear();
     this.workers.clear();
     const ctx = this.hostContext;
     this.hostContext = undefined;

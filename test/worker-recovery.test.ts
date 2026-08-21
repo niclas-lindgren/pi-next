@@ -67,9 +67,25 @@ test("missing loop_result preserves dirty issue work and resumes the same issue 
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     };
     const authority = { read: async () => lease };
-    const first = await reconcileMissingLoopResult(root, state(root, workspace, lease), authority, { maxAttempts: 1 });
+    const activity: string[] = [];
+    const first = await reconcileMissingLoopResult(
+      root,
+      state(root, workspace, lease),
+      authority,
+      { maxAttempts: 1, onActivity: (summary) => activity.push(summary) },
+    );
 
     assert.equal(first.outcome, "resuming_same_issue");
+    assert.deepEqual(activity, [
+      "reconciling missing worker result · attempt 1/1",
+      "validating canonical worktree",
+      "reading authoritative issue lease",
+      "authoritative issue lease confirmed",
+      "checking repository state",
+      "repository state is recoverable; preserving issue-local changes",
+      "inspecting durable recovery evidence",
+      "no durable completion evidence; preparing same-issue resume",
+    ]);
     assert.equal(first.state.status, "running");
     assert.equal(first.state.activeIssueNumber, 7);
     assert.equal(first.state.settledStep, 1);
@@ -87,14 +103,17 @@ test("missing loop_result preserves dirty issue work and resumes the same issue 
         return lease;
       },
     };
+    const transientActivity: string[] = [];
     const transient = await reconcileMissingLoopResult(
       root,
       state(root, workspace, lease),
       transientAuthority,
-      { maxAttempts: 3 },
+      { maxAttempts: 3, onActivity: (summary) => transientActivity.push(summary) },
     );
     assert.equal(transient.outcome, "resuming_same_issue");
     assert.equal(transientReads, 2, "transient authority failures are retried before blocking");
+    assert.ok(transientActivity.includes("authority read transient · retry 1/3"));
+    assert.ok(transientActivity.includes("retrying authoritative lease read · attempt 2/3"));
     const transientFingerprint = transient.state.recovery?.lastFingerprint;
     assert.equal(
       transient.state.recovery?.attemptsByFingerprint[transientFingerprint || ""],
