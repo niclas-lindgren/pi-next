@@ -124,6 +124,21 @@ function notifyLive(
   safeNotify(ctx, message, level);
 }
 
+/**
+ * Resolve the host context for a replacement worker after a session boundary.
+ * The captured command context is deliberately not a fallback here: using it
+ * would turn a disposed session into a silent replacement-worker failure.
+ */
+export function replacementWorkerContext(issueNumber?: number): ExtensionCommandContext {
+  const live = getLiveCtx();
+  if (!live) {
+    throw new Error(
+      `Replacement worker startup failed for issue #${issueNumber ?? "?"}: no live host context is available after missing-result recovery`,
+    );
+  }
+  return live;
+}
+
 function workerActivityText(event: WorkerWorkLogEvent): string {
   const issue = event.issueNumber ? `#${event.issueNumber}` : "#?";
   const run = event.runId ? ` · ${event.runId.slice(0, 12)}` : "";
@@ -634,12 +649,21 @@ export async function runOwnedIssueCycle(
         // child's registered loop_result tool can resolve/validate the real
         // run authority via PI_NEXT_COORDINATION_CWD instead of depending on
         // a worktree-relative `.pi/runtime` path or symlink.
+        let replacementWorkerPending = false;
         const visibleWorker: IssueWorkerRunner = (
           workerCwd,
           prompt,
           options = {},
-        ) =>
-          runIssueWorker(workerCwd, prompt, {
+        ) => {
+          if (replacementWorkerPending) {
+            replacementWorkerPending = false;
+            display?.controllerActivity(
+              prepared.activeIssueNumber,
+              prepared.runId,
+              "replacement worker started",
+            );
+          }
+          return runIssueWorker(workerCwd, prompt, {
             ...options,
             coordinationCwd: options.coordinationCwd ?? coordinationCwd,
             onActivity:
@@ -658,14 +682,31 @@ export async function runOwnedIssueCycle(
             onProgress: options.onProgress,
             progressIntervalMs: options.progressIntervalMs ?? 10_000,
           });
+        };
         // A worker boundary is recoverable only while this issue's heartbeat
         // still owns the lease. Reconcile before releasing it, and always
         // return to this same issue; candidate selection happens below only
         // after the normal issue-boundary cleanup.
         const recoveryAuthority = issueAuthority;
+        let replacementWorker = false;
         while (true) {
+          // The previous worker may have crossed ctx.newSession(), which
+          // invalidates the command context captured by this outer cycle.
+          // Initial entry may use the command context for compatibility with
+          // direct callers, but every replacement must prove that the shared
+          // lifecycle registry has a current host context.
+          const cycleCtx = replacementWorker
+            ? replacementWorkerContext(prepared.activeIssueNumber)
+            : getLiveCtx() ?? ctx;
+          if (replacementWorker) {
+            display?.controllerActivity(
+              prepared.activeIssueNumber,
+              prepared.runId,
+              "replacement worker attached to live session",
+            );
+          }
           await runLoopSteps(
-            { ...ctx, cwd: targetCwd } as ExtensionCommandContext,
+            { ...cycleCtx, cwd: targetCwd } as ExtensionCommandContext,
             state,
             visibleWorker,
             runtime,
@@ -694,6 +735,8 @@ export async function runOwnedIssueCycle(
             state.runId,
             "starting replacement worker",
           );
+          replacementWorker = true;
+          replacementWorkerPending = true;
         }
       } catch (error) {
         const classification = classifyFailure(error, {
