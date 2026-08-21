@@ -71,7 +71,7 @@ import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
-import { getLiveCtx, sessionIdentity } from "./live-ctx.ts";
+import { bindLiveAutoRun, getLiveCtx, sessionIdentity } from "./live-ctx.ts";
 import { renderLoopStatus } from "./loop-status.ts";
 import {
   createSupervisorRuntime,
@@ -1215,6 +1215,7 @@ export async function runPiNextLoop(
       lastReason: "Resumed by user from a clean boundary",
     };
     writeJsonAtomic(loopStateFile(ctx.cwd, resumed.runId), resumed);
+    bindLiveAutoRun(ctx, resumed.runId);
     await new ForegroundSupervisor(ctx, onWorkLog, onWorkerState).launch(resumed);
     return;
   }
@@ -1241,6 +1242,10 @@ export async function runPiNextLoop(
     coordinationCwd: ctx.cwd,
   };
   writeJsonAtomic(loopStateFile(ctx.cwd, state.runId), state);
+  // Establish presentation identity before the supervisor can cross its first
+  // ctx.newSession() boundary. This is not an ownership decision; the lease
+  // and canonical workspace remain the workflow authority.
+  bindLiveAutoRun(ctx, state.runId);
   await new ForegroundSupervisor(ctx, onWorkLog, onWorkerState).launch(state);
 }
 

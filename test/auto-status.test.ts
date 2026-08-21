@@ -46,10 +46,18 @@ function state(runId: string, updatedAt: string, overrides: Partial<LoopState> =
   };
 }
 
-function context(cwd: string, statuses: Array<[string, string | undefined]>, sessionId = "session-a"): ExtensionCommandContext {
+function context(
+  cwd: string,
+  statuses: Array<[string, string | undefined]>,
+  sessionId = "session-a",
+  sessionFile?: string,
+): ExtensionCommandContext {
   return {
     cwd,
-    sessionManager: { getSessionId: () => sessionId },
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getSessionFile: () => sessionFile,
+    },
     ui: {
       setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
     },
@@ -207,6 +215,68 @@ test("session replacement keeps the live heartbeat attached to the new context",
     const beforeShutdown = liveStatuses.length;
     events.get("session_shutdown")?.({}, liveCtx);
     assert.equal(liveStatuses.length, beforeShutdown);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("bound footer handoff survives repeated mocked newSession transitions before the heartbeat", async () => {
+  const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-bound-handoff-"));
+  try {
+    const runId = "bound-run";
+    const runDir = join(cwd, ".pi", "runtime", "pi-next-loops", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:00.000Z", {
+      activeIssueNumber: 70,
+      sessionId: "old-session",
+    })));
+    // A second same-session record makes the generic selector deliberately
+    // ambiguous. The bound run must still be carried by its exact ID.
+    const historicalDir = join(cwd, ".pi", "runtime", "pi-next-loops", "historical-run");
+    await mkdir(historicalDir, { recursive: true });
+    await writeFile(join(historicalDir, "state.json"), JSON.stringify(state("historical-run", "2026-01-01T00:00:01.000Z", {
+      activeIssueNumber: 71,
+      sessionId: "old-session",
+    })));
+
+    const events = new Map<string, (event: any, ctx: ExtensionCommandContext) => unknown>();
+    const pi = {
+      registerCommand: () => undefined,
+      on: (name: string, handler: (event: unknown, ctx: ExtensionCommandContext) => unknown) => events.set(name, handler),
+    } as unknown as ExtensionAPI;
+    registerPiNextCommands(pi);
+
+    const oldStatuses: Array<[string, string | undefined]> = [];
+    const oldCtx = context(cwd, oldStatuses, "old-session", "/tmp/session-old.json");
+    const stop = startAutoStatusHeartbeat(oldCtx, () => runId);
+    try {
+      assert.match(oldStatuses.at(-1)?.[1] || "", /#70/);
+      assert.equal(activeAutoStatusRun(cwd, undefined, "old-session"), undefined);
+
+      let currentCtx = oldCtx;
+      for (let transition = 0; transition < 3; transition += 1) {
+        const nextStatuses: Array<[string, string | undefined]> = [];
+        const nextFile = `/tmp/session-new-${transition}.json`;
+        const nextCtx = context(cwd, nextStatuses, `new-session-${transition}`, nextFile);
+        // This is the host's newSession ordering: shutdown, replacement
+        // session_start, then the withSession callback.
+        events.get("session_shutdown")?.({
+          type: "session_shutdown",
+          reason: "new",
+          targetSessionFile: nextFile,
+        }, currentCtx);
+        events.get("session_start")?.({
+          type: "session_start",
+          reason: "new",
+          previousSessionFile: currentCtx.sessionManager.getSessionFile?.(),
+        }, nextCtx);
+        assert.match(nextStatuses[0]?.[1] || "", /#70/);
+        assert.ok(nextStatuses.every(([, text]) => text !== undefined));
+        currentCtx = nextCtx;
+      }
+    } finally {
+      stop();
+    }
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
