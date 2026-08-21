@@ -291,6 +291,7 @@ export async function claimLoopIssue(
       authority,
       parseLeaseFromAuthority(JSON.stringify(activeLease)),
       new Date(),
+      { cwd, recordEvent: recordLifecycleEvent },
     );
     let workspace: string;
     try {

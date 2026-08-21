@@ -7,10 +7,7 @@ import {
   issueWorkspaceIdentity,
   type IssueLeaseAuthority,
 } from "./issue-leases.ts";
-import {
-  isIssueLeaseFresh,
-  issueLeaseMatchesOwner,
-} from "./issue-authority.ts";
+import { issueLeaseMatchesOwner } from "./issue-authority.ts";
 import { registerPiNextCommands as registerBasePiNextCommands } from "./commands.ts";
 import {
   currentSupervisorStatus,
@@ -219,10 +216,12 @@ export function startAutoStatusHeartbeat(
 }
 
 /**
- * Recover only the local run that still owns the authoritative fresh issue
- * lease. Multiple historical run records may point at the same issue after
- * restarts; choosing by local status/mtime alone can select an obsolete owner
- * and then fail (or, worse, attempt to compete with) the real lease holder.
+ * Recover only the local run that still matches the authoritative issue lease.
+ * Both fresh and expired leases are eligible: the latter must flow through
+ * reconcileIssueLeaseForResume()'s compare-and-swap takeover before execution.
+ * Multiple historical run records may point at the same issue after restarts;
+ * choosing by local status/mtime alone can select an obsolete owner and then
+ * fail (or, worse, attempt to compete with) the real lease holder.
  */
 export async function recoverableAbandonedAutoRun(
   cwd: string,
@@ -257,12 +256,13 @@ export async function recoverableAbandonedAutoRun(
       liveLease = await authority.read(issueNumber);
       leases.set(issueNumber, liveLease);
     }
-    if (!liveLease || !isIssueLeaseFresh(liveLease)) continue;
-    if (!issueLeaseMatchesOwner(liveLease, state.activeLease!)) continue;
+    if (!liveLease || !issueLeaseMatchesOwner(liveLease, state.activeLease!)) continue;
 
-    // We found the one local state that owns the current GitHub lease. Never
-    // fall through to an older run for the same issue if this owner is still
-    // live/ambiguous; that older state is definitively obsolete.
+    // We found the one local state that identifies the current GitHub lease.
+    // claimLoopIssue() will preserve a matching fresh lease or CAS-reclaim a
+    // matching stale lease before ensureIssueWorktree() or worker execution.
+    // Never fall through to an older run for the same issue if this owner is
+    // still live/ambiguous; that older state is definitively obsolete.
     return locallyAbandoned(cwd, state) ? state : undefined;
   }
   return undefined;

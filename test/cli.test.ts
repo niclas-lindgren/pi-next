@@ -71,6 +71,8 @@ test("finalize requires candidate, authority fingerprint, and verification times
     "session-1",
     "--issue-updated-at",
     "2026-08-19T00:00:00Z",
+    "--cwd",
+    tmpdir(),
   ]);
   assert.equal(missingCandidate.ok, false);
   assert.equal((missingCandidate as { code: string }).code, "INVALID_ARGS");
@@ -88,6 +90,8 @@ test("finalize requires candidate, authority fingerprint, and verification times
     "session-1",
     "--candidate",
     "a".repeat(40),
+    "--cwd",
+    tmpdir(),
   ]);
   assert.equal(missingUpdatedAt.ok, false);
   assert.equal((missingUpdatedAt as { code: string }).code, "INVALID_ARGS");
@@ -107,6 +111,8 @@ test("finalize requires candidate, authority fingerprint, and verification times
     "a".repeat(40),
     "--issue-updated-at",
     "2026-08-19T00:00:00Z",
+    "--cwd",
+    tmpdir(),
   ]);
   assert.equal(missingFingerprint.ok, false);
   assert.equal((missingFingerprint as { code: string }).code, "INVALID_ARGS");

@@ -263,21 +263,24 @@ export class ForegroundSupervisor {
   /**
    * Authority-first, issue-centric recovery on supervisor start (#612).
    *
-   * The only question that decides recovery is "does a fresh GitHub issue
-   * lease identify a local run as its owner?" — never local status/mtime
-   * ordering, a `running`-looking loop-state file, or a newer-timestamp
-   * record. `recoverableAbandonedAutoRun` reads the current authoritative
-   * lease via the reusable `src/coordination/` module.
-   * and returns at most the one local run that both (a) still owns that
-   * fresh lease and (b) has no live local worker process; every other
-   * historical loop record for the same or a different issue is ignored and
-   * can never compete for ownership. When a genuine owner is found, its
-   * canonical `.worktrees/issue-N` is resumed without resetting, stashing,
-   * or auto-committing any dirty changes — `prepareAbandonedAutoResume`
-   * only marks the interrupted transition settled and preserves the diff —
-   * and the fresh worker is launched through the normal resume path so it
-   * is explicitly told (via the resume prompt) that it is recovering
-   * interrupted work and must inspect/reconcile the existing diff.
+   * The only question that decides recovery is "does the authoritative GitHub
+   * issue lease identify this local run as its owner?" — never local
+   * status/mtime ordering, a `running`-looking loop-state file, or a newer-
+   * timestamp record. `recoverableAbandonedAutoRun` reads the current
+   * authoritative lease via the reusable `src/coordination/` module and
+   * returns at most the one local run that (a) still matches that lease and
+   * (b) has no live local worker process. A matching stale lease is passed to
+   * the normal resume path, where `reconcileIssueLeaseForResume` performs the
+   * bounded CAS takeover; foreign or missing authority remains ineligible.
+   * Every other historical loop record for the same or a different issue is
+   * ignored and can never compete for ownership. When a genuine owner is
+   * found, its canonical `.worktrees/issue-N` is resumed without resetting,
+   * stashing, or auto-committing any dirty changes —
+   * `prepareAbandonedAutoResume` only marks the interrupted transition settled
+   * and preserves the diff — and the fresh worker is launched through the
+   * normal resume path so it is explicitly told (via the resume prompt) that
+   * it is recovering interrupted work and must inspect/reconcile the existing
+   * diff.
    */
   static async recoverOnStart(
     ctx: ExtensionCommandContext,
