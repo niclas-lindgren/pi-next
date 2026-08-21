@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.61 - pending release
+
+Parent-host memory safety release.
+
+### Material changes
+
+- Record bounded, payload-free parent memory samples across supervisor, session, worker, and issue boundaries.
+- Stop before a new worker under sustained heap pressure and preserve the active lease/worktree for restart recovery.
+- Release the final live host-context bridge after the last supervisor settles and cap unterminated worker stream/parser state.
+
+### Compatibility/configuration/schema
+
+- Existing loop state remains compatible; memory health is optional and runtime samples remain outside workflow artifacts.
+- Optional environment overrides are available for diagnostics: `PI_NEXT_HOST_MEMORY_HIGH_RATIO`, `PI_NEXT_HOST_MEMORY_CRITICAL_RATIO`, and `PI_NEXT_HOST_MEMORY_CRITICAL_STREAK`.
+
+### Breaking/behavior changes
+
+- Critical parent heap pressure settles the run as `stopped` with `restart_required` evidence instead of launching another worker.
+
+### Security/safety
+
+- Memory telemetry contains only numeric resource observations and bounded lifecycle identifiers; prompts, transcripts, and tool payloads are never persisted.
+- Dirty issue work and authoritative recovery ownership are preserved across the pressure stop.
+
+### Upgrade guidance
+
+- Restart Pi and use normal abandoned-run recovery after a `restart_required` stop.
+
 ## 0.2.60 - pending release
 
 Scheduler claim-race handling release.
