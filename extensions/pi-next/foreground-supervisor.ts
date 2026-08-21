@@ -1,6 +1,12 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { bindLiveAutoRun, clearLiveCtx, getLiveCtx, sessionIdentity } from "./live-ctx.ts";
+import {
+  bindLiveAutoRun,
+  clearLiveAutoRunBinding,
+  clearLiveCtx,
+  getLiveCtx,
+  sessionIdentity,
+} from "./live-ctx.ts";
 import {
   prepareAbandonedAutoResume,
   recoverableAbandonedAutoRun,
@@ -252,6 +258,8 @@ export class ForegroundSupervisor {
    * bookkeeping; host calls use the live-context registry at the boundary.
    */
   private readonly cwd: string;
+  /** Non-owning test/initialization fallback; never keeps the host graph alive. */
+  private readonly fallbackCtx: WeakRef<ExtensionCommandContext>;
 
   private readonly runtime: SupervisorRuntime;
   private workerRuntime: IssueWorkerRuntime | null = null;
@@ -261,11 +269,16 @@ export class ForegroundSupervisor {
   private display: WorkerDisplayController | undefined;
 
   constructor(
-    private readonly ctx: ExtensionCommandContext,
+    ctx: ExtensionCommandContext,
     private readonly onWorkLog?: WorkerWorkLogSink,
     private readonly onWorkerState?: (runtime: IssueWorkerRuntime) => void,
   ) {
+    // ExtensionCommandContext owns the host session/history graph. Keep only
+    // its immutable cwd; all later host calls resolve the current context at
+    // lifecycle boundaries so a long-lived supervisor cannot retain the first
+    // session after ctx.newSession() (#69).
     this.cwd = ctx.cwd;
+    this.fallbackCtx = new WeakRef(ctx);
     this.runtime = createSupervisorRuntime();
   }
 
@@ -393,7 +406,9 @@ export class ForegroundSupervisor {
       this.phase = "running";
       await withSupervisorRuntime(this.runtime, async () => {
         let state = initial;
-        this.display = attachWorkerDisplay(getLiveCtx() ?? this.ctx, this.display);
+        const initialLiveCtx = getLiveCtx() ?? this.fallbackCtx.deref();
+        if (!initialLiveCtx) throw new Error("Cannot launch pi-next supervisor without a live host context");
+        this.display = attachWorkerDisplay(initialLiveCtx, this.display);
         while (state.status === "running" && state.remainingIssues > 0) {
           this.cyclesStarted += 1;
           this.workerPhase = undefined;
@@ -401,7 +416,8 @@ export class ForegroundSupervisor {
           // A worker/session transition may have invalidated the context
           // passed to the constructor. The cycle itself performs host calls,
           // so hand it the current live context while status remains data-only.
-          const liveCtx = getLiveCtx() ?? this.ctx;
+          const liveCtx = getLiveCtx() ?? this.fallbackCtx.deref();
+          if (!liveCtx) throw new Error("Cannot run pi-next issue cycle without a live host context");
           state = await runOwnedIssueCycle(
             liveCtx,
             state,
@@ -463,6 +479,7 @@ export class ForegroundSupervisor {
       this.display?.dispose();
       this.display = undefined;
       liveSupervisors.delete(supervisorKey(this.cwd, this.runId));
+      if (this.runId) clearLiveAutoRunBinding(this.cwd, this.runId);
       // The registry is a deliberate callback bridge during a run, but it
       // must not keep the final Pi session graph alive after the last
       // foreground supervisor settles. Concurrent supervisors retain the

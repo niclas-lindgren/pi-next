@@ -309,6 +309,7 @@ export function startAutoStatusHeartbeat(
     update();
     binding.active = false;
     persistStatusBinding(binding);
+    autoStatusBindings.delete(binding);
     cancel();
   };
   autoStatusHeartbeatCancellations.add(cancel);
