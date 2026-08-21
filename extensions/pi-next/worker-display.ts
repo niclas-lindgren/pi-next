@@ -216,7 +216,8 @@ export class WorkerDisplayController implements WorkerDisplaySink {
         text: logEvent.summary.split("\n")[0] || logEvent.summary,
       });
     } else if (logEvent.kind === "error") {
-      state.status = "failed";
+      // Tool failures are activity evidence, not a worker lifecycle result.
+      // The explicit finish() boundary owns terminal failed/aborted state.
       this.push(state, { kind: "error", text: logEvent.summary });
     } else if (logEvent.kind === "verify") {
       this.push(state, { kind: "verify", text: logEvent.summary });
