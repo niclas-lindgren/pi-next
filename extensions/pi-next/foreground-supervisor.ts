@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { getLiveCtx, sessionIdentity } from "./live-ctx.ts";
+import { clearLiveCtx, getLiveCtx, sessionIdentity } from "./live-ctx.ts";
 import {
   prepareAbandonedAutoResume,
   recoverableAbandonedAutoRun,
@@ -422,6 +422,11 @@ export class ForegroundSupervisor {
       this.display?.dispose();
       this.display = undefined;
       liveSupervisors.delete(supervisorKey(this.cwd, this.runId));
+      // The registry is a deliberate callback bridge during a run, but it
+      // must not keep the final Pi session graph alive after the last
+      // foreground supervisor settles. Concurrent supervisors retain the
+      // shared live context until their own final boundary.
+      if (liveSupervisors.size === 0) clearLiveCtx();
     }
     return this.reconcile();
   }

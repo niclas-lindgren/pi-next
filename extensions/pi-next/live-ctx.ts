@@ -31,6 +31,11 @@ export function getLiveCtx(): ExtensionCommandContext | undefined {
   return current;
 }
 
+/** Clear the host-context reference once no foreground supervisor remains. */
+export function clearLiveCtx(): void {
+  current = undefined;
+}
+
 /**
  * Stable host-session identity used to scope presentation state. A run may
  * replace its command context while progressing, but its originating session

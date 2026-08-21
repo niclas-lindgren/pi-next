@@ -79,6 +79,11 @@ import {
   WorkerFailureError,
 } from "./worker-failure.ts";
 import { classifyFailure, IssueBoundaryFailure } from "./failure-scope.ts";
+import {
+  memoryPressureReason,
+  observeHostMemory,
+  type HostMemoryBoundaryContext,
+} from "./host-memory.ts";
 
 const MAX_TRANSITIONS_PER_SESSION = 3;
 /** Maximum fresh workers for one normalized missing-result failure. */
@@ -115,6 +120,49 @@ interface StepSettlement {
   state: LoopState;
   terminal: boolean;
   outcome?: LoopOutcome;
+}
+
+/**
+ * Record a payload-free parent-host memory boundary and persist only the
+ * compact decision needed for restart/recovery. The detailed bounded sample
+ * ring lives in the runtime diagnostics file, never in loop state.
+ */
+export function observeLoopHostMemory(
+  cwd: string,
+  state: LoopState,
+  context: Omit<HostMemoryBoundaryContext, "runId"> & { boundary: string },
+): LoopState {
+  const runtimeCwd = runtimeCwdFor(cwd, state);
+  const observed = observeHostMemory(runtimeCwd, {
+    ...context,
+    runId: state.runId,
+    issueNumber: context.issueNumber ?? state.activeIssueNumber,
+    step: context.step ?? state.step,
+    sessionTransition: context.sessionTransition ?? state.sessionTransition,
+  });
+  const hostMemory: LoopState["hostMemory"] = {
+    status: observed.health.restartRequired ? "restart_required" : observed.health.pressure,
+    heapUsed: observed.sample.heapUsed,
+    heapLimit: observed.sample.heapLimit,
+    heapUsedDelta: observed.sample.heapUsedDelta,
+    criticalStreak: observed.health.criticalStreak,
+    observedAt: observed.sample.at,
+    boundary: observed.sample.boundary,
+    ...(observed.health.restartRequired ? { reason: memoryPressureReason(observed.health) } : {}),
+  };
+  const next: LoopState = {
+    ...state,
+    hostMemory,
+    ...(observed.health.restartRequired
+      ? {
+          status: "stopped" as const,
+          updatedAt: loopNow(),
+          lastReason: memoryPressureReason(observed.health),
+        }
+      : {}),
+  };
+  writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), next);
+  return next;
 }
 
 interface ApplyResultOptions {
@@ -1437,8 +1485,18 @@ async function runSessionBatch(
       return;
     }
 
+    state = observeLoopHostMemory(ctx.cwd, state, {
+      boundary: "worker_start",
+      sessionTransition: transition,
+    });
+    if (state.status !== "running") return;
     const settled = await runOneStep(ctx, state, transition, worker, runtime);
     state = settled.state;
+    state = observeLoopHostMemory(ctx.cwd, state, {
+      boundary: "worker_end",
+      sessionTransition: transition,
+    });
+    if (state.status !== "running") return;
     if (settled.terminal) return;
     if (
       settled.outcome === "done" ||
@@ -1526,11 +1584,21 @@ async function driveLoop(
         runId: state.runId,
         issueNumber: state.activeIssueNumber,
       });
+      state = observeLoopHostMemory(ctx.cwd, state, {
+        boundary: "before_session_transition",
+        sessionTransition: state.sessionTransition,
+      });
+      if (state.status !== "running") return;
       const workerCwd = ctx.cwd;
       await ctx.newSession({
         withSession: async (next: ExtensionCommandContext) => {
           const workerContext = { ...next, cwd: workerCwd } as ExtensionCommandContext;
           setLiveCtx(workerContext);
+          state = observeLoopHostMemory(workerCwd, state, {
+            boundary: "after_session_transition",
+            sessionTransition: state.sessionTransition,
+          });
+          if (state.status !== "running") return;
           // Every ctx.newSession() transition replaces the live ctx (#616);
           // re-register it so long-lived callbacks (worker progress/activity,
           // lease notifications, the live display widget) keep resolving the
@@ -1561,11 +1629,21 @@ async function driveLoop(
       runId: state.runId,
       issueNumber: state.activeIssueNumber,
     });
+    state = observeLoopHostMemory(ctx.cwd, state, {
+      boundary: "before_session_transition",
+      sessionTransition: state.sessionTransition,
+    });
+    if (state.status !== "running") return;
     const workerCwd = ctx.cwd;
     await ctx.newSession({
       withSession: async (next: ExtensionCommandContext) => {
         const workerContext = { ...next, cwd: workerCwd } as ExtensionCommandContext;
         setLiveCtx(workerContext);
+        state = observeLoopHostMemory(workerCwd, state, {
+          boundary: "after_session_transition",
+          sessionTransition: state.sessionTransition,
+        });
+        if (state.status !== "running") return;
         // See the identical note in the maintenance branch above (#616).
         attachWorkerDisplay(workerContext, display);
         try {
@@ -1605,6 +1683,10 @@ export async function runLoopSteps(
     runId: initial.runId,
     allowTaskMetadata: true,
   });
+  initial = observeLoopHostMemory(ctx.cwd, initial, {
+    boundary: "supervisor_start",
+  });
+  if (initial.status !== "running") return;
   // Callers may supply the owner-bound sink from their command context;
   // direct callers get a sink attached to this context. It is threaded through
   // every newSession() boundary instead of being routed through a singleton.
@@ -1628,9 +1710,11 @@ export async function runLoopSteps(
       onWorkerState: options.onWorkerState ?? observer?.onWorkerState,
       display: options.display ?? display,
     });
+  let finalMemoryBoundary = "supervisor_settle";
   try {
     await driveLoop(ctx, initial, observedWorker, runtime, display);
   } catch (error) {
+    finalMemoryBoundary = "supervisor_abort";
     const classification = classifyFailure(error, {
       stage: "execution",
       issueNumber: initial.activeIssueNumber,
@@ -1641,6 +1725,8 @@ export async function runLoopSteps(
     if (classification.scope === "issue-local") throw error;
     interruptLoop(ctx, initial, error);
   } finally {
+    const finalState = readLoopState(runtimeCwdFor(ctx.cwd, initial), initial.runId) || initial;
+    observeLoopHostMemory(ctx.cwd, finalState, { boundary: finalMemoryBoundary });
     // A driveLoop() chain that handed off to ctx.newSession() has already
     // replaced this generation via beginGeneration() — which already
     // recorded its teardown diagnostics — so teardown() below is a no-op in

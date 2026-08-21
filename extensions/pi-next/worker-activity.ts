@@ -76,6 +76,8 @@ const ASSISTANT_TEXT_LIMIT = 4_000;
 const PATH_LIMIT = 160;
 const MAX_PATHS = 4;
 const MAX_EVENTS_PER_WORKER = 300;
+const MAX_PENDING_LINE_CHARS = 256 * 1024;
+const MAX_TOOL_STARTS = 256;
 const INLINE_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
 const BLOCK_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const SENSITIVE_VALUE = /(api[_ -]?key|access[_ -]?token|token|secret|password|authorization|bearer)\s*[:=]\s*[^\s,;]+/gi;
@@ -564,6 +566,9 @@ export class IncrementalWorkerActivityParser {
 
   push(chunk: string | Buffer): void {
     this.pending += String(chunk);
+    if (this.pending.length > MAX_PENDING_LINE_CHARS) {
+      this.pending = this.pending.slice(-MAX_PENDING_LINE_CHARS);
+    }
     const lines = this.pending.split(/\r?\n/);
     this.pending = lines.pop() ?? "";
     for (const line of lines) this.parse(line);
@@ -617,7 +622,13 @@ export class IncrementalWorkerActivityParser {
       };
       this.lastToolStart = startContext;
       const id = toolCallId(value);
-      if (id) this.toolStarts.set(id, startContext);
+      if (id) {
+        if (this.toolStarts.size >= MAX_TOOL_STARTS) {
+          const oldest = this.toolStarts.keys().next().value;
+          if (oldest) this.toolStarts.delete(oldest);
+        }
+        this.toolStarts.set(id, startContext);
+      }
     } else if (value?.type === "tool_execution_end") {
       const id = toolCallId(value);
       startContext = (id ? this.toolStarts.get(id) : undefined) || this.lastToolStart;
