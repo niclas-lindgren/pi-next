@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.49 - pending release
+
+Stable scheduler/display lifecycle release.
+
+### Material changes
+
+- Keep one supervisor-owned worker display across issue-cycle boundaries and remove the misleading empty `worker alive` placeholder.
+- Render scheduler/controller activity separately from actual child-worker lifecycle state.
+- Classify convergence-budget yields distinctly from recovery retry exhaustion.
+
+### Compatibility/configuration/schema
+
+- No configuration or schema changes.
+- Existing worker activity, recovery, and session replacement interfaces remain compatible.
+
+### Breaking/behavior changes
+
+- Empty scheduler transitions no longer paint or clear a worker widget, and convergence budget yields no longer appear as retry failures.
+
+### Security/safety
+
+- Worker liveness remains grounded in actual worker events/process state; controller activity is bounded and cannot create a fake worker row.
+- Widget lifecycle remains session-safe and bounded across supervisor issue transitions.
+
+### Upgrade guidance
+
+- No consumer action is required; review the updated controller wording if terminal output is parsed by tooling.
+
 ## 0.2.48 - pending release
 
 Worker liveness watchdog release.

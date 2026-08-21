@@ -147,6 +147,9 @@ export class WorkerDisplayController implements WorkerDisplaySink {
   private renderScheduled = false;
   private disposed = false;
   private hostContext: ExtensionCommandContext | undefined;
+  /** Controller activity is not worker state and must not create a worker row. */
+  private controllerLine: string | undefined;
+  private widgetVisible = false;
   private readonly diagnosticState: WorkerDisplayDiagnostics = {
     displayAttached: 0,
     stdoutBytes: 0,
@@ -194,6 +197,7 @@ export class WorkerDisplayController implements WorkerDisplaySink {
 
   liveDelta(delta: WorkerLiveTextDelta): void {
     if (this.disposed) return;
+    this.controllerLine = undefined;
     this.increment("visibleTextDeltas");
     const key = keyOf(delta.issueNumber, delta.runId);
     this.revive(key);
@@ -209,6 +213,7 @@ export class WorkerDisplayController implements WorkerDisplaySink {
 
   event(logEvent: WorkerWorkLogEvent): void {
     if (this.disposed) return;
+    this.controllerLine = undefined;
     this.revive(keyOf(logEvent.issueNumber, logEvent.runId));
     const state = this.ensure(logEvent.issueNumber, logEvent.runId);
     state.phase = logEvent.phase;
@@ -236,6 +241,7 @@ export class WorkerDisplayController implements WorkerDisplaySink {
 
   watchdog(event: { issueNumber?: number; runId?: string; kind: "suspected_stall" | "worker_timeout"; reason: string }): void {
     if (this.disposed) return;
+    this.controllerLine = undefined;
     const state = this.ensure(event.issueNumber, event.runId);
     state.status = event.kind === "worker_timeout" ? "timed_out" : "suspected_stall";
     this.push(state, { kind: "error", text: event.reason });
@@ -272,19 +278,16 @@ export class WorkerDisplayController implements WorkerDisplaySink {
     timer.unref?.();
   }
 
-  /** Publish deterministic parent-controller activity under the same issue/run identity. */
+  /** Publish bounded controller activity without claiming a child worker exists. */
   controllerActivity(
     issueNumber: number | undefined,
-    runId: string | undefined,
+    _runId: string | undefined,
     summary: string,
   ): void {
-    this.event({
-      issueNumber,
-      runId,
-      phase: "recovery",
-      kind: "tool",
-      summary: summary.slice(0, 300),
-    });
+    if (this.disposed) return;
+    const issue = issueNumber ? `#${issueNumber} · ` : "";
+    this.controllerLine = `Pi-next · ${issue}controller · ${summary.slice(0, 300)}`;
+    this.scheduleRender();
   }
 
   private revive(key: string): void {
@@ -365,11 +368,22 @@ export class WorkerDisplayController implements WorkerDisplaySink {
     if (this.disposed || !this.hostContext) return;
     const ctx = this.hostContext;
     try {
-      const lines = this.workers.size ? this.renderLines() : ["worker alive"];
+      const lines = this.renderLines();
+      // Attaching a display is not evidence of a worker. Avoid an empty
+      // setWidget(undefined) paint during scheduler-only transitions; clear a
+      // previously visible widget only after its settled retention expires.
+      if (!lines.length) {
+        if (!this.widgetVisible) return;
+        this.increment("widgetRenderAttempts");
+        ctx.ui.setWidget(WIDGET_KEY, undefined);
+        this.widgetVisible = false;
+        return;
+      }
       this.increment("widgetRenderAttempts");
-      ctx.ui.setWidget(WIDGET_KEY, lines.length ? lines : undefined, {
+      ctx.ui.setWidget(WIDGET_KEY, lines, {
         placement: "aboveEditor",
       });
+      this.widgetVisible = true;
     } catch (error) {
       this.increment("widgetRenderFailures");
       reportSwallowedHostDeliveryFailure(error, "workerDisplayWidget");
@@ -411,9 +425,12 @@ export class WorkerDisplayController implements WorkerDisplaySink {
   }
 
   renderLines(): string[] {
-    return getWorkerLogVerbosity() === "compact"
+    const lines = getWorkerLogVerbosity() === "compact"
       ? this.renderCompactLines()
       : this.renderVerboseLines();
+    return lines.length || !this.controllerLine
+      ? lines
+      : [this.controllerLine];
   }
 
   /** Original small known-good baseline (#614), kept as an explicit fallback/compatibility mode (#617). */
@@ -499,10 +516,12 @@ export class WorkerDisplayController implements WorkerDisplaySink {
     this.workers.clear();
     const ctx = this.hostContext;
     this.hostContext = undefined;
-    if (!ctx) return;
+    this.controllerLine = undefined;
+    if (!ctx || !this.widgetVisible) return;
     try {
       this.increment("widgetRenderAttempts");
       ctx.ui.setWidget(WIDGET_KEY, undefined);
+      this.widgetVisible = false;
     } catch (error) {
       this.increment("widgetRenderFailures");
       reportSwallowedHostDeliveryFailure(error, "workerDisplayDispose");

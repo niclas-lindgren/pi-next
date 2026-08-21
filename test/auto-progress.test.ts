@@ -94,6 +94,35 @@ test("active issue and worker phase are visible", () => {
   assert.equal(autoLifecyclePhase(current, { workerAlive: true, workerLiveness: "alive", elapsedMs: 0, workerPhase: "verification" }), "verifying");
 });
 
+test("convergence budget yields are not mislabeled as retry exhaustion", () => {
+  const yielded = state({
+    activeIssueNumber: 638,
+    lastOutcome: "yield_issue",
+    lastReason: "Yielded issue #638: issue convergence budget exhausted: no advancing commit",
+  });
+  const output = renderAutoProgress(yielded, { width: 120 });
+  assert.match(output, /yielded/);
+  assert.match(output, /convergence budget/);
+  assert.doesNotMatch(output, /retry exhausted/);
+});
+
+test("recovery exhaustion remains explicitly labeled as retry exhaustion", () => {
+  const exhausted = state({
+    status: "blocked",
+    lastReason: "worker exited without loop_result",
+    recovery: {
+      missingLoopResults: 3,
+      automaticSettlements: 0,
+      automaticResumes: 2,
+      exhausted: 1,
+      attemptsByFingerprint: { missing: 3 },
+      lastFingerprint: "missing",
+      lastOutcome: "recovery_exhausted",
+    },
+  });
+  assert.match(renderAutoProgress(exhausted, { width: 120 }), /retry exhausted/);
+});
+
 test("recovery and terminal states are explicit", () => {
   const recovering = state({
     activeIssueNumber: 9,

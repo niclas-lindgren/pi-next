@@ -89,13 +89,21 @@ function terminalReason(state: LoopState): string | undefined {
       : undefined;
   }
   const raw = state.lastReason?.replace(/\s+/g, " ").trim();
+  // Outcome is authoritative here: scheduler yields are not worker recovery
+  // failures, even when their diagnostic reason contains "exhausted".
+  if (state.lastOutcome === "yield_issue") {
+    if (/convergence\s+budget/i.test(raw || "")) return "convergence budget";
+    if (/authority|eligible|ready|blocked/i.test(raw || "")) return "authority blocked";
+    return "budget yielded";
+  }
+  if (state.recovery?.lastOutcome === "recovery_exhausted") return "retry exhausted";
   if (!raw) {
     if (state.status === "interrupted" || state.status === "stopped") return "resume available";
     return undefined;
   }
   if (/foreign|malformed|authority|workflow artifact/i.test(raw)) return "workspace authority conflict";
   if (/lease|ownership/i.test(raw)) return "ownership conflict";
-  if (/exhaust|retry/i.test(raw) || state.recovery?.lastOutcome === "recovery_exhausted") return "retry exhausted";
+  if (/exhaust|retry/i.test(raw)) return "retry exhausted";
   if (/unsafe|ambiguous|corrupt/i.test(raw) || state.recovery?.lastOutcome === "recovery_unsafe") return "manual recovery required";
   if (/interrupt|abandon|missing|stop/i.test(raw)) return "resume available";
   return raw.length <= 36 ? raw : `${raw.slice(0, 33)}...`;

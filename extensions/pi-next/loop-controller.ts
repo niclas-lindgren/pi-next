@@ -1373,6 +1373,7 @@ export async function runLoopSteps(
   // Callers may supply the owner-bound sink from their command context;
   // direct callers get a sink attached to this context. It is threaded through
   // every newSession() boundary instead of being routed through a singleton.
+  const ownsDisplay = !observer?.display;
   const display = observer?.display ?? attachWorkerDisplay(ctx);
   const release = acquireControllerLock(
     runtimeCwdFor(ctx.cwd, initial),
@@ -1423,7 +1424,7 @@ export async function runLoopSteps(
     } else {
       await generation.teardown(`runLoopSteps:complete:${initial.runId}`);
     }
-    display?.dispose();
+    if (ownsDisplay) display?.dispose();
     release();
   }
 }

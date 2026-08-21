@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { WorkerDisplayController } from "../extensions/pi-next/worker-display.ts";
+import { WorkerDisplayController, attachWorkerDisplay } from "../extensions/pi-next/worker-display.ts";
 
 test("tool errors remain non-terminal until the worker explicitly finishes", () => {
   const display = new WorkerDisplayController({
@@ -38,7 +38,25 @@ test("tool errors remain non-terminal until the worker explicitly finishes", () 
   display.dispose();
 });
 
-test("controller recovery activity keeps the worker panel alive across replacement handoff", () => {
+test("empty display attachment does not paint a fake worker", async () => {
+  const paints: Array<unknown> = [];
+  const ctx = {
+    cwd: "/tmp/pi-next-display-test",
+    hasUI: true,
+    ui: {
+      theme: { bold: (text: string) => text, fg: (_color: string, text: string) => text },
+      setWidget: (_key: string, value: unknown) => paints.push(value),
+    },
+  } as never;
+
+  const display = attachWorkerDisplay(ctx);
+  await Promise.resolve();
+  assert.equal(display?.renderLines().join("\n"), "");
+  assert.deepEqual(paints, []);
+  display?.dispose();
+});
+
+test("controller recovery activity is not rendered as a live worker row", () => {
   const display = new WorkerDisplayController({
     bold: (text) => text,
     fg: (_color, text) => text,
@@ -46,14 +64,15 @@ test("controller recovery activity keeps the worker panel alive across replaceme
 
   display.controllerActivity(47, "recovery-run", "reading authoritative issue lease");
   let lines = display.renderLines().join("\n");
-  assert.match(lines, /#47 · recovery · active/);
+  assert.match(lines, /Pi-next · #47 · controller/);
+  assert.doesNotMatch(lines, /worker alive|active/);
   assert.match(lines, /reading authoritative issue lease/);
 
-  display.finish(47, "recovery-run", "failed");
   display.controllerActivity(47, "recovery-run", "starting replacement worker");
   lines = display.renderLines().join("\n");
-  assert.match(lines, /#47 · recovery · active/);
-  assert.match(lines, /reading authoritative issue lease/);
+  assert.match(lines, /Pi-next · #47 · controller/);
+  assert.doesNotMatch(lines, /worker alive|active/);
+  assert.doesNotMatch(lines, /reading authoritative issue lease/);
   assert.match(lines, /starting replacement worker/);
 
   display.dispose();
