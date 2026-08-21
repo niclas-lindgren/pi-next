@@ -98,7 +98,8 @@ fail closed. A minimal custom configuration looks like:
     "skillPath": ".pi-next/SKILL.md",
     "tuningPath": ".pi-next/LOOP_TUNING.md",
     "diagnosticsPath": ".pi-next/diagnostics",
-    "helperDir": ".pi-next/scripts"
+    "helperDir": ".pi-next/scripts",
+    "stateProvider": { "type": "builtin" }
   }
 }
 ```
@@ -112,7 +113,12 @@ carry a review-held state and cannot be selected until the authority records
 approval. Reversible runtime adaptations can be evaluated and rolled back;
 unreviewed code or architecture changes are never applied by the controller.
 Pi-next never assumes `AGENTS.md`, `.agents/skills`, or a product-specific
-policy tree when those paths are not configured.
+policy tree when those paths are not configured. Workflow state inspection uses
+its package-owned provider by default; consumers that need different semantics
+may explicitly set `workflow.stateProvider` to `{ "type": "helper", "path":
+".pi-next/scripts/pi-next-state.sh" }`. An explicit helper is validated,
+including its output contract, before autonomous recovery, issue claim, or
+worker launch, and failures never silently fall back to the built-in provider.
 
 ## Safe first run
 
@@ -132,7 +138,7 @@ the command:
 
 | Command | Purpose |
 | --- | --- |
-| `/pi-next auto` | Run the bounded autonomous issue loop. |
+| `/pi-next auto` | Validate workflow state, then run the bounded autonomous issue loop. |
 | `/pi-next fresh [#N]` | Claim an issue and start a parentless worker session. |
 | `/pi-next [#N]` | Run one issue-scoped transition, using the live shortlist when no issue is given. |
 | `/pi-next-doctor` | Validate package identity, project configuration, and the configured workflow helper. |

@@ -76,6 +76,10 @@ import {
 import { ForegroundSupervisor } from "./foreground-supervisor.ts";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { createWorkAuthority } from "../../src/coordination/work-authority.ts";
+import {
+  preflightWorkflowStateProvider,
+  WorkflowStateProviderError,
+} from "./workflow-state-provider.ts";
 import { publishSelfAssessmentFindings, refreshFindingApprovals } from "./self-assessment.ts";
 
 export { MAX_ISSUES, readLoopState, writeLoopResult } from "./loop-state.ts";
@@ -926,6 +930,11 @@ export async function runPiNextLoop(
     return;
   }
 
+  // Validate provider configuration and, for explicit helpers, their output
+  // before writing a new run state, claiming an issue, or launching a worker.
+  // Status/stop/clear are intentionally diagnostic/control-only paths and do
+  // not need the autonomous-entry preflight.
+  await preflightWorkflowStateProvider(ctx.cwd);
   await ctx.waitForIdle();
   if (input === "resume") {
     const current = requestedRunId
@@ -1014,7 +1023,7 @@ export function registerPiNextLoopCommand(
         // setup errors from becoming unhandled rejections that unload pi.
         notifySafely(
           ctx,
-          `pi-next loop failed: ${error instanceof Error ? error.message : String(error)}`,
+          `${error instanceof WorkflowStateProviderError ? "Workflow state provider preflight failed" : "pi-next loop failed"}: ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
       }

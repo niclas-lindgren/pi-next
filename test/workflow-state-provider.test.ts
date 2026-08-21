@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { DEFAULT_PI_NEXT_CONFIG } from "../src/coordination/config.ts";
 import {
   builtInWorkflowState,
+  preflightWorkflowStateProvider,
   workflowState,
   WorkflowStateProviderError,
 } from "../extensions/pi-next/workflow-state-provider.ts";
@@ -34,6 +35,7 @@ test("built-in state provider works without a helper and respects configured pla
     );
     const result = await workflowState(cwd);
     assert.equal(result.provider, "builtin");
+    assert.equal(await preflightWorkflowStateProvider(cwd), "builtin");
     assert.deepEqual(result.state, {
       PLAN: "present",
       TASKS: "2",
@@ -72,6 +74,7 @@ test("explicit helper override is authoritative and an unconfigured legacy file 
     await config(cwd, { stateProvider: { type: "helper", path: ".pi-next/custom-state.sh" } });
     const overridden = await workflowState(cwd);
     assert.equal(overridden.provider, "helper");
+    assert.equal(await preflightWorkflowStateProvider(cwd), "helper");
     assert.equal(overridden.state.PLAN_GOAL, "consumer");
     assert.equal(overridden.state.PLAN, "absent");
   } finally {

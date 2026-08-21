@@ -66,6 +66,7 @@ import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts"
 import { createWorkerFailureEvidence, WorkerFailureError } from "./worker-failure.ts";
 import {
   formatWorkflowState,
+  preflightWorkflowStateProvider,
   selectedWorkflowStateProvider,
   WorkflowStateProviderError,
   workflowState,
@@ -285,6 +286,16 @@ export async function runIssueScopedPrompt(
   const coordinationCwd = ctx.cwd;
   const display = attachWorkerDisplay(ctx);
   let workspace: ClaimedIssueWorkspace | undefined;
+  try {
+    await preflightWorkflowStateProvider(coordinationCwd);
+  } catch (error) {
+    notifySafely(
+      ctx,
+      `Workflow state provider preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+    return;
+  }
   try {
     workspace = await claimAndAttachIssueWorkspace(
       coordinationCwd,
