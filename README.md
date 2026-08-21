@@ -144,6 +144,7 @@ the command:
 | `/pi-next-doctor` | Validate package identity, project configuration, and the configured workflow helper. |
 | `/pi-next-status` | Show local PLAN/loop state without invoking a model. |
 | `/pi-next-assessment` | Show bounded self-assessment health, findings, and publication status. |
+| `/pi-next-issues [eligible\|active\|blocked\|deferred\|all]` | Show the bounded authoritative issue queue and eligibility reasons. |
 | `/pi-next-loop status [verbose\|history] [run ID]` | Inspect the session-bound run, live/abandoned controller evidence, or bounded history; stop or recover a bounded loop. |
 | `/pi-next-handoff` | Check whether the current checkout is safe to hand off. |
 | `/pi-next-view all\|off\|#N\|run ID\|compact\|verbose\|status` | Filter the worker display/transcript or select its density. |
