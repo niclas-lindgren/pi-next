@@ -87,6 +87,37 @@ test("exhausted budget admits only an evidence-backed PLAN authority reconciliat
   }
 });
 
+test("a pending PLAN task-metadata repair blocks product-source commits until it revalidates", async () => {
+  const cwd = await repository();
+  try {
+    await mkdir(join(cwd, ".pi-next"), { recursive: true });
+    await mkdir(join(cwd, "src"), { recursive: true });
+    const invalidPlan = `# Plan: Issue #7\n\n**Goal:** repair task metadata\n\n**GitHub-Issue:** #7\n\n## Tasks\n\n- [ ] Fix the bug\n  - Existing completed work remains intact.\n\n## Acceptance Criteria\n\n- [ ] The bug is fixed.\n\n## Log\n`;
+    await writeFile(join(cwd, ".pi-next", "PLAN.md"), invalidPlan);
+    await writeFile(join(cwd, "src", "example.ts"), "export const value = 1;\n");
+
+    await assert.rejects(
+      () => commitExplicitPaths(cwd, ["src/example.ts"], "fix: implement the bug fix", { issueNumber: 7 }),
+      /PLAN task metadata is unresolved/,
+    );
+
+    // Repairing only the PLAN metadata is still allowed while it is pending.
+    const repairedPlan = invalidPlan.replace(
+      "  - Existing completed work remains intact.",
+      "  - Files: src/example.ts\n  - Approach: patch the smallest relevant surface.",
+    );
+    await writeFile(join(cwd, ".pi-next", "PLAN.md"), repairedPlan);
+    const planHash = await commitExplicitPaths(cwd, [".pi-next/PLAN.md"], "chore(agent): repair PLAN metadata", { issueNumber: 7 });
+    assert.match(planHash, /^[0-9a-f]+$/);
+
+    // Once the PLAN validates, the product-source commit is allowed again.
+    const hash = await commitExplicitPaths(cwd, ["src/example.ts"], "fix: implement the bug fix", { issueNumber: 7 });
+    assert.match(hash, /^[0-9a-f]+$/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("caller-supplied correctness labels cannot bypass mechanical path/evidence checks", async () => {
   const cwd = await repository();
   try {

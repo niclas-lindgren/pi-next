@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 import {
@@ -36,7 +36,15 @@ import {
   type WorkerWatchdogEvent,
   type IssueWorkerRunner,
 } from "./util-core.ts";
-import { git, planFile, removeFile, workflowPath, writeJsonAtomic } from "./util.ts";
+import {
+  changeFiles,
+  git,
+  isWorkflowMetaPath,
+  planFile,
+  removeFile,
+  workflowPath,
+  writeJsonAtomic,
+} from "./util.ts";
 import {
   acquireControllerLock,
   addIssuePromptMetrics,
@@ -107,6 +115,62 @@ interface StepSettlement {
   state: LoopState;
   terminal: boolean;
   outcome?: LoopOutcome;
+}
+
+interface ApplyResultOptions {
+  /** A planning repair may preserve pre-existing issue-local dirt. */
+  allowDirtyPlanRepair?: boolean;
+}
+
+type PlanRepairDirtySnapshot = Map<string, string>;
+
+async function planRepairPathFingerprint(cwd: string, path: string): Promise<string> {
+  const absolute = join(cwd, path);
+  try {
+    const stat = lstatSync(absolute);
+    if (stat.isSymbolicLink()) return `symlink:${readlinkSync(absolute)}`;
+    if (stat.isFile()) {
+      // Let Git stream the content into its object hash instead of retaining a
+      // potentially large dirty product file in the controller heap.
+      const hash = (await git(cwd, ["hash-object", "--no-filters", "--", path])).trim();
+      return `file:${stat.mode}:${hash}`;
+    }
+    return `other:${stat.mode}:${stat.size}`;
+  } catch {
+    return "missing";
+  }
+}
+
+async function snapshotPlanRepairDirtyState(cwd: string): Promise<PlanRepairDirtySnapshot> {
+  const paths = await changeFiles(cwd, "all");
+  const snapshot = new Map<string, string>();
+  for (const path of paths) {
+    const status = (await git(cwd, ["status", "--porcelain=v1", "--", path])).trim();
+    snapshot.set(path, `${status}\0${await planRepairPathFingerprint(cwd, path)}`);
+  }
+  return snapshot;
+}
+
+async function validatePlanRepairDirtyState(
+  cwd: string,
+  before: PlanRepairDirtySnapshot,
+): Promise<{ safe: boolean; workflowDirty: boolean; reason?: string }> {
+  const after = await changeFiles(cwd, "all");
+  const violations: string[] = [];
+  for (const path of after) {
+    if (isWorkflowMetaPath(path, cwd)) continue;
+    const current = `${(await git(cwd, ["status", "--porcelain=v1", "--", path])).trim()}\0${await planRepairPathFingerprint(cwd, path)}`;
+    if (before.get(path) !== current) violations.push(path);
+  }
+  const workflowDirty = after.some((path) => isWorkflowMetaPath(path, cwd));
+  if (violations.length) {
+    return {
+      safe: false,
+      workflowDirty,
+      reason: `Planning repair changed product paths: ${violations.join(", ")}`,
+    };
+  }
+  return { safe: true, workflowDirty };
 }
 
 export type WorkerObserver = Pick<IssueWorkerOptions, "onActivity" | "onWorkerState"> & {
@@ -267,6 +331,7 @@ async function applyResult(
   cwd: string,
   state: LoopState,
   result: LoopResult,
+  options: ApplyResultOptions = {},
 ): Promise<StepSettlement> {
   const runtimeCwd = runtimeCwdFor(cwd, state);
   if (result.schedulerOnly && result.outcome === "yield_issue" && result.step === state.step) {
@@ -367,7 +432,11 @@ async function applyResult(
     ].includes(result.outcome)
   ) {
     const boundary = await safeLoopBoundary(cwd, result.outcome === "archived");
-    if (!boundary.safe) {
+    const dirtyPlanRepairBoundary = options.allowDirtyPlanRepair &&
+      result.outcome === "continue" &&
+      !boundary.safe &&
+      boundary.reason?.startsWith("Dirty worktree after step:");
+    if (!boundary.safe && !dirtyPlanRepairBoundary) {
       removeFile(loopResultFile(runtimeCwd, state.runId));
       throw new IssueBoundaryFailure(
         result.issueNumber || state.activeIssueNumber || 0,
@@ -379,8 +448,13 @@ async function applyResult(
 
   if (["continue", "done", "archived"].includes(result.outcome)) {
     const head = await git(cwd, ["rev-parse", "HEAD"]);
+    const repairStillPending = state.planRepair && state.activeIssueNumber
+      ? Boolean(pendingPlanRepair(cwd, state.activeIssueNumber))
+      : false;
     if (!state.stepHead || head === state.stepHead) {
-      return blockForNoProgress(cwd, state, result);
+      if (!(options.allowDirtyPlanRepair && result.outcome === "continue" && repairStillPending)) {
+        return blockForNoProgress(cwd, state, result);
+      }
     }
   }
 
@@ -513,6 +587,7 @@ export async function inferCompletedArchive(
 async function settleStep(
   cwd: string,
   state: LoopState,
+  options: ApplyResultOptions = {},
 ): Promise<StepSettlement> {
   if (state.step <= state.settledStep) {
     return { state, terminal: state.status !== "running" };
@@ -522,10 +597,10 @@ async function settleStep(
     const result = JSON.parse(
       readFileSync(loopResultFile(runtimeCwd, state.runId), "utf8"),
     ) as LoopResult;
-    return applyResult(cwd, state, result);
+    return applyResult(cwd, state, result, options);
   }
   const inferred = await inferCompletedArchive(cwd, state);
-  if (inferred) return applyResult(cwd, state, inferred);
+  if (inferred) return applyResult(cwd, state, inferred, options);
 
   const interrupted: LoopState = {
     ...state,
@@ -1097,6 +1172,14 @@ export async function runOneStep(
     writeJsonAtomic(loopStateFile(runtimeCwd, state.runId), state);
   }
   const started = Date.now();
+  // Capture issue-local dirt before a planning repair. The repair worker may
+  // preserve it, but it must not add or rewrite product paths while PLAN.md is
+  // invalid. This snapshot is in-memory only and never becomes telemetry.
+  const planRepairDirtyBefore = pendingRepair
+    ? await snapshotPlanRepairDirtyState(ctx.cwd)
+    : undefined;
+  let allowDirtyPlanRepair = false;
+  let planRepairBoundaryError: Error | undefined;
   let promptError: unknown;
   let telemetry: WorkerTelemetryReport = { status: "unavailable" };
   let phase: "planning" | "implementation";
@@ -1174,6 +1257,24 @@ export async function runOneStep(
       },
     );
     const result = await task;
+    if (planRepairDirtyBefore) {
+      const dirtyState = await validatePlanRepairDirtyState(ctx.cwd, planRepairDirtyBefore);
+      if (!dirtyState.safe) {
+        planRepairBoundaryError = new IssueBoundaryFailure(
+          state.activeIssueNumber || 0,
+          "execution",
+          dirtyState.reason || "planning repair changed product paths",
+        );
+      } else {
+        // A still-invalid PLAN may remain dirty while the bounded repair is
+        // retried. Once it validates, only pre-existing product dirt may cross
+        // this planning boundary; an uncommitted valid PLAN must not proceed.
+        const stillPending = state.activeIssueNumber
+          ? Boolean(pendingPlanRepair(ctx.cwd, state.activeIssueNumber))
+          : false;
+        allowDirtyPlanRepair = !dirtyState.workflowDirty || stillPending;
+      }
+    }
     telemetry = result.telemetry;
     await reportWorkerToolFailures(ctx.cwd, telemetry.toolFailures, telemetry.recoveredToolFailureFingerprints);
     if (!result.ok) {
@@ -1209,6 +1310,10 @@ export async function runOneStep(
     }
   } catch (error) {
     promptError = error;
+  }
+  if (planRepairBoundaryError) {
+    removeFile(loopResultFile(runtimeCwdFor(ctx.cwd, state), state.runId));
+    promptError = planRepairBoundaryError;
   }
   state = await recordPromptTelemetry(
     ctx.cwd,
@@ -1285,7 +1390,7 @@ export async function runOneStep(
       // A worker may have written the authoritative terminal result and then
       // failed while its process was unwinding. The result wins over the
       // process exit classification.
-      const settled = await settleStep(ctx.cwd, state);
+      const settled = await settleStep(ctx.cwd, state, { allowDirtyPlanRepair });
       if (!hasPlan && existsSync(planFile(ctx.cwd))) {
         const plannedIssue = currentPlanIssue(ctx.cwd);
         if (plannedIssue) await primeIssueFreshness(ctx.cwd, plannedIssue);
@@ -1302,7 +1407,7 @@ export async function runOneStep(
     throw promptError;
   }
 
-  const settled = await settleStep(ctx.cwd, state);
+  const settled = await settleStep(ctx.cwd, state, { allowDirtyPlanRepair });
   if (!hasPlan && existsSync(planFile(ctx.cwd))) {
     const plannedIssue = currentPlanIssue(ctx.cwd);
     if (plannedIssue) await primeIssueFreshness(ctx.cwd, plannedIssue);
@@ -1492,7 +1597,14 @@ export async function runLoopSteps(
   observer?: WorkerObserver,
 ): Promise<void> {
   validateCanonicalExecutionState(ctx.cwd, initial);
-  validateWorkspacePlan(ctx.cwd, initial.activeIssueNumber as number, { runId: initial.runId });
+  // Task Files/Approach defects are owned workflow quality failures. Keep the
+  // outer production-path preflight consistent with runOneStep so the bounded
+  // planning-only repair worker is reachable; every other PLAN defect remains
+  // fail-closed here.
+  validateWorkspacePlan(ctx.cwd, initial.activeIssueNumber as number, {
+    runId: initial.runId,
+    allowTaskMetadata: true,
+  });
   // Callers may supply the owner-bound sink from their command context;
   // direct callers get a sink attached to this context. It is threaded through
   // every newSession() boundary instead of being routed through a singleton.
