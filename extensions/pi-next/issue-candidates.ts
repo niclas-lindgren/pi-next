@@ -67,6 +67,8 @@ export interface CandidateShortlistOptions {
   includeLocalArchiveExclusions?: boolean;
   /** Shared authority used to refresh ownership immediately before selection. */
   leaseAuthority?: IssueLeaseAuthority;
+  /** Current-run candidate exclusions recorded by the scheduler, such as a fresh-owner race. */
+  schedulerExcludedIssues?: number[];
   now?: Date;
   /** Reports slow authority/refresh phases to the interactive command UI. */
   onStatus?: (message: string) => void;
@@ -272,9 +274,11 @@ export async function candidateShortlist(
   // from local deferred freshness: an issue blocked in this bounded run must
   // not be selected again until the run ends, even if authority still lists it.
   const currentRunDeferred = new Set(options.deferredIssues || []);
+  const schedulerExcluded = new Set(options.schedulerExcludedIssues || []);
   const excluded = new Set([
     ...(options.completedIssues || []),
     ...currentRunDeferred,
+    ...schedulerExcluded,
     ...localArchived,
   ]);
   const groups: string[] = [];
@@ -379,6 +383,14 @@ export async function candidateShortlist(
       `Locally deferred issues omitted while their live GitHub updatedAt has not advanced: ${deferredNotes
         .map((issue) => `#${issue}`)
         .join(", ")}. They become eligible again automatically after a new authoritative GitHub update.`,
+    );
+  }
+  const schedulerNotes = [...schedulerExcluded].sort((left, right) => left - right);
+  if (schedulerNotes.length) {
+    notes.push(
+      `Candidates skipped by this scheduler run due to fresh ownership omitted from reselection: ${schedulerNotes
+        .map((issue) => `#${issue}`)
+        .join(", ")}. They remain outstanding requested capacity and are not product failures.`,
     );
   }
   const note = notes.join("\n");

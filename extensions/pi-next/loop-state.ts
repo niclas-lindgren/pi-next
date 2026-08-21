@@ -74,7 +74,7 @@ export interface LoopMetrics extends LoopUsage {
   telemetryUnavailable: number;
 }
 
-export type LoopIssueDisposition = "active" | "completed" | "deferred" | "blocked" | "yielded";
+export type LoopIssueDisposition = "active" | "completed" | "deferred" | "blocked" | "yielded" | "leased_elsewhere";
 
 /** Increment this when the meaning of convergence counters changes. */
 export const CONVERGENCE_BUDGET_POLICY_VERSION = 1;
@@ -142,6 +142,14 @@ export interface DeferredIssue {
   parkedPlan?: string;
 }
 
+/** Candidate-local scheduler evidence that does not consume requested capacity. */
+export interface SchedulerSkip {
+  issueNumber: number;
+  reasonCode: "fresh_owner";
+  reason: string;
+  skippedAt: string;
+}
+
 export interface LoopState {
   version: 1;
   runId: string;
@@ -160,6 +168,8 @@ export interface LoopState {
   stepStartedAt?: string;
   completedIssues: number[];
   deferredIssues: DeferredIssue[];
+  /** Bounded current-run exclusions caused by scheduler races, not failures. */
+  schedulerSkips?: SchedulerSkip[];
   issueMetrics: LoopIssueMetrics[];
   status: LoopStatus;
   stopRequested: boolean;
@@ -489,6 +499,7 @@ export function readLoopState(cwd: string, runId?: string): LoopState | null {
       ...state,
       completedIssues: state.completedIssues || [],
       deferredIssues: state.deferredIssues || [],
+      schedulerSkips: state.schedulerSkips || [],
       issueMetrics: state.issueMetrics || [],
       metrics: { ...emptyLoopMetrics(), ...state.metrics },
       recovery: state.recovery
@@ -626,6 +637,9 @@ export function notifyLoopState(
   const deferred = state.deferredIssues.length
     ? state.deferredIssues.map((item) => `#${item.issueNumber}`).join(", ")
     : "none";
+  const schedulerSkips = state.schedulerSkips?.length
+    ? state.schedulerSkips.map((item) => `#${item.issueNumber}(${item.reasonCode})`).join(", ")
+    : "none";
   const metrics = state.metrics || emptyLoopMetrics();
   const issueCount = state.completedIssues.length;
   const sessionsPerIssue = issueCount ? (metrics.sessions / issueCount).toFixed(1) : "-";
@@ -643,7 +657,7 @@ export function notifyLoopState(
     : "";
   safeLoopNotify(
     ctx,
-    `Pi loop ${state.status}: step=${state.step}/${state.maxSteps} issues_remaining=${state.remainingIssues} completed=${completed} deferred=${deferred}\nTelemetry: sessions=${metrics.sessions} prompts=${metrics.prompts} sessions/issue=${sessionsPerIssue} tokens=${formatCount(metrics.totalTokens)} tokens/issue=${tokensPerIssue} cache_read=${formatCount(metrics.cacheRead)} cache_rate=${cacheRate} model_min=${(metrics.modelDurationMs / 60_000).toFixed(1)} elapsed_min=${elapsedMinutes}${cost}${recovery}${recent ? `\nRecent issues: ${recent}` : ""}${state.lastReason ? `\nReason: ${state.lastReason}` : ""}`,
+    `Pi loop ${state.status}: step=${state.step}/${state.maxSteps} issues_remaining=${state.remainingIssues} completed=${completed} deferred=${deferred} scheduler_skips=${schedulerSkips}\nTelemetry: sessions=${metrics.sessions} prompts=${metrics.prompts} sessions/issue=${sessionsPerIssue} tokens=${formatCount(metrics.totalTokens)} tokens/issue=${tokensPerIssue} cache_read=${formatCount(metrics.cacheRead)} cache_rate=${cacheRate} model_min=${(metrics.modelDurationMs / 60_000).toFixed(1)} elapsed_min=${elapsedMinutes}${cost}${recovery}${recent ? `\nRecent issues: ${recent}` : ""}${state.lastReason ? `\nReason: ${state.lastReason}` : ""}`,
     ["failed", "blocked", "interrupted"].includes(state.status)
       ? "warning"
       : "info",

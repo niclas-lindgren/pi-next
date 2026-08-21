@@ -33,6 +33,7 @@ import {
   claimIssueLease,
   ensureIssueWorktree,
   GitHubIssueLeaseAuthority,
+  LeaseConflictError,
   ISSUE_LEASE_DURATION_MS,
   type IssueLease,
   releaseIssueLease,
@@ -454,14 +455,20 @@ export async function claimLoopIssue(
   // inject an in-memory authority to exercise this exact handoff sequence
   // without a live GitHub dependency.
   const authority = authorityOverride ?? new GitHubIssueLeaseAuthority(cwd);
+  // A fresh-owner conflict while selecting new work is a normal scheduler
+  // race. Keep retrying selection in this same call, while persisted active
+  // issue recovery above remains deliberately fail-closed.
+  while (true) {
   let issueNumber = state.activeIssueNumber;
   if (!issueNumber) {
     // The coordination checkout is never an issue-plan namespace. Candidate
     // selection comes from durable loop state and the live authority only;
     // any root PLAN/VERIFY is legacy/debris and is not ownership evidence.
     const shortlist = await candidateShortlist(cwd, {
+      authority: workAuthorityOverride,
       completedIssues: state.completedIssues,
       deferredIssues: state.deferredIssues.map((item) => item.issueNumber),
+      schedulerExcludedIssues: (state.schedulerSkips || []).map((item) => item.issueNumber),
       leaseAuthority: authority,
     });
     if (shortlist.outcome === "unavailable") {
@@ -489,21 +496,60 @@ export async function claimLoopIssue(
   const resolvedIssueNumber = issueNumber;
 
   const now = new Date();
-  const lease = await claimIssueLease(
-    authority,
-    {
+  let lease: IssueLease;
+  try {
+    lease = await claimIssueLease(
+      authority,
+      {
+        issueNumber: resolvedIssueNumber,
+        agent: "pi-next",
+        runId: state.runId,
+        sessionId: `${state.runId}-loop`,
+        acquiredAt: now.toISOString(),
+        expiresAt: new Date(
+          now.getTime() + ISSUE_LEASE_DURATION_MS,
+        ).toISOString(),
+      },
+      now,
+      { cwd, recordEvent: recordLifecycleEvent },
+    );
+  } catch (error) {
+    if (!(error instanceof LeaseConflictError)) throw error;
+    const skippedAt = loopNow();
+    const reason = `Issue #${resolvedIssueNumber} skipped: leased elsewhere (fresh_owner)`;
+    const skipped = {
+      ...state,
+      schedulerSkips: [
+        ...(state.schedulerSkips || []).filter((item) => item.issueNumber !== resolvedIssueNumber),
+        {
+          issueNumber: resolvedIssueNumber,
+          reasonCode: "fresh_owner" as const,
+          reason,
+          skippedAt,
+        },
+      ].slice(-100),
+      issueMetrics: markIssueDisposition(
+        state.issueMetrics,
+        resolvedIssueNumber,
+        "leased_elsewhere",
+        reason,
+      ),
+      lastOutcome: "yield_issue" as const,
+      lastReason: reason,
+      updatedAt: skippedAt,
+    };
+    writeJsonAtomic(loopStateFile(cwd, state.runId), skipped);
+    recordLifecycleEvent(cwd, {
+      event: "scheduler_skip",
       issueNumber: resolvedIssueNumber,
-      agent: "pi-next",
       runId: state.runId,
-      sessionId: `${state.runId}-loop`,
-      acquiredAt: now.toISOString(),
-      expiresAt: new Date(
-        now.getTime() + ISSUE_LEASE_DURATION_MS,
-      ).toISOString(),
-    },
-    now,
-    { cwd, recordEvent: recordLifecycleEvent },
-  );
+      outcome: "skip",
+      reasonCode: "fresh_owner",
+    });
+    notifyLive(reason, "warning");
+    state = skipped;
+    continue;
+  }
   // A selected issue is revalidated before worktree handoff whenever the
   // host supplies the configured authority. The active-plan gate is still
   // mandatory immediately before any worker transition.
@@ -577,6 +623,7 @@ export async function claimLoopIssue(
   };
   writeJsonAtomic(loopStateFile(cwd, state.runId), next);
   return next;
+  }
 }
 
 export async function removeCompletedWorkflowArtifacts(

@@ -60,7 +60,10 @@ function phaseLabel(
   }
   if (supervisor?.workerAlive) return "working";
   if (state.recovery?.lastOutcome === "resuming_same_issue") return "recovering";
-  if (state.lastOutcome === "yield_issue") return "yielded";
+  if (state.lastOutcome === "yield_issue") {
+    if (/leased elsewhere|fresh_owner/i.test(state.lastReason || "")) return "leased elsewhere";
+    return "yielded";
+  }
   return state.activeIssueNumber ? "claiming" : "selecting";
 }
 
@@ -122,6 +125,7 @@ export function renderAutoProgress(
   const percent = settledIssuePercent(requested, settled);
   const completed = new Set(state.completedIssues).size;
   const deferred = new Set(state.deferredIssues.map((issue) => issue.issueNumber)).size;
+  const schedulerSkips = new Set((state.schedulerSkips || []).map((issue) => issue.issueNumber)).size;
   const remaining = Math.max(0, requested - settled);
   const issue = state.activeIssueNumber ? `#${state.activeIssueNumber}` : undefined;
   const phase = phaseLabel(state, options.supervisor);
@@ -153,8 +157,8 @@ export function renderAutoProgress(
   const primary = `Pi-next ${version}auto ${progressBar(percent, barSlots)} ${settled}/${requested} settled ${percent}%`;
   const current = (issue ? ` · ${issue} · ${phase}` : ` · ${phase}`) + (reason ? ` · ${reason}` : "");
   const counts = state.status === "idle"
-    ? ` · ✓${completed} ↷${deferred} · ${remaining} capacity remaining`
-    : ` · ✓${completed} ↷${deferred} · ${remaining} remaining`;
+    ? ` · ✓${completed} ↷${deferred} ⏭${schedulerSkips} · ${remaining} capacity remaining`
+    : ` · ✓${completed} ↷${deferred} ⏭${schedulerSkips} · ${remaining} remaining`;
   const diagnostics = [recovery, retry, session, step, elapsed]
     .filter(Boolean).join(" · ");
   const full = primary + current + counts + (diagnostics ? ` · ${diagnostics}` : "");
