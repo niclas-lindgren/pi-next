@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.60 - pending release
+
+Scheduler claim-race handling release.
+
+### Material changes
+
+- Treat fresh-owner races while claiming newly selected issues as bounded scheduler skips and continue with other eligible work.
+- Preserve requested capacity and avoid worker/model turns for candidate-local ownership conflicts.
+
+### Compatibility/configuration/schema
+
+- Existing lease CAS, canonical worktree, and persisted loop-state contracts remain compatible.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- A fresh foreign lease no longer aborts an unattended queue run during normal candidate selection.
+
+### Security/safety
+
+- Foreign ownership remains authoritative and is never stolen or mutated.
+- Persisted active-issue resume conflicts remain fail-closed.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.59 - pending release
 
 PLAN repair execution-boundary release.
