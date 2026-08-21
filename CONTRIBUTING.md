@@ -17,8 +17,10 @@ For the mandatory serial issue workflow—discover live GitHub issues, implement
 one in its isolated worktree, commit, guarded-merge, push, complete through the
 authority, and clean up before selecting the next issue—see [`AGENTS.md`](AGENTS.md).
 Do not close an issue before the pushed candidate is proven reachable from
-`origin/main`; stop and preserve recovery state when a global safety check
-fails.
+`origin/main`. Re-query the complete issue immediately before closure and, if
+its title, body, comments, labels, status, or other authority data changed,
+reconcile and re-verify before querying again and closing. Stop and preserve
+recovery state when a global safety check fails.
 
 ## Development
 
