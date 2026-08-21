@@ -7,7 +7,8 @@ Release-gate reliability follow-up.
 ### Material changes
 
 - Make the hosted release gate authenticate GitHub CLI calls and run the
-  temporary-repository test suite deterministically.
+  temporary-repository test suite deterministically, including serializing the
+  finalize integration fixture suite.
 - Treat a local checkout without a GitHub remote as an ordinary absent lease
   during coordination status checks.
 
@@ -18,8 +19,9 @@ Release-gate reliability follow-up.
 
 ### Breaking/behavior changes
 
-- The default test scripts now serialize test files to avoid shared temporary
-  fixture cleanup races; runtime worker behavior is unchanged.
+- The default test scripts serialize test files, and the finalize integration
+  fixture suite serializes its nested cases to avoid shared temporary cleanup
+  races; runtime worker behavior is unchanged.
 
 ### Security/safety
 

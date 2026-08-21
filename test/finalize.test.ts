@@ -124,7 +124,7 @@ async function expectRejects(promise: Promise<unknown>, code: string): Promise<v
   }
 }
 
-describe("finalizeIssue", () => {
+describe("finalizeIssue", { concurrency: false }, () => {
   test("integrates the candidate into main and closes the issue when lease and authority are unchanged", async () => {
     const { origin, root } = setupRepo();
     const candidateSha = createCandidateBranch(root, 601, "feature.txt");
