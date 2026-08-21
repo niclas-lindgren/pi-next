@@ -17,6 +17,8 @@ interface RenderTheme {
 type WorkerRunStatus =
   | "starting"
   | "running"
+  | "suspected_stall"
+  | "timed_out"
   | "waiting"
   | "completed"
   | "failed"
@@ -77,6 +79,7 @@ export interface WorkerDisplaySink {
     runId: string | undefined,
     status: "completed" | "failed" | "aborted",
   ): void;
+  watchdog?(event: { issueNumber?: number; runId?: string; kind: "suspected_stall" | "worker_timeout"; reason: string }): void;
 }
 
 function keyOf(issueNumber: number | undefined, runId: string | undefined): string {
@@ -93,6 +96,10 @@ function statusLabel(state: WorkerDisplayState): string {
   switch (state.status) {
     case "starting":
       return "starting";
+    case "suspected_stall":
+      return "suspected stalled";
+    case "timed_out":
+      return "worker timeout";
     case "waiting":
       return "waiting";
     case "completed":
@@ -224,6 +231,14 @@ export class WorkerDisplayController implements WorkerDisplaySink {
     } else {
       this.push(state, { kind: "tool", text: logEvent.summary });
     }
+    this.scheduleRender();
+  }
+
+  watchdog(event: { issueNumber?: number; runId?: string; kind: "suspected_stall" | "worker_timeout"; reason: string }): void {
+    if (this.disposed) return;
+    const state = this.ensure(event.issueNumber, event.runId);
+    state.status = event.kind === "worker_timeout" ? "timed_out" : "suspected_stall";
+    this.push(state, { kind: "error", text: event.reason });
     this.scheduleRender();
   }
 

@@ -10,7 +10,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { configuredPath, loadPiNextConfig } from "../../src/coordination/config.ts";
+import { configuredPath, loadPiNextConfig, type WorkerWatchdogPolicy } from "../../src/coordination/config.ts";
 import { promisify } from "node:util";
 
 import {
@@ -146,13 +146,28 @@ export interface IssueWorkerResult {
   /** Bounded aggregate usage/activity/model telemetry recovered from the
    * worker's `--mode json` event stream (#599); never fabricated as zero. */
   telemetry: WorkerTelemetryReport;
+  watchdog?: WorkerWatchdogEvent;
 }
 
 export interface IssueWorkerRuntime {
   pid?: number;
   startedAt: string;
   lastActivityAt: string;
+  lastActivityKind?: string;
   alive: boolean;
+}
+
+export interface WorkerWatchdogEvent {
+  kind: "suspected_stall" | "worker_timeout";
+  issueNumber?: number;
+  runId?: string;
+  phase?: string;
+  pid?: number;
+  wallClockMs: number;
+  idleMs: number;
+  lastActivityAt: string;
+  lastActivityKind?: string;
+  reason: string;
 }
 
 export interface IssueWorkerOptions {
@@ -186,6 +201,10 @@ export interface IssueWorkerOptions {
   onProgress?: (elapsedMs: number) => void;
   /** Bounded child runtime metadata for truthful status inspection. */
   onWorkerState?: (runtime: IssueWorkerRuntime) => void;
+  /** Structured soft/hard watchdog observations. */
+  onWatchdog?: (event: WorkerWatchdogEvent) => void;
+  /** Explicit test/consumer override; production defaults come from config. */
+  watchdog?: WorkerWatchdogPolicy;
   progressIntervalMs?: number;
 }
 
@@ -207,7 +226,27 @@ function workerExtensionPath(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..", "pi-next.ts");
 }
 
+function workerWatchdogPolicy(cwd: string, options: IssueWorkerOptions): WorkerWatchdogPolicy {
+  if (options.watchdog) return options.watchdog;
+  try {
+    const config = loadPiNextConfig(cwd);
+    const role = options.dispatch?.role || options.phase;
+    return (role && config.workerWatchdog.roles[role as keyof typeof config.workerWatchdog.roles]) || config.workerWatchdog.default;
+  } catch {
+    return { softIdleMs: 120_000, hardIdleMs: 600_000, hardWallMs: 2_700_000, terminationGraceMs: 5_000 };
+  }
+}
+
+function persistWatchdogEvent(cwd: string, event: WorkerWatchdogEvent): void {
+  try {
+    writeJsonAtomic(join(runtimeDir(cwd), "pi-next-worker-watchdog.json"), event);
+  } catch {
+    // Diagnostics must never prevent bounded worker termination.
+  }
+}
+
 export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => {
+  const watchdog = workerWatchdogPolicy(cwd, options);
   const executable = options.executable ?? process.execPath;
   const entrypoint = options.executableArgs ?? [process.argv[1]];
   if (!entrypoint[0]) {
@@ -249,16 +288,22 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
         : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
   let output = "";
   const startedAt = Date.now();
   let lastActivityAt = startedAt;
+  let lastActivityKind: string | undefined;
+  let watchdogEvent: WorkerWatchdogEvent | undefined;
+  let watchdogGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
   const reportRuntime = (alive: boolean) => {
     try {
       options.onWorkerState?.({
         pid: child.pid,
         startedAt: new Date(startedAt).toISOString(),
         lastActivityAt: new Date(lastActivityAt).toISOString(),
+        lastActivityKind,
         alive,
       });
     } catch {
@@ -271,7 +316,11 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
       runId: options.runId,
       phase: options.phase,
     },
-    options.onActivity ?? (() => {}),
+    (event) => {
+      lastActivityAt = Date.now();
+      lastActivityKind = event.kind;
+      options.onActivity?.(event);
+    },
     (delta) => options.display?.liveDelta(delta),
     {
       onNdjsonRecord: (raw) => options.display?.recordNdjsonRecord(raw),
@@ -289,8 +338,9 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
     runId: options.runId,
     phase: options.phase,
   });
-  const appendOutput = (chunk: Buffer | string) => {
+  const appendOutput = (chunk: Buffer | string, kind = "stderr") => {
     lastActivityAt = Date.now();
+    lastActivityKind = kind;
     const value = String(chunk);
     output = `${output}${value}`.slice(-FAILURE_LIMIT);
     reportRuntime(true);
@@ -301,15 +351,67 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
       : Buffer.byteLength(chunk);
     options.display?.recordStdoutBytes(bytes);
     const value = String(chunk);
-    appendOutput(value);
+    appendOutput(value, "stdout");
     // Only stdout is Pi's structured NDJSON wire stream. Stderr remains
     // failure/diagnostic output and must never be fed to either parser.
     activity.push(value);
     telemetry.push(value);
   };
   child.stdout.on("data", appendStdout);
-  child.stderr.on("data", appendOutput);
+  child.stderr.on("data", (chunk) => appendOutput(chunk, "stderr"));
   reportRuntime(true);
+  const watchdogInterval = setInterval(() => {
+    if (settled) return;
+    const now = Date.now();
+    const wallClockMs = now - startedAt;
+    const idleMs = now - lastActivityAt;
+    const kind = idleMs >= watchdog.softIdleMs ? "suspected_stall" : undefined;
+    if (!watchdogEvent && kind) {
+      watchdogEvent = {
+        kind,
+        issueNumber: options.issueNumber,
+        runId: options.runId,
+        phase: options.phase,
+        pid: child.pid,
+        wallClockMs,
+        idleMs,
+        lastActivityAt: new Date(lastActivityAt).toISOString(),
+        lastActivityKind,
+        reason: `worker idle for ${Math.round(idleMs / 1_000)}s (soft threshold ${Math.round(watchdog.softIdleMs / 1_000)}s)`,
+      };
+      persistWatchdogEvent(cwd, watchdogEvent);
+      options.onWatchdog?.(watchdogEvent);
+      options.display?.watchdog?.(watchdogEvent);
+      reportRuntime(true);
+    }
+    const timeout = idleMs >= watchdog.hardIdleMs || wallClockMs >= watchdog.hardWallMs;
+    if (timeout && watchdogEvent?.kind !== "worker_timeout") {
+      watchdogEvent = {
+        ...watchdogEvent,
+        kind: "worker_timeout",
+        wallClockMs,
+        idleMs,
+        lastActivityAt: new Date(lastActivityAt).toISOString(),
+        lastActivityKind,
+        reason: idleMs >= watchdog.hardIdleMs
+          ? `worker idle for ${Math.round(idleMs / 1_000)}s (hard threshold ${Math.round(watchdog.hardIdleMs / 1_000)}s)`
+          : `worker wall time ${Math.round(wallClockMs / 60_000)}m exceeded hard threshold ${Math.round(watchdog.hardWallMs / 60_000)}m`,
+      };
+      persistWatchdogEvent(cwd, watchdogEvent);
+      options.onWatchdog?.(watchdogEvent);
+      options.display?.watchdog?.(watchdogEvent);
+      const pid = child.pid;
+      if (pid) {
+        terminate("SIGTERM");
+        watchdogGraceTimer = setTimeout(() => {
+          if (settled) return;
+          terminate("SIGKILL");
+        }, watchdog.terminationGraceMs);
+        watchdogGraceTimer.unref?.();
+      }
+    }
+  }, 1_000);
+  watchdogInterval.unref?.();
   const progressInterval = options.onProgress || options.onWorkerState
     ? setInterval(
         () => {
@@ -320,13 +422,29 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
       )
     : undefined;
   progressInterval?.unref?.();
-  const abort = () => child.kill("SIGTERM");
+  const terminate = (signal: NodeJS.Signals): void => {
+    const pid = child.pid;
+    if (pid) {
+      try {
+        process.kill(-pid, signal);
+        return;
+      } catch {
+        // Fall through to the direct child when process-group signalling is unavailable.
+      }
+    }
+    child.kill(signal);
+  };
+  const abort = () => terminate("SIGTERM");
   if (options.signal) {
     if (options.signal.aborted) abort();
     else options.signal.addEventListener("abort", abort, { once: true });
   }
   return new Promise((resolve) => {
     const finish = (code: number | null, signal: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(watchdogInterval);
+      if (watchdogGraceTimer) clearTimeout(watchdogGraceTimer);
       if (progressInterval) clearInterval(progressInterval);
       activity.finish();
       options.signal?.removeEventListener("abort", abort);
@@ -361,6 +479,7 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
               capabilityProfile: options.dispatch.capabilityProfile,
             } }
           : telemetry.finish(),
+        ...(watchdogEvent?.kind === "worker_timeout" ? { watchdog: watchdogEvent } : {}),
       });
     };
     child.once("error", (error) => {

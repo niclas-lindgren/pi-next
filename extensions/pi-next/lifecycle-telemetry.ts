@@ -30,7 +30,8 @@ export type LifecycleEventName =
   | "workflow_artifact_quarantined"
   | "worker_recovery"
   | "issue_contained"
-  | "issue_budget_yielded";
+  | "issue_budget_yielded"
+  | "worker_stalled";
 
 export interface LifecycleEvent {
   event: LifecycleEventName;

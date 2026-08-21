@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.48 - pending release
+
+Worker liveness watchdog release.
+
+### Material changes
+
+- Add configurable soft/hard worker idle and wall-clock watchdogs with truthful activity telemetry.
+- Bound process-group termination and preserve existing issue recovery state after a stall.
+
+### Compatibility/configuration/schema
+
+- Add optional `workerWatchdog` defaults and worker-role overrides with conservative compatibility defaults.
+- Existing worker and controller abort behavior remains supported.
+
+### Breaking/behavior changes
+
+- Silent workers now surface suspected stalls and are terminated at bounded hard limits instead of occupying a controller indefinitely.
+
+### Security/safety
+
+- Watchdog diagnostics are bounded and issue/run scoped; termination uses SIGTERM, grace, then SIGKILL without resetting or stashing work.
+- Explicit user/controller aborts remain distinct from watchdog timeouts.
+
+### Upgrade guidance
+
+- Review role-specific watchdog limits for providers or verification commands that legitimately remain silent for long periods.
+
 ## 0.2.47 - pending release
 
 Per-issue convergence budget release.
