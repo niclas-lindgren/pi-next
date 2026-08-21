@@ -32,6 +32,7 @@ import type {
 import type { WorkerWorkLogEvent, WorkerWorkLogPhase } from "./worker-activity.ts";
 import type { WorkerWorkLogSink } from "./work-log.ts";
 import { runOwnedIssueCycle } from "./loop.ts";
+import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
 
 /**
  * Compatibility accessors for code executing inside a supervisor context.
@@ -253,6 +254,8 @@ export class ForegroundSupervisor {
   private readonly runtime: SupervisorRuntime;
   private workerRuntime: IssueWorkerRuntime | null = null;
   private workerPhase: WorkerWorkLogPhase | undefined;
+  /** One visual owner for the complete supervisor run, not one per issue. */
+  private display: WorkerDisplayController | undefined;
 
   constructor(
     private readonly ctx: ExtensionCommandContext,
@@ -350,6 +353,7 @@ export class ForegroundSupervisor {
       this.phase = "running";
       await withSupervisorRuntime(this.runtime, async () => {
         let state = initial;
+        this.display = attachWorkerDisplay(getLiveCtx() ?? this.ctx, this.display);
         while (state.status === "running" && state.remainingIssues > 0) {
           this.workerPhase = undefined;
           this.workerRuntime = null;
@@ -369,6 +373,8 @@ export class ForegroundSupervisor {
               this.workerRuntime = runtime;
               this.onWorkerState?.(runtime);
             },
+            undefined,
+            this.display,
           );
         }
       });
@@ -413,6 +419,8 @@ export class ForegroundSupervisor {
       // state is rendered without mutable runtime data from the old issue.
       this.workerRuntime = null;
       this.workerPhase = undefined;
+      this.display?.dispose();
+      this.display = undefined;
       liveSupervisors.delete(supervisorKey(this.cwd, this.runId));
     }
     return this.reconcile();

@@ -68,7 +68,7 @@ import { workflowArtifacts } from "./plan-read.ts";
 import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
-import { attachWorkerDisplay } from "./worker-display.ts";
+import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
 import { getLiveCtx, sessionIdentity } from "./live-ctx.ts";
 import { renderLoopStatus } from "./loop-status.ts";
 import {
@@ -679,10 +679,16 @@ export async function runOwnedIssueCycle(
   onWorkLog?: WorkerWorkLogSink,
   onWorkerState?: (runtime: import("./util-core.ts").IssueWorkerRuntime) => void,
   authorityOverride?: import("./issue-leases.ts").IssueLeaseAuthority,
+  /** Stable display supplied by the foreground supervisor across issue cycles. */
+  displayOverride?: WorkerDisplayController,
 ): Promise<LoopState> {
   const coordinationCwd = initial.coordinationCwd || ctx.cwd;
   const issueAuthority = authorityOverride ?? new GitHubIssueLeaseAuthority(coordinationCwd);
-  const display = attachWorkerDisplay(ctx);
+  // A direct bounded cycle lets runLoopSteps own its display. The foreground
+  // supervisor supplies one owner so scheduler-only issue boundaries do not
+  // attach/dispose the widget on every cycle.
+  const display = displayOverride ? attachWorkerDisplay(ctx, displayOverride) : undefined;
+  display?.controllerActivity(undefined, initial.runId, "selecting next issue");
   let state = initial;
   let prepared: LoopState;
   try {
@@ -717,7 +723,10 @@ export async function runOwnedIssueCycle(
   state = prepared;
   // Candidate exhaustion is a normal terminal queue state. Do not enter the
   // worker controller after claim has durably settled the run as idle.
-  if (prepared.status !== "running") return prepared;
+  if (prepared.status !== "running") {
+    display?.controllerActivity(undefined, prepared.runId, prepared.lastReason || "queue idle");
+    return prepared;
+  }
   {
       const heartbeat = prepared.activeLease
         ? startIssueLeaseHeartbeat(
@@ -978,6 +987,9 @@ export async function runOwnedIssueCycle(
         activeLease: undefined,
         updatedAt: loopNow(),
       };
+      if (state.lastOutcome === "yield_issue") {
+        display?.controllerActivity(undefined, state.runId, "budget yielded; selecting next issue");
+      }
       writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), state);
       return state;
   }
