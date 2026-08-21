@@ -71,6 +71,7 @@ export interface PiNextConfig {
     hardTransitions: number;
     softWallMs: number;
     hardWallMs: number;
+    /** Cumulative provider totalTokens minus the explicit budget baseline. */
     softTokens: number;
     hardTokens: number;
     maxPlanTasksWarning: number;
@@ -126,8 +127,10 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
     hardTransitions: 12,
     softWallMs: 15 * 60_000,
     hardWallMs: 30 * 60_000,
-    softTokens: 100_000,
-    hardTokens: 200_000,
+    // Provider-reported totalTokens is retained as the bounded fairness
+    // metric, but defaults allow several ordinary worker turns (#62).
+    softTokens: 2_000_000,
+    hardTokens: 4_000_000,
     maxPlanTasksWarning: 12,
   },
   workerWatchdog: {
@@ -309,8 +312,8 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     hardTransitions: convergenceNumber("hardTransitions", 12, 2, 200),
     softWallMs: convergenceNumber("softWallMs", 15 * 60_000, 1_000, 86_400_000),
     hardWallMs: convergenceNumber("hardWallMs", 30 * 60_000, 2_000, 172_800_000),
-    softTokens: convergenceNumber("softTokens", 100_000, 1_000, 100_000_000),
-    hardTokens: convergenceNumber("hardTokens", 200_000, 2_000, 200_000_000),
+    softTokens: convergenceNumber("softTokens", 2_000_000, 1_000, 100_000_000),
+    hardTokens: convergenceNumber("hardTokens", 4_000_000, 2_000, 200_000_000),
     maxPlanTasksWarning: convergenceNumber("maxPlanTasksWarning", 12, 1, 100),
   };
   if (convergence.hardTransitions <= convergence.softTransitions || convergence.hardWallMs <= convergence.softWallMs || convergence.hardTokens <= convergence.softTokens) {

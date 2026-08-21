@@ -81,6 +81,33 @@ test("current run selection uses session identity and refuses ambiguous history"
   assert.equal(selectCurrentLoop([record("foreign", "alive", "session-b")], undefined, "session-a").current, undefined);
 });
 
+test("status exposes budget baseline and post-activation consumption", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-loop-status-budget-"));
+  try {
+    const value = state("budget-run", {
+      activeIssueNumber: 638,
+      issueMetrics: [{
+        ...emptyLoopMetrics(),
+        issueNumber: 638,
+        disposition: "active",
+        updatedAt: new Date().toISOString(),
+        totalTokens: 5_050_000,
+        budgetPolicyVersion: 1,
+        budgetBaselineTokens: 5_000_000,
+        budgetBaselineTransitions: 20,
+        budgetBaselineWallClockMs: 90 * 60_000,
+      }],
+    });
+    await persist(cwd, value, "run_id=budget-run\npid=202\n");
+    const output = renderLoopStatus(cwd, "session-a", undefined, "verbose", { processAlive: () => false });
+    assert.match(output, /tokens=50k/);
+    assert.match(output, /baseline=5\.0m/);
+    assert.match(output, /policy=convergence-v1/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("default status bounds history while verbose mode exposes every retained run", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-next-loop-status-history-"));
   try {

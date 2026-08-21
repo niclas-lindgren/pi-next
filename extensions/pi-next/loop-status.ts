@@ -142,8 +142,15 @@ function recordLine(record: LoopStatusRecord): string {
     ? state.issueMetrics.find((item) => item.issueNumber === state.activeIssueNumber)
     : state.issueMetrics.at(-1);
   const policy = loadPiNextConfig(record.state.coordinationCwd || process.cwd()).convergence;
+  const tokenBaseline = issue ? Math.max(0, issue.budgetBaselineTokens ?? issue.totalTokens) : 0;
+  const tokenUsage = issue ? Math.max(0, issue.totalTokens - tokenBaseline) : 0;
+  const transitions = issue ? Math.max(0, (issue.transitions || 0) - (issue.budgetBaselineTransitions || 0)) : 0;
+  const wallClockMs = issue ? Math.max(0, (issue.wallClockMs || 0) - (issue.budgetBaselineWallClockMs || 0)) : 0;
+  const formatCount = (value: number): string => value >= 1_000_000
+    ? `${(value / 1_000_000).toFixed(1)}m`
+    : value >= 1_000 ? `${Math.round(value / 1_000)}k` : `${Math.round(value)}`;
   const budget = issue
-    ? ` · budget=${Math.round(Math.min(1, Math.max((issue.transitions || 0) / policy.hardTransitions, (issue.wallClockMs || 0) / policy.hardWallMs, issue.totalTokens / policy.hardTokens)) * 100)}% transitions=${issue.transitions || 0} workers=${issue.workerLaunches || 0}${issue.planTasksAtSelection !== undefined ? ` tasks=${issue.planTasksRemaining ?? 0}/${issue.planTasksAtSelection}` : ""}`
+    ? ` · budget=${Math.round(Math.min(1, Math.max(transitions / policy.hardTransitions, wallClockMs / policy.hardWallMs, tokenUsage / policy.hardTokens)) * 100)}% tokens=${formatCount(tokenUsage)}/${formatCount(policy.hardTokens)} baseline=${formatCount(tokenBaseline)} transitions=${transitions} wall=${Math.round(wallClockMs / 60_000)}m policy=convergence-v${issue.budgetPolicyVersion || 1} workers=${issue.workerLaunches || 0}${issue.planTasksAtSelection !== undefined ? ` tasks=${issue.planTasksRemaining ?? 0}/${issue.planTasksAtSelection}` : ""}`
     : "";
   const controller = record.controller === "alive"
     ? `controller alive pid=${record.controllerPid}`

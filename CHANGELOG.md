@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.50 - pending release
+
+Convergence budget compatibility release.
+
+### Material changes
+
+- Establish explicit convergence policy baselines so historical issue telemetry is not charged against newly activated budgets.
+- Preserve fairness yields while preventing zero-worker budget preflights from consuming global worker steps.
+- Expose bounded token consumption, baseline, wall-time, transition, and policy details in loop status.
+
+### Compatibility/configuration/schema
+
+- Loop-state v1 remains compatible; optional convergence baseline fields migrate deterministically when absent or when the policy version changes.
+- Default token thresholds are calibrated for several ordinary worker turns while remaining configurable.
+
+### Breaking/behavior changes
+
+- Convergence token, transition, and wall-time limits measure post-activation consumption rather than cumulative historical counters.
+- A pure scheduler budget yield no longer advances the global worker/model step counter.
+
+### Security/safety
+
+- Baselines are explicit durable state and policy upgrades reset the activation epoch instead of guessing from timestamps.
+- Budget yields remain non-destructive and run-local; PLAN/worktree state is preserved.
+
+### Upgrade guidance
+
+- Existing runs resume with a baseline established from their current telemetry; no manual migration is required.
+
 ## 0.2.49 - pending release
 
 Stable scheduler/display lifecycle release.

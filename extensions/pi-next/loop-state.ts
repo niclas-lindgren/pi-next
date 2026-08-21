@@ -76,6 +76,9 @@ export interface LoopMetrics extends LoopUsage {
 
 export type LoopIssueDisposition = "active" | "completed" | "deferred" | "blocked" | "yielded";
 
+/** Increment this when the meaning of convergence counters changes. */
+export const CONVERGENCE_BUDGET_POLICY_VERSION = 1;
+
 /** Durable, bounded recovery evidence for a worker boundary without a result. */
 export interface LoopRecoveryState {
   missingLoopResults: number;
@@ -112,7 +115,12 @@ export interface LoopIssueMetrics extends LoopMetrics {
   wallClockMs?: number;
   planTasksAtSelection?: number;
   planTasksRemaining?: number;
+  /** Explicit activation epoch for convergence accounting (#62). */
+  budgetPolicyVersion?: number;
   budgetStartedAt?: string;
+  budgetBaselineTokens?: number;
+  budgetBaselineTransitions?: number;
+  budgetBaselineWallClockMs?: number;
   softBudgetWarned?: boolean;
   repeatedTaskFingerprints?: Record<string, number>;
 }
@@ -165,6 +173,8 @@ export interface LoopState {
 export interface LoopResult {
   runId: string;
   step: number;
+  /** A budget gate that did not open a worker/model step. */
+  schedulerOnly?: boolean;
   outcome: LoopOutcome;
   issueNumber?: number;
   reason?: string;
@@ -275,7 +285,11 @@ export function addIssuePromptMetrics(
     wallClockMs: previous?.wallClockMs || 0,
     planTasksAtSelection: previous?.planTasksAtSelection,
     planTasksRemaining: previous?.planTasksRemaining,
+    budgetPolicyVersion: previous?.budgetPolicyVersion,
     budgetStartedAt: previous?.budgetStartedAt,
+    budgetBaselineTokens: previous?.budgetBaselineTokens,
+    budgetBaselineTransitions: previous?.budgetBaselineTransitions,
+    budgetBaselineWallClockMs: previous?.budgetBaselineWallClockMs,
     softBudgetWarned: previous?.softBudgetWarned,
     repeatedTaskFingerprints: { ...(previous?.repeatedTaskFingerprints || {}) },
   };
@@ -306,7 +320,11 @@ export function markIssueDisposition(
     wallClockMs: previous?.wallClockMs || 0,
     planTasksAtSelection: previous?.planTasksAtSelection,
     planTasksRemaining: previous?.planTasksRemaining,
+    budgetPolicyVersion: previous?.budgetPolicyVersion,
     budgetStartedAt: previous?.budgetStartedAt,
+    budgetBaselineTokens: previous?.budgetBaselineTokens,
+    budgetBaselineTransitions: previous?.budgetBaselineTransitions,
+    budgetBaselineWallClockMs: previous?.budgetBaselineWallClockMs,
     softBudgetWarned: previous?.softBudgetWarned,
     repeatedTaskFingerprints: { ...(previous?.repeatedTaskFingerprints || {}) },
   };
@@ -338,7 +356,11 @@ export function markIssueTransition(
     wallClockMs: previous?.wallClockMs || 0,
     planTasksAtSelection: previous?.planTasksAtSelection ?? planTasks.total,
     planTasksRemaining: planTasks.remaining,
+    budgetPolicyVersion: previous?.budgetPolicyVersion ?? CONVERGENCE_BUDGET_POLICY_VERSION,
     budgetStartedAt: previous?.budgetStartedAt || loopNow(),
+    budgetBaselineTokens: previous?.budgetBaselineTokens ?? previous?.totalTokens ?? 0,
+    budgetBaselineTransitions: previous?.budgetBaselineTransitions ?? previous?.transitions ?? 0,
+    budgetBaselineWallClockMs: previous?.budgetBaselineWallClockMs ?? previous?.wallClockMs ?? 0,
     softBudgetWarned: previous?.softBudgetWarned || false,
     repeatedTaskFingerprints: repeats,
     reason: previous?.reason,
@@ -346,6 +368,27 @@ export function markIssueTransition(
   if (index >= 0) current.splice(index, 1);
   current.push(next);
   return current.slice(-MAX_ISSUE_METRICS);
+}
+
+/**
+ * Establish or migrate the convergence epoch without reinterpreting old
+ * telemetry as new budget consumption. Callers persist this metric before
+ * making a budget decision.
+ */
+export function initializeIssueBudgetBaseline(metric: LoopIssueMetrics): LoopIssueMetrics {
+  const policyChanged = metric.budgetPolicyVersion !== CONVERGENCE_BUDGET_POLICY_VERSION;
+  if (!policyChanged && metric.budgetBaselineTokens !== undefined && metric.budgetBaselineTransitions !== undefined && metric.budgetBaselineWallClockMs !== undefined) {
+    return metric;
+  }
+  return {
+    ...metric,
+    budgetPolicyVersion: CONVERGENCE_BUDGET_POLICY_VERSION,
+    budgetStartedAt: loopNow(),
+    budgetBaselineTokens: Math.max(0, metric.totalTokens || 0),
+    budgetBaselineTransitions: Math.max(0, metric.transitions || 0),
+    budgetBaselineWallClockMs: Math.max(0, metric.wallClockMs || 0),
+    softBudgetWarned: false,
+  };
 }
 
 export function recordIssueTransitionResult(
