@@ -5,6 +5,9 @@ import type {
 import { existsSync } from "node:fs";
 
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
+import { findingPublicationEligible, type SelfAssessmentFinding } from "../../src/coordination/self-assessment.ts";
+import { sanitizeFeedbackText } from "../../src/coordination/feedback.ts";
+import { readHealthState, readSelfAssessmentFindings } from "./self-assessment.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import { sessionIdentity } from "./live-ctx.ts";
 import { reportRuntimeFailure, reportWorkerToolFailures } from "./feedback-runtime.ts";
@@ -87,6 +90,54 @@ function notifySafely(
   level: "info" | "warning" | "error" = "info",
 ): void {
   safeNotify(ctx, message, level);
+}
+
+function boundedStatusText(value: unknown, max = 240): string {
+  return sanitizeFeedbackText(String(value ?? "")).replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function assessmentStatusText(cwd: string): string {
+  const config = loadPiNextConfig(cwd);
+  const policy = config.assessment;
+  const lines = [
+    `Self-assessment: ${policy.enabled ? "enabled" : "disabled"}`,
+    `Thresholds: no-progress=${policy.noProgressThreshold} repeated-failure=${policy.repeatedFailureThreshold} repeated-command=${policy.repeatedCommandThreshold} context-pressure=${policy.contextPressureThreshold} finding-recurrence=${policy.findingRecurrenceThreshold} minimum-confidence=${policy.findingMinConfidence}`,
+    `Governance: labels=${policy.findingLabels.join(", ") || "none"} held=${policy.heldStates.join(", ") || "none"} approved=${policy.approvedStates.join(", ") || "none"} rejected=${policy.rejectedStates.join(", ") || "none"} superseded=${policy.supersededStates.join(", ") || "none"}`,
+  ];
+  if (!policy.enabled) {
+    lines.push("Health: disabled (no evaluation or publication occurs)");
+    return lines.join("\n");
+  }
+  const health = readHealthState(cwd);
+  const signals: string[] = [];
+  if (health) {
+    if (health.noProgressStreak >= policy.noProgressThreshold) signals.push(`no-progress=${health.noProgressStreak}`);
+    if (Object.values(health.failureCounts || {}).some((count) => count >= policy.repeatedFailureThreshold)) signals.push("repeated-failure");
+    if (Object.values(health.commandCounts || {}).some((count) => count >= policy.repeatedCommandThreshold)) signals.push("repeated-command");
+    if ((health.dimensions?.contextPressure || 0) >= policy.contextPressureThreshold) signals.push(`context-pressure=${Math.round((health.dimensions.contextPressure || 0) * 100)}%`);
+  }
+  lines.push(`Health: ${signals.length ? "escalate" : "healthy"} · signals=${signals.join(", ") || "none"} · transitions=${health?.transitionCount || 0} · last=${health?.updatedAt || "none"} · run=${health?.runId || "none"} · issue=${health?.issueNumber ? `#${health.issueNumber}` : "none"}`);
+  const findings = readSelfAssessmentFindings(cwd)
+    .sort((a, b) => b.updatedAt?.localeCompare(a.updatedAt || "") || b.fingerprint.localeCompare(a.fingerprint))
+    .slice(0, 20);
+  const eligible = findings.filter((finding) => findingPublicationEligible(finding, { recurrenceThreshold: policy.findingRecurrenceThreshold, minConfidence: policy.findingMinConfidence }));
+  lines.push(`Findings: ${findings.length} total · ${eligible.length} eligible · ${findings.filter((finding) => finding.authorityId).length} published`);
+  for (const finding of findings) lines.push(formatAssessmentFinding(finding, policy));
+  if (!findings.length) lines.push("Findings: none (no deterministic anomalies retained)");
+  return lines.join("\n");
+}
+
+function formatAssessmentFinding(
+  finding: SelfAssessmentFinding,
+  policy: ReturnType<typeof loadPiNextConfig>["assessment"],
+): string {
+  const eligible = findingPublicationEligible(finding, { recurrenceThreshold: policy.findingRecurrenceThreshold, minConfidence: policy.findingMinConfidence });
+  const eligibility = eligible ? "eligible" : `not-eligible (recurrence/confidence threshold)`;
+  const publication = finding.publication?.status || (finding.authorityId ? "published" : "not-attempted");
+  const authority = finding.authorityId ? ` authority=${boundedStatusText(finding.authorityId, 80)}${finding.authorityUrl ? ` url=${boundedStatusText(finding.authorityUrl, 160)}` : ""}` : "";
+  const diagnostic = finding.publication?.reason ? ` reason=${boundedStatusText(finding.publication.reason)}` : "";
+  const evidence = finding.evidence.slice(0, 3).map((item) => boundedStatusText(item, 100)).join(" | ") || "none";
+  return `Finding ${boundedStatusText(finding.fingerprint, 80)} · ${finding.category}/${finding.severity}/${finding.confidence} · recurrence=${finding.recurrence} · approval=${finding.approvalState} · ${eligibility} · publication=${publication}${authority}${diagnostic} · evidence=${evidence} · action=${boundedStatusText(finding.proposedAction, 120)}`;
 }
 
 /**
@@ -599,6 +650,17 @@ export function registerPiNextCommands(
           `pi-next doctor failed: ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
+      }
+    },
+  });
+
+  pi.registerCommand("pi-next-assessment", {
+    description: "Show bounded self-assessment health, findings, and publication status without invoking the model",
+    handler: async (_args, ctx) => {
+      try {
+        notifySafely(ctx, assessmentStatusText(ctx.cwd), "info");
+      } catch (error) {
+        notifySafely(ctx, `pi-next assessment status failed: ${boundedStatusText(error instanceof Error ? error.message : String(error))}`, "error");
       }
     },
   });

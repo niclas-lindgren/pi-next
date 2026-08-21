@@ -341,6 +341,23 @@ export type FindingCategory = "runtime" | "efficiency" | "integrity" | "architec
 export type FindingSeverity = "info" | "P3" | "P2" | "P1" | "P0";
 export type FindingConfidence = "low" | "medium" | "high";
 export type FindingApprovalState = "observing" | "pending_review" | "approved" | "rejected" | "superseded";
+export type FindingPublicationStatus =
+  | "not_eligible"
+  | "eligible_not_attempted"
+  | "published"
+  | "updated"
+  | "publication_failed"
+  | "approval_refresh_failed";
+
+export interface FindingPublicationState {
+  status: FindingPublicationStatus;
+  attemptedAt?: string;
+  adapter?: string;
+  authorityId?: string;
+  authorityUrl?: string;
+  reason?: string;
+  retry?: string;
+}
 
 export interface SelfAssessmentFinding {
   fingerprint: string;
@@ -357,6 +374,7 @@ export interface SelfAssessmentFinding {
   updatedAt?: string;
   authorityId?: string;
   authorityUrl?: string;
+  publication?: FindingPublicationState;
 }
 
 const FINDING_LIMIT = 100;
