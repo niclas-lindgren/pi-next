@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.53 - pending release
+
+Bounded legacy worktree attribution release.
+
+### Material changes
+
+- Recover clean divergent legacy commits from canonical configured PLAN/VERIFY issue identity when commit subjects omit `#N`.
+- Evaluate the complete divergent commit set before replay and report the attribution evidence for each commit.
+
+### Compatibility/configuration/schema
+
+- Existing lease, branch, and worktree identities remain unchanged.
+- Attribution follows the configured workflow PLAN/VERIFY paths; no new configuration is required.
+
+### Breaking/behavior changes
+
+- Ambiguous, foreign, or mixed legacy history remains contained and is never partially salvaged.
+
+### Security/safety
+
+- Automatic adoption remains fail-closed and preserves the legacy checkout when ownership evidence is incomplete or conflicting.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.52 - prepared release
 
 Bounded PLAN recovery follow-up release.

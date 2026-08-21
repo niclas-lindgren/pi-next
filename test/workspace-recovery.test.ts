@@ -160,6 +160,116 @@ test("salvages a clean divergent legacy branch onto authoritative main", async (
   }
 });
 
+test("salvages a clean divergent legacy commit from canonical PLAN identity", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.repo, "main-update.txt"), "main\n");
+    await git(fixtureState.repo, "add", "main-update.txt");
+    await git(fixtureState.repo, "commit", "-m", "main advances");
+    await git(fixtureState.repo, "push", "origin", "main");
+    await git(fixtureState.workspace, "switch", "-c", "pi-next/issue-7/legacy");
+    await mkdir(join(fixtureState.workspace, ".pi-next"), { recursive: true });
+    await writeFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "# Plan\n\n**GitHub-Issue:** #7\n");
+    await writeFile(join(fixtureState.workspace, "legacy-change.txt"), "legacy\n");
+    await git(fixtureState.workspace, "add", ".pi-next/PLAN.md", "legacy-change.txt");
+    await git(fixtureState.workspace, "commit", "-m", "feat: implement the bounded recovery");
+    await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
+
+    const recovered = await ensureIssueWorktree(fixtureState.repo, 7, undefined, {
+      ownership: { lease: fixtureState.lease, authority: new MemoryAuthority(fixtureState.lease) },
+    });
+    assert.equal(recovered, fixtureState.workspace);
+    assert.equal(await readFile(join(recovered, "legacy-change.txt"), "utf8"), "legacy\n");
+    assert.match(await readFile(join(recovered, ".pi-next", "PLAN.md"), "utf8"), /#7/);
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a divergent legacy commit without message or workflow ownership evidence", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.repo, "main-update.txt"), "main\n");
+    await git(fixtureState.repo, "add", "main-update.txt");
+    await git(fixtureState.repo, "commit", "-m", "main advances");
+    await git(fixtureState.repo, "push", "origin", "main");
+    await git(fixtureState.workspace, "switch", "-c", "pi-next/issue-7/legacy");
+    await writeFile(join(fixtureState.workspace, "unowned-change.txt"), "unowned\n");
+    await git(fixtureState.workspace, "add", "unowned-change.txt");
+    await git(fixtureState.workspace, "commit", "-m", "refactor: unrelated change");
+    await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
+
+    await assert.rejects(
+      () => ensureIssueWorktree(fixtureState.repo, 7, undefined, {
+        ownership: { lease: fixtureState.lease, authority: new MemoryAuthority(fixtureState.lease) },
+      }),
+      (error: unknown) => error instanceof Error &&
+        error.message.includes("no canonical PLAN/VERIFY artifact identifies this issue"),
+    );
+    assert.equal(await git(fixtureState.workspace, "branch", "--show-current"), "pi-next/issue-7/legacy");
+    await assert.rejects(() => readFile(join(fixtureState.workspace, "main-update.txt")));
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a divergent commit with a foreign workflow identity", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.repo, "main-update.txt"), "main\n");
+    await git(fixtureState.repo, "add", "main-update.txt");
+    await git(fixtureState.repo, "commit", "-m", "main advances");
+    await git(fixtureState.repo, "push", "origin", "main");
+    await git(fixtureState.workspace, "switch", "-c", "pi-next/issue-7/legacy");
+    await mkdir(join(fixtureState.workspace, ".pi-next"), { recursive: true });
+    await writeFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "# Foreign\n\n**GitHub-Issue:** #99\n");
+    await git(fixtureState.workspace, "add", ".pi-next/PLAN.md");
+    await git(fixtureState.workspace, "commit", "-m", "docs: update workflow notes for #7");
+    await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
+
+    await assert.rejects(
+      () => ensureIssueWorktree(fixtureState.repo, 7, undefined, {
+        ownership: { lease: fixtureState.lease, authority: new MemoryAuthority(fixtureState.lease) },
+      }),
+      (error: unknown) => error instanceof Error && error.message.includes("conflicting workflow identities: #99"),
+    );
+    assert.equal(await git(fixtureState.workspace, "branch", "--show-current"), "pi-next/issue-7/legacy");
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects the complete divergent set when one commit is ambiguous", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.repo, "main-update.txt"), "main\n");
+    await git(fixtureState.repo, "add", "main-update.txt");
+    await git(fixtureState.repo, "commit", "-m", "main advances");
+    await git(fixtureState.repo, "push", "origin", "main");
+    await git(fixtureState.workspace, "switch", "-c", "pi-next/issue-7/legacy");
+    await mkdir(join(fixtureState.workspace, ".pi-next"), { recursive: true });
+    await writeFile(join(fixtureState.workspace, ".pi-next", "PLAN.md"), "# Owned\n\n**GitHub-Issue:** #7\n");
+    await git(fixtureState.workspace, "add", ".pi-next/PLAN.md");
+    await git(fixtureState.workspace, "commit", "-m", "feat: durable workflow transition");
+    await writeFile(join(fixtureState.workspace, "ambiguous-change.txt"), "ambiguous\n");
+    await git(fixtureState.workspace, "add", "ambiguous-change.txt");
+    await git(fixtureState.workspace, "commit", "-m", "refactor: unrelated change");
+    await git(fixtureState.repo, "branch", "-D", "agent/issue-7");
+
+    await assert.rejects(
+      () => ensureIssueWorktree(fixtureState.repo, 7, undefined, {
+        ownership: { lease: fixtureState.lease, authority: new MemoryAuthority(fixtureState.lease) },
+      }),
+      (error: unknown) => error instanceof Error &&
+        error.message.includes("accepted") && error.message.includes("rejected"),
+    );
+    assert.equal(await git(fixtureState.workspace, "branch", "--show-current"), "pi-next/issue-7/legacy");
+    assert.equal(await readFile(join(fixtureState.workspace, "ambiguous-change.txt"), "utf8"), "ambiguous\n");
+  } finally {
+    await rm(fixtureState.root, { recursive: true, force: true });
+  }
+});
+
 test("legacy salvage preserves evidence after bounded transient authority-read exhaustion", async () => {
   const fixtureState = await fixture();
   try {

@@ -37,6 +37,7 @@ import {
   ProjectStatusSyncError,
 } from "./types.ts";
 import { readAuthorityWithTransientRetry } from "./authority-read-policy.ts";
+import { loadPiNextConfig } from "./config.ts";
 
 export type { IssueLease } from "./issue-authority.ts";
 export type {
@@ -835,6 +836,74 @@ function preservationPath(path: string, tip: string): string {
   return candidate;
 }
 
+const WORKFLOW_ISSUE_IDENTITY = /^\s*\*\*GitHub-[Ii]ssue:\*\*\s*#?(\d+)|^\s*GITHUB_ISSUE:\s*#?(\d+)/gim;
+
+interface LegacyCommitAttribution {
+  commit: string;
+  accepted: boolean;
+  evidence: string[];
+  missing: string[];
+}
+
+async function legacyCommitAttribution(
+  cwd: string,
+  issueNumber: number,
+  commit: string,
+): Promise<LegacyCommitAttribution> {
+  const message = await git(cwd, ["show", "-s", "--format=%B", commit]);
+  const config = loadPiNextConfig(cwd);
+  const configuredWorkflowFiles = new Set([config.workflow.planPath, config.workflow.verifyPath]);
+  const issuePlanPrefix = `${config.workflow.stateDir}/PLAN-`;
+  const files = (await git(cwd, [
+    "show",
+    "--format=",
+    "--name-only",
+    "--no-renames",
+    commit,
+  ])).split("\n").filter(Boolean);
+  const workflowFiles = files.filter((file) => {
+    if (configuredWorkflowFiles.has(file)) return true;
+    if (!file.startsWith(issuePlanPrefix) || !file.endsWith(".md")) return false;
+    return !file.slice(issuePlanPrefix.length, -3).includes("/");
+  });
+  const identities = new Map<string, Set<number>>();
+  for (const file of workflowFiles) {
+    const content = await git(cwd, ["show", `${commit}:${file}`]).catch(() => "");
+    const found = new Set<number>();
+    const issuePlan = file.match(/(?:^|\/)PLAN-(\d+)\.md$/);
+    if (issuePlan) found.add(Number.parseInt(issuePlan[1], 10));
+    for (const match of content.matchAll(WORKFLOW_ISSUE_IDENTITY)) {
+      const identity = Number.parseInt(match[1] || match[2] || "", 10);
+      if (Number.isSafeInteger(identity) && identity > 0) found.add(identity);
+    }
+    identities.set(file, found);
+  }
+
+  const messageEvidence = new RegExp(`(?:^|\\W)#${issueNumber}(?:\\D|$)`, "m").test(message);
+  const ownedWorkflowFiles = [...identities.entries()]
+    .filter(([, found]) => found.has(issueNumber))
+    .map(([file]) => file);
+  const conflicting = [...new Set(
+    [...identities.values()].flatMap((found) => [...found]).filter((identity) => identity !== issueNumber),
+  )].sort((left, right) => left - right);
+  const evidence = [
+    ...(messageEvidence ? [`commit message contains #${issueNumber}`] : []),
+    ...(ownedWorkflowFiles.length ? [`workflow identity in ${ownedWorkflowFiles.join(", ")}`] : []),
+  ];
+  const missing = [
+    ...(!messageEvidence ? [`commit message does not contain #${issueNumber}`] : []),
+    ...(!ownedWorkflowFiles.length ? ["no canonical PLAN/VERIFY artifact identifies this issue"] : []),
+  ];
+  if (conflicting.length) missing.push(`conflicting workflow identities: ${conflicting.map((identity) => `#${identity}`).join(", ")}`);
+
+  return {
+    commit,
+    accepted: conflicting.length === 0 && (messageEvidence || ownedWorkflowFiles.length > 0),
+    evidence,
+    missing,
+  };
+}
+
 async function salvageDivergentLegacyWorktree(
   cwd: string,
   issueNumber: number,
@@ -864,17 +933,37 @@ async function salvageDivergentLegacyWorktree(
       mainTip,
     });
   }
-  for (const commit of commits) {
-    const message = await git(cwd, ["show", "-s", "--format=%B", commit]);
-    if (!new RegExp(`(?:^|\\W)#${issueNumber}(?:\\D|$)`, "m").test(message)) {
-      throw new WorktreeRecoveryError(issueNumber, "migrate", new Error(`commit ${commit.slice(0, 12)} is not clearly attributable to issue #${issueNumber}`), {
+  // Inspect the complete replay set before mutating either worktree. A
+  // message marker remains strong evidence, but committed canonical workflow
+  // identity also proves ownership when legacy commit subjects omitted #N.
+  const attributions = await Promise.all(
+    commits.map((commit) => legacyCommitAttribution(cwd, issueNumber, commit)),
+  );
+  const rejected = attributions.filter((attribution) => !attribution.accepted);
+  if (rejected.length) {
+    const first = rejected[0];
+    const summary = attributions
+      .map((attribution) => {
+        const status = attribution.accepted ? "accepted" : "rejected";
+        const evidence = attribution.evidence.length ? attribution.evidence.join(", ") : "none";
+        const missing = attribution.missing.length ? `; missing/conflicts: ${attribution.missing.join(", ")}` : "";
+        return `${attribution.commit.slice(0, 12)} ${status}; evidence: ${evidence}${missing}`;
+      })
+      .join(" | ");
+    throw new WorktreeRecoveryError(
+      issueNumber,
+      "migrate",
+      new Error(`commit ${first.commit.slice(0, 12)} is not clearly attributable to issue #${issueNumber}; ${summary}`),
+      {
         reason: "legacy_salvage_ambiguous_commit",
         legacyBranch,
         legacyTip,
         mainTip,
-        commit,
-      });
-    }
+        commit: first.commit,
+        attributionEvidence: summary,
+        rejectedCommits: rejected.map((attribution) => attribution.commit).join(","),
+      },
+    );
   }
 
   const canonicalTip = await refTip(cwd, `refs/heads/${canonicalBranch}`);
