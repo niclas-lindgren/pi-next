@@ -9,6 +9,22 @@ manager.
 > release. Review the release notes and use a disposable repository before
 > enabling autonomous runs on valuable work.
 
+## Design principle
+
+**Pi-next is portable by default and extensible by design.** Generic behavior
+that Pi-next can safely provide belongs in package-owned, product-neutral
+defaults; consumers should not have to copy helper scripts or reimplement the
+kernel merely because an extension point exists. When a repository genuinely
+needs different semantics, it can explicitly select a versioned, validated
+adapter/provider/override. A valid configured override is authoritative for its
+defined contract, while an absent override leaves the built-in default in
+control. File presence alone is never an implicit override, and a broken
+explicit override fails clearly rather than silently falling back.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for extension precedence and
+the non-overridable ownership, worktree, freshness, verification, and guarded
+completion boundaries.
+
 ## Requirements
 
 - Node.js 22.19 or newer (required by the supported Pi 0.84.2 host).

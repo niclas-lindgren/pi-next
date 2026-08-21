@@ -12,6 +12,18 @@ its generic kernel boundary separate from consumer product policy.
    and completion invariants.
 4. Treat Pi host APIs and the version-1 configuration/authority contracts as
    compatibility boundaries. Update documentation and tests when they change.
+5. Apply the project rule **portable by default, extensible by design**:
+   - when Pi-next can safely provide generic behavior, prefer a package-owned
+     product-neutral default rather than requiring every consumer to copy or
+     implement it;
+   - when consumers reasonably need different semantics, expose an explicit,
+     versioned, validated extension point;
+   - an explicitly configured valid consumer override is authoritative only for
+     the narrow contract it implements;
+   - do not make file presence at a conventional/legacy path an implicit
+     override; and
+   - if an explicitly selected override is broken, fail clearly at that
+     boundary rather than silently falling back to the built-in behavior.
 
 For the mandatory serial issue workflow—discover live GitHub issues, implement
 one in its isolated worktree, commit, guarded-merge, push, complete through the
@@ -53,19 +65,32 @@ safety invariant is involved, not only for a parser or helper.
 
 ## Pull requests
 
-Describe the problem, authority/configuration boundary, safety impact, and
-recovery behavior. Include tests and documentation for user-visible commands or
-schema changes. Keep commits reviewable; do not rewrite unrelated history or
+Describe the problem, authority/configuration boundary, safety impact, recovery
+behavior, and whether the change alters a built-in default or an extension
+contract. Include tests and documentation for user-visible commands or schema
+changes. For a new consumer requirement, explain why it cannot be a portable
+built-in default; for a new extension point, document resolver precedence and
+failure behavior. Keep commits reviewable; do not rewrite unrelated history or
 force-push in implementation code or tests. A pull request should pass
 `npm run typecheck` and `npm test` from a clean checkout.
 
 ## Project policy boundary
 
 Pi-next core provides generic scheduling, ownership, worktree, lifecycle,
-verification, and telemetry behavior. Consumers provide authority adapters,
+verification, telemetry, and other portable defaults that can be implemented
+without consumer-specific semantics. Consumers provide authority adapters,
 repository policy entrypoints, model/provider choices, skills, deployment
-rules, and credentials. External skills are engineering methodology only and
-must not claim ownership, redefine authority, close work, or bypass verification.
+rules, credentials, and explicitly configured overrides where their semantics
+differ from those defaults. External skills are engineering methodology only
+and must not claim ownership, redefine authority, close work, or bypass
+verification.
+
+An extension mechanism must not invert this boundary: adding an override hook
+does not make the consumer responsible for implementing the default behavior.
+Configured overrides are authoritative only within their declared contract and
+cannot weaken kernel ownership, freshness, worktree, verification, or guarded
+completion invariants unless a public versioned kernel contract explicitly
+allows it.
 
 ## Support and release changes
 
@@ -73,7 +98,7 @@ Bug reports should include the pi-next revision, Pi host version, Node version,
 OS, sanitized configuration shape, and a minimal reproduction. Do not attach
 secrets, tokens, prompts, transcripts, hidden reasoning, or private repository
 content. Feature proposals should state whether they belong in the reusable
-kernel or in a consumer adapter.
+kernel, a portable default implementation, or a consumer extension/adapter.
 
 Public releases are pinned pre-1.0 SemVer tags. Release notes must identify
 supported Pi/Node versions, configuration or authority contract changes, known

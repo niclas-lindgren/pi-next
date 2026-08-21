@@ -4,13 +4,66 @@ Pi-next is an agent operating-system kernel hosted by Pi. It schedules bounded
 workers around a live authority source; it is not a model provider, issue
 tracker, deployment system, or repository policy bundle.
 
+## Design principle
+
+**Pi-next is portable by default and extensible by design.**
+
+Portable means generic Pi-next behavior works in a new consumer without
+requiring that repository to copy historical helper scripts, product-specific
+policy, labels, paths, or adapter glue merely to reproduce behavior the kernel
+can provide itself. Generic capabilities should therefore have package-owned,
+product-neutral defaults whenever Pi-next can implement them safely.
+
+Extensible means repositories can deliberately replace or augment behavior at
+versioned, validated boundaries when their semantics genuinely differ. An
+extension point is not a requirement for every consumer to implement that
+capability themselves.
+
+The default precedence rule is:
+
+```text
+explicit configured consumer override -> validate -> authoritative for its contract
+no configured override                 -> package-owned Pi-next default
+```
+
+The mere presence of a conventionally named file is not an override. This
+prevents stale migration residue from silently changing runtime semantics. If a
+consumer explicitly configures an override, that override is authoritative for
+its defined contract; if it is missing, malformed, incompatible, or otherwise
+invalid, Pi-next fails clearly at that boundary rather than silently falling
+back to behavior the consumer intentionally replaced.
+
+Extension authority is always scoped. A state provider may define workflow
+state, an authority adapter may define work-item operations, and a verification
+provider may define configured verification semantics, but none of them gains
+ownership simply by being configured. Kernel invariants such as lease/CAS
+ownership, canonical workspaces, freshness, guarded completion, and fail-closed
+safety remain non-overridable unless the public kernel contract explicitly says
+otherwise.
+
+This gives a practical design test for new dependencies:
+
+```text
+Can Pi-next provide the generic behavior safely?
+  yes -> ship a portable built-in default
+
+Can consumers reasonably need different semantics?
+  yes -> expose an explicit validated extension point
+
+Has the consumer explicitly selected an override?
+  yes -> respect it as authoritative within that contract
+  no  -> use the built-in default
+```
+
 ## Boundaries
 
 ### Consumer
 
 The consumer owns `.pi-next/config.json`, repository policy entrypoints,
 quality commands, model/provider policy, credentials, skills, deployment rules,
-and any authority-specific adapter behavior.
+and any explicitly configured consumer extensions or authority-specific adapter
+behavior. Consumers do not need to reimplement generic kernel behavior merely
+because an extension point exists.
 
 ### Authority adapter
 
@@ -61,6 +114,26 @@ Planning, implementation, and repair workers are mutable only inside the
 already-owned canonical workspace. The parent process supplies the workspace
 as the child process cwd. Host-supported reviewer restrictions should be used
 where available, but Pi-next does not claim OS sandboxing by prompt convention.
+
+## Extension contracts
+
+Extension points should be explicit in versioned configuration or adapter
+capabilities and should follow the same resolver semantics wherever practical:
+
+1. select an explicitly configured override only when the configuration says to;
+2. validate its capability/schema before mutation or expensive model work;
+3. treat a valid selected override as authoritative for the narrow contract it
+   implements;
+4. otherwise use the package-owned default;
+5. never silently fall back after an explicitly selected override fails; and
+6. never infer authority from a file merely existing at a legacy/conventional
+   path.
+
+Package-owned defaults should consume generic configured paths and contracts,
+not hard-code one consumer's repository layout. External helpers/providers must
+use bounded input/output, cancellation/timeouts where applicable, and typed
+failure classification. Their failure must not be mislabeled as an ownership
+or worktree conflict when the actual boundary is configuration/integration.
 
 ## Lifecycle
 
