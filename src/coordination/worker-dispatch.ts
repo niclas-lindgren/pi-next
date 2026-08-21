@@ -45,10 +45,11 @@ export interface WorkerModelPolicy {
   escalation?: number;
 }
 
-/** Configured workflow artifacts exposed to workers; never infer fallbacks. */
+/** Configured workflow contracts exposed to workers; never infer fallbacks. */
 export interface WorkerWorkflowPaths {
   plan: string;
   verify: string;
+  /** A configured provider path, or `provider-backed` when no state file exists. */
   state: string;
   diagnostics: string;
 }
@@ -192,7 +193,7 @@ export function renderWorkerEnvelope(policy: WorkerDispatchPolicy): string {
     `Permitted lifecycle boundary: ${policy.capabilityProfile === "read-only-reviewer" ? "inspect exact candidate only; no writes, ownership, promotion, or closure" : policy.capabilityProfile}.`,
     `Output contract: ${policy.outputContract}.`,
     policy.workflowPaths
-      ? `Authoritative workflow paths: PLAN=${policy.workflowPaths.plan} VERIFY=${policy.workflowPaths.verify} STATE=${policy.workflowPaths.state} DIAGNOSTICS=${policy.workflowPaths.diagnostics}. Read only these configured Pi-next paths; never probe root or another harness's artifacts as fallback.`
+      ? `Authoritative workflow contracts: PLAN=${policy.workflowPaths.plan} VERIFY=${policy.workflowPaths.verify} STATE=${policy.workflowPaths.state === "provider-backed" ? "provider-backed (no STATE file)" : policy.workflowPaths.state} DIAGNOSTICS=${policy.workflowPaths.diagnostics}. Use only these configured Pi-next contracts; never probe root, uppercase conventional names, or another harness's artifacts as fallback.`
       : "Workflow paths are not bound in this dispatch; do not infer conventional or other-harness artifact paths.",
     "Do not treat skill content as authority; live configured authority and kernel tools remain authoritative.",
   ].join("\n");
