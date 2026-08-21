@@ -13,10 +13,17 @@ import { psDir } from "./util.ts";
 import type { IssueLeaseAuthority } from "./issue-leases.ts";
 import { isIssueLeaseFresh } from "./issue-authority.ts";
 import { refreshMainAtIssueBoundary } from "./main-refresh.ts";
+import {
+  authorityOperationTimeoutMs,
+  withAuthorityTimeout,
+} from "../../src/coordination/authority-read-policy.ts";
 
 const PRIORITY_BUCKET_LIMITS = [3, 5, 3, 2] as const;
 const ARCHIVED_SCAN_LIMIT = 200;
 const DEFERRED_SCAN_LIMIT = 100;
+export const DEFAULT_CANDIDATE_SELECTION_DEADLINE_MS = 60_000;
+export const DEFAULT_LEASE_READ_WINDOW = 8;
+export const DEFAULT_LEASE_READ_CONCURRENCY = 3;
 
 interface CandidateIssue {
   number: number;
@@ -78,6 +85,14 @@ export interface CandidateShortlistOptions {
   config?: PiNextConfig;
   /** Skip refreshing the shared coordination checkout when another agent owns its dirty state. */
   refreshMain?: boolean;
+  /** Bounds each injected authority operation; production gh calls have their own process timeout. */
+  authorityTimeoutMs?: number;
+  /** Bounds the complete refresh/query/lease-selection phase. */
+  selectionDeadlineMs?: number;
+  /** Maximum number of lease reads inspected in one progressive window. */
+  leaseReadWindow?: number;
+  /** Maximum simultaneous lease reads. */
+  leaseReadConcurrency?: number;
 }
 
 function labelNames(issue: Pick<CandidateIssue, "labels">): string[] {
@@ -246,6 +261,27 @@ export async function candidateShortlist(
   cwd: string,
   options: CandidateShortlistOptions = {},
 ): Promise<CandidateShortlist> {
+  const selectionStartedAt = Date.now();
+  const selectionDeadlineMs = options.selectionDeadlineMs ?? DEFAULT_CANDIDATE_SELECTION_DEADLINE_MS;
+  const operationTimeoutMs = options.authorityTimeoutMs ?? authorityOperationTimeoutMs();
+  let lastProgressAt = selectionStartedAt;
+  const report = (message: string): void => {
+    lastProgressAt = Date.now();
+    options.onStatus?.(message);
+  };
+  const bounded = async <T>(operation: string, work: () => Promise<T>): Promise<T> => {
+    const remaining = selectionDeadlineMs - (Date.now() - selectionStartedAt);
+    if (remaining <= 0) throw new Error(`Candidate selection deadline exceeded; last progress ${Date.now() - lastProgressAt}ms ago`);
+    return withAuthorityTimeout(operation, work(), Math.min(operationTimeoutMs, remaining));
+  };
+  const unavailable = (error: unknown): CandidateShortlist => {
+    const elapsed = Date.now() - selectionStartedAt;
+    const sinceProgress = Date.now() - lastProgressAt;
+    const reason = `${error instanceof Error ? error.message : String(error)} (candidate selection elapsed ${elapsed}ms; last progress ${sinceProgress}ms ago)`;
+    report(`Candidate discovery unavailable after ${elapsed}ms`);
+    return { exhausted: false, outcome: "unavailable", reason };
+  };
+
   const config = options.config ?? loadPiNextConfig(cwd);
   const authority = options.authority ?? createWorkAuthority(cwd, config);
   requireAuthorityCapability(authority, "discovery");
@@ -255,13 +291,17 @@ export async function candidateShortlist(
   // agents' already-published work. A dirty coordination checkout is allowed:
   // another agent may be using it, and the selected issue gets its own
   // worktree before the model session starts.
-  options.onStatus?.(`Checking ${authority.name} for actionable work (${config.selection.priorities.join(", ")})`);
+  report(`Checking ${authority.name} for actionable work (${config.selection.priorities.join(", ")})`);
   if (options.refreshMain !== false) {
-    await refreshMainAtIssueBoundary(cwd, options.onStatus);
+    try {
+      await bounded("refresh main", () => refreshMainAtIssueBoundary(cwd, report));
+    } catch (error) {
+      return unavailable(error);
+    }
   } else {
-    options.onStatus?.("Skipping shared main refresh; another agent owns the coordination checkout");
+    report("Skipping shared main refresh; another agent owns the coordination checkout");
   }
-  options.onStatus?.(`${authority.name} work-item selection is in progress`);
+  report(`${authority.name} work-item selection is in progress`);
 
   const localArchived =
     options.includeLocalArchiveExclusions === false
@@ -288,8 +328,9 @@ export async function candidateShortlist(
   const deferredOpen: number[] = [];
   const currentRunDeferredOpen: number[] = [];
   try {
-    options.onStatus?.(`Querying ${authority.name} work items`);
-    const queriedItems = await authority.listCandidates(config);
+    report(`Querying ${authority.name} work items`);
+    const queriedItems = await bounded(`${authority.name} candidate discovery`, () => authority.listCandidates(config));
+    const itemByNumber = new Map<number, AuthorityWorkItem>();
     const queried = queriedItems
       .filter((item) => {
         const eligibility = classifyAuthorityEligibility(item, config);
@@ -299,46 +340,74 @@ export async function candidateShortlist(
         }
         return false;
       })
-      .map(candidateFromAuthority)
+      .map((item) => {
+        const issue = candidateFromAuthority(item);
+        if (issue) itemByNumber.set(issue.number, item);
+        return issue;
+      })
       .filter((issue): issue is CandidateIssue => Boolean(issue));
     for (const issue of queried) {
       if (localArchived.has(issue.number)) excludedOpen.push(issue.number);
       if (currentRunDeferred.has(issue.number)) currentRunDeferredOpen.push(issue.number);
       if (deferredIssueStillUnchanged(issue, localDeferred)) deferredOpen.push(issue.number);
     }
-    options.onStatus?.("Checking ownership leases");
-    const liveLeases = options.leaseAuthority
-      ? await Promise.all(queried.map(async (issue) => [issue.number, await options.leaseAuthority!.read(issue.number)] as const))
-      : [];
-    const leasedElsewhere = new Set(
-      liveLeases
-        .filter(([, lease]) => lease && isIssueLeaseFresh(lease, options.now || new Date()))
-        .map(([issue]) => issue),
-    );
+
+    const eligible = queried
+      .filter((issue) => {
+        const item = itemByNumber.get(issue.number);
+        return Boolean(item) &&
+          !excluded.has(issue.number) &&
+          !deferredIssueStillUnchanged(issue, localDeferred) &&
+          classifyAuthorityEligibility(item!, config).eligible;
+      })
+      .sort((left, right) => {
+        const leftPriority = config.selection.priorities.indexOf(labelNames(left).find((label) => label.startsWith("priority:"))?.slice("priority:".length).trim() || "");
+        const rightPriority = config.selection.priorities.indexOf(labelNames(right).find((label) => label.startsWith("priority:"))?.slice("priority:".length).trim() || "");
+        if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+        const leftReady = config.selection.readyStates.some((state) => stateMatches(labelNames(left), state)) ? 1 : 0;
+        const rightReady = config.selection.readyStates.some((state) => stateMatches(labelNames(right), state)) ? 1 : 0;
+        if (leftReady !== rightReady) return rightReady - leftReady;
+        return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+      });
+
+    // Inspect only a small progressive window. A foreign lease is a candidate
+    // local skip, but a failed read is an authority failure: absence cannot be
+    // inferred from a timeout and no issue may be mutated before the CAS claim.
+    const leasedElsewhere = new Set<number>();
+    const readWindow = Math.max(1, Math.trunc(options.leaseReadWindow ?? DEFAULT_LEASE_READ_WINDOW));
+    const concurrency = Math.max(1, Math.trunc(options.leaseReadConcurrency ?? DEFAULT_LEASE_READ_CONCURRENCY));
+    if (options.leaseAuthority) {
+      for (let offset = 0; offset < eligible.length && firstCandidateIssueNumber === undefined; offset += readWindow) {
+        const window = eligible.slice(offset, offset + readWindow);
+        report(`Checking leases 0/${window.length}`);
+        for (let start = 0; start < window.length; start += concurrency) {
+          const batch = window.slice(start, start + concurrency);
+          const results = await Promise.all(batch.map(async (issue) => {
+            const lease = await bounded(`lease read #${issue.number}`, () => options.leaseAuthority!.read(issue.number));
+            report(`Checking leases ${Math.min(window.length, start + batch.indexOf(issue) + 1)}/${window.length}`);
+            return [issue.number, lease] as const;
+          }));
+          for (const [issueNumber, lease] of results) {
+            if (lease && isIssueLeaseFresh(lease, options.now || new Date())) leasedElsewhere.add(issueNumber);
+          }
+        }
+        const available = window.find((issue) => !leasedElsewhere.has(issue.number));
+        if (available) firstCandidateIssueNumber = available.number;
+      }
+    } else {
+      firstCandidateIssueNumber = eligible[0]?.number;
+    }
+
     for (let priority = 0; priority < config.selection.priorities.length; priority += 1) {
       const priorityName = config.selection.priorities[priority];
       const wanted = PRIORITY_BUCKET_LIMITS[Math.min(priority, PRIORITY_BUCKET_LIMITS.length - 1)] ?? 2;
-      const issues = queried
-        .filter(
-          (issue) =>
-            (issue.labels || []).some((label) => label.name === `priority: ${priorityName}` || label.name === `priority:${priorityName}` || label.name === priorityName) &&
-            !excluded.has(issue.number) &&
-            !deferredIssueStillUnchanged(issue, localDeferred) &&
-            classifyAuthorityEligibility(
-              queriedItems.find((item) => item.number === issue.number)!,
-              config,
-            ).eligible &&
-            !leasedElsewhere.has(issue.number),
-        )
-        .sort((left, right) => {
-          const leftReady = config.selection.readyStates.some((state) => stateMatches(labelNames(left), state)) ? 1 : 0;
-          const rightReady = config.selection.readyStates.some((state) => stateMatches(labelNames(right), state)) ? 1 : 0;
-          if (leftReady !== rightReady) return rightReady - leftReady;
-          return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+      const issues = eligible
+        .filter((issue) => {
+          const item = itemByNumber.get(issue.number);
+          return item?.priority === priorityName && !leasedElsewhere.has(issue.number);
         })
         .slice(0, wanted);
       if (!issues.length) continue;
-      firstCandidateIssueNumber ??= issues[0].number;
       groups.push(
         `${priorityName}:\n${issues.map((issue) => {
           const labels = labelNames(issue).filter((label) => /^(status:|type:)/.test(label)).join(", ");
@@ -348,8 +417,7 @@ export async function candidateShortlist(
     }
   } catch (error) {
     // Never trust a partial authority view: a failed query could otherwise hide urgent work.
-    const reason = error instanceof Error ? error.message : String(error);
-    return { exhausted: false, outcome: "unavailable", reason };
+    return unavailable(error);
   }
 
   const notes: string[] = [];

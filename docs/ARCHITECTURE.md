@@ -81,6 +81,14 @@ verification sequencing, guarded completion, and bounded telemetry. A lease
 is the ownership authority. A plan is a durable execution/recovery artifact
 that must be reconciled with a fresh live authority lease before execution.
 
+Candidate discovery is a bounded scheduler boundary. The GitHub adapter uses timed priority queries, lease reads are inspected in
+small progressive windows with capped concurrency, and refresh/lease
+subprocesses are cancellable. A
+selection deadline reports `candidate_discovery_unavailable` with elapsed and
+last-progress diagnostics rather than leaving a stable supervisor in an
+unobservable await. `PI_NEXT_AUTHORITY_TIMEOUT_MS` overrides the default
+per-operation timeout when a deployment needs a different authority budget.
+
 Guarded completion (`src/coordination/finalize.ts`, exposed by the
 `finalize` command in `src/coordination/cli.ts`) integrates one verified
 `agent/issue-N` candidate commit into `main` and closes the work item only
