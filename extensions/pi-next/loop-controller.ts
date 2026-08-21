@@ -40,6 +40,7 @@ import {
   acquireControllerLock,
   addIssuePromptMetrics,
   addPromptMetrics,
+  initializeIssueBudgetBaseline,
   loopNow,
   loopResultFile,
   loopStateFile,
@@ -146,32 +147,40 @@ function planTaskCounts(cwd: string): { total: number; remaining: number } {
   };
 }
 
-function issueBudgetDecision(
+export function issueBudgetDecision(
   metric: import("./loop-state.ts").LoopIssueMetrics | undefined,
   policy: ReturnType<typeof loadPiNextConfig>["convergence"],
-): { soft: boolean; hard: boolean; percent: number; reason: string } {
-  if (!metric) return { soft: false, hard: false, percent: 0, reason: "no issue budget recorded yet" };
+): { soft: boolean; hard: boolean; percent: number; reason: string; tokenUsage: number; tokenBaseline: number } {
+  if (!metric) return { soft: false, hard: false, percent: 0, reason: "no issue budget recorded yet", tokenUsage: 0, tokenBaseline: 0 };
+  // Missing baselines are treated as activating now for legacy callers too;
+  // runOneStep persists the explicit baseline before it can yield.
+  const tokenBaseline = Math.max(0, metric.budgetBaselineTokens ?? metric.totalTokens);
+  const tokenUsage = Math.max(0, metric.totalTokens - tokenBaseline);
+  const transitions = Math.max(0, (metric.transitions || 0) - (metric.budgetBaselineTransitions || 0));
+  const wallClockMs = Math.max(0, (metric.wallClockMs || 0) - (metric.budgetBaselineWallClockMs || 0));
   const ratios = [
-    (metric.transitions || 0) / policy.hardTransitions,
-    (metric.wallClockMs || 0) / policy.hardWallMs,
-    metric.totalTokens / policy.hardTokens,
+    transitions / policy.hardTransitions,
+    wallClockMs / policy.hardWallMs,
+    tokenUsage / policy.hardTokens,
   ];
   const percent = Math.min(1, Math.max(0, Math.max(...ratios)));
   const hardReasons = [
-    (metric.transitions || 0) >= policy.hardTransitions ? `${metric.transitions || 0} transitions` : "",
-    (metric.wallClockMs || 0) >= policy.hardWallMs ? `${Math.round((metric.wallClockMs || 0) / 60_000)}m wall time` : "",
-    metric.totalTokens >= policy.hardTokens ? `${metric.totalTokens} tokens` : "",
+    transitions >= policy.hardTransitions ? `${transitions} transitions` : "",
+    wallClockMs >= policy.hardWallMs ? `${Math.round(wallClockMs / 60_000)}m wall time` : "",
+    tokenUsage >= policy.hardTokens ? `${tokenUsage} tokens (baseline ${tokenBaseline})` : "",
   ].filter(Boolean);
   const softReasons = [
-    (metric.transitions || 0) >= policy.softTransitions ? `${metric.transitions || 0} transitions` : "",
-    (metric.wallClockMs || 0) >= policy.softWallMs ? `${Math.round((metric.wallClockMs || 0) / 60_000)}m wall time` : "",
-    metric.totalTokens >= policy.softTokens ? `${metric.totalTokens} tokens` : "",
+    transitions >= policy.softTransitions ? `${transitions} transitions` : "",
+    wallClockMs >= policy.softWallMs ? `${Math.round(wallClockMs / 60_000)}m wall time` : "",
+    tokenUsage >= policy.softTokens ? `${tokenUsage} tokens (baseline ${tokenBaseline})` : "",
   ].filter(Boolean);
   return {
     soft: softReasons.length > 0,
     hard: hardReasons.length > 0,
     percent,
     reason: hardReasons.length ? hardReasons.join(", ") : softReasons.join(", "),
+    tokenUsage,
+    tokenBaseline,
   };
 }
 
@@ -257,6 +266,27 @@ async function applyResult(
   result: LoopResult,
 ): Promise<StepSettlement> {
   const runtimeCwd = runtimeCwdFor(cwd, state);
+  if (result.schedulerOnly && result.outcome === "yield_issue" && result.step === state.step) {
+    const issue = result.issueNumber as number;
+    if (!Number.isSafeInteger(issue) || issue < 1 || !result.reason?.trim()) {
+      throw new Error("scheduler-only yield requires an issue number and reason");
+    }
+    const yieldedAt = loopNow();
+    const yielded: LoopState = {
+      ...state,
+      deferredIssues: [
+        ...state.deferredIssues.filter((item) => item.issueNumber !== issue),
+        { issueNumber: issue, reason: result.reason.trim(), deferredAt: yieldedAt, kind: "yielded" },
+      ],
+      issueMetrics: markIssueDisposition(state.issueMetrics, issue, "yielded", result.reason),
+      updatedAt: yieldedAt,
+      lastOutcome: "yield_issue",
+      lastReason: result.reason.trim(),
+    };
+    writeJsonAtomic(runtimeCwd, yielded);
+    removeFile(loopResultFile(runtimeCwd, state.runId));
+    return { state: yielded, terminal: false, outcome: result.outcome };
+  }
   if (result.step <= state.settledStep) {
     removeFile(loopResultFile(runtimeCwd, state.runId));
     return {
@@ -881,9 +911,39 @@ async function runOneStep(
   worker: IssueWorkerRunner,
   runtime: SupervisorRuntime,
 ): Promise<StepSettlement> {
+  const config = loadPiNextConfig(ctx.cwd);
+  let controllerInput = inputState;
+  // Check an active PLAN before opening a worker/model step. Legacy metrics
+  // receive a durable baseline here, so historical telemetry cannot exhaust a
+  // policy that was introduced after it was collected.
+  const preflightPlan = resolvePlanIdentity(ctx.cwd);
+  if (preflightPlan.kind === "resolved" && inputState.activeIssueNumber) {
+    const metric = inputState.issueMetrics.find((item) => item.issueNumber === inputState.activeIssueNumber);
+    if (metric) {
+      const initialized = initializeIssueBudgetBaseline(metric);
+      if (initialized !== metric) {
+        controllerInput = {
+          ...inputState,
+          issueMetrics: inputState.issueMetrics.map((item) => item.issueNumber === initialized.issueNumber ? initialized : item),
+        };
+      }
+      const budget = issueBudgetDecision(initialized, config.convergence);
+      if (budget.hard) {
+        return applyResult(ctx.cwd, controllerInput, {
+          runId: inputState.runId,
+          step: inputState.step,
+          schedulerOnly: true,
+          issueNumber: inputState.activeIssueNumber,
+          outcome: "yield_issue",
+          reason: `issue convergence budget exhausted: ${budget.reason}; preserving PLAN/worktree for a later run`,
+          writtenAt: loopNow(),
+        });
+      }
+    }
+  }
   const stepHead = await git(ctx.cwd, ["rev-parse", "HEAD"]);
   let state: LoopState = {
-    ...inputState,
+    ...controllerInput,
     status: "running",
     step: inputState.step + 1,
     sessionTransition: transitionInSession,
@@ -943,7 +1003,6 @@ async function runOneStep(
       writtenAt: loopNow(),
     });
   }
-  const config = loadPiNextConfig(ctx.cwd);
   const shortlist =
     hasPlan || state.activeIssueNumber
       ? { exhausted: false, text: undefined }
