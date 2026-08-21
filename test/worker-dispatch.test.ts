@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   capabilityForRole,
   classifyWorkerRole,
@@ -9,6 +12,7 @@ import {
   selectWorkerSkills,
 } from "../src/coordination/worker-dispatch.ts";
 import { buildPiNextPrompt, resolveWorkerSkill } from "../extensions/pi-next/prompt.ts";
+import { DEFAULT_PI_NEXT_CONFIG } from "../src/coordination/config.ts";
 
 test("worker role and capability are derived from controller phase", () => {
   assert.equal(classifyWorkerRole({ phase: "planning" }), "planning");
@@ -44,8 +48,35 @@ test("dispatch envelope binds identity and exposes bounded metadata", () => {
   assert.equal(policy.capabilityProfile, "read-only-reviewer");
   assert.match(renderWorkerEnvelope(policy), /role=review-spec/);
   assert.match(renderWorkerEnvelope(policy), /no writes/);
+  assert.match(renderWorkerEnvelope({
+    ...policy,
+    workflowPaths: {
+      plan: ".workflow/PLAN.md",
+      verify: ".workflow/VERIFY.md",
+      state: ".workflow",
+      diagnostics: ".workflow/diagnostics",
+    },
+  }), /PLAN=\.workflow\/PLAN\.md VERIFY=\.workflow\/VERIFY\.md/);
   assert.equal(dispatchBindingMatches(policy, policy), true);
   assert.equal(dispatchBindingMatches(policy, { ...policy, candidateSha: "candidate-2" }), false);
+});
+
+test("custom workflow paths are bound into the worker prompt", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-dispatch-paths-"));
+  try {
+    await mkdir(join(cwd, ".pi-next"), { recursive: true });
+    const config = structuredClone(DEFAULT_PI_NEXT_CONFIG);
+    config.workflow.planPath = ".workflow/PLAN.md";
+    config.workflow.verifyPath = ".workflow/VERIFY.md";
+    config.workflow.stateDir = ".workflow";
+    config.workflow.diagnosticsPath = ".workflow/diagnostics";
+    await writeFile(join(cwd, ".pi-next", "config.json"), JSON.stringify(config));
+    const prompt = buildPiNextPrompt(cwd, "continue");
+    assert.match(prompt, /PLAN=\.workflow\/PLAN\.md VERIFY=\.workflow\/VERIFY\.md STATE=\.workflow/);
+    assert.match(prompt, /never probe root or another harness/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("default issue prompt is compact and does not inject legacy long-form policy", () => {
@@ -55,5 +86,6 @@ test("default issue prompt is compact and does not inject legacy long-form polic
   });
   assert.match(prompt, /role=implementation/);
   assert.match(prompt, /Selected skills:/);
+  assert.match(prompt, /Authoritative workflow paths: PLAN=\.pi-next\/PLAN\.md VERIFY=\.pi-next\/VERIFY\.md/);
   assert.doesNotMatch(prompt, /The complete long-form/);
 });

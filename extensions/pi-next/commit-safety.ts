@@ -108,7 +108,7 @@ export async function assertArchiveReady(
   const fingerprint = await workingFingerprint(cwd);
   const verifyPath = verifyFile(cwd);
   if (!existsSync(verifyPath)) {
-    throw new Error("Cannot archive without .ps-next/VERIFY.md");
+    throw new Error(`Cannot archive without configured VERIFY path: ${verifyPath}`);
   }
   const verify = readFileSync(verifyPath, "utf8");
   if (!/^STATUS:\s*PASS$/m.test(verify)) {
