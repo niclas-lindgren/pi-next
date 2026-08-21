@@ -150,7 +150,11 @@ export function renderAutoProgress(
   const memory = state.hostMemory
     ? `host heap ${memorySize(state.hostMemory.heapUsed)}/${memorySize(state.hostMemory.heapLimit)} · ${state.hostMemory.status.replaceAll("_", " ")}`
     : undefined;
-  const session = `session ${state.sessionTransition || 0}/${state.sessionTransitionLimit || 3}`;
+  const workerTurns = state.metrics.workerTurns || state.metrics.prompts;
+  const workers = workerTurns > 0 ? `worker turns ${workerTurns}` : undefined;
+  const hostReplacements = (state.metrics.hostSessionReplacements || 0) > 0
+    ? `host replacements ${state.metrics.hostSessionReplacements}`
+    : undefined;
   const step = `step ${state.step}/${state.maxSteps}`;
   const width = boundedWidth(options.width);
   const version = options.version ? `v${options.version} ` : "";
@@ -168,7 +172,7 @@ export function renderAutoProgress(
   const counts = state.status === "idle"
     ? ` · ✓${completed} ↷${deferred} ⏭${schedulerSkips} · ${remaining} capacity remaining`
     : ` · ✓${completed} ↷${deferred} ⏭${schedulerSkips} · ${remaining} remaining`;
-  const diagnostics = [recovery, retry, memory, session, step, elapsed]
+  const diagnostics = [recovery, retry, memory, workers, hostReplacements, step, elapsed]
     .filter(Boolean).join(" · ");
   const full = primary + current + counts + (diagnostics ? ` · ${diagnostics}` : "");
   if (full.length <= width) return full;
@@ -177,7 +181,7 @@ export function renderAutoProgress(
   // prose around the progress bar before dropping recovery/session/step data.
   const concisePrefix = version ? `Pi-next ${version.trim()}` : "Pi-next auto";
   const concisePrimary = `${concisePrefix} ${progressBar(percent, barSlots)} ${settled}/${requested} settled ${percent}%`;
-  const concise = concisePrimary + current + ` · ${remaining} rem` + (diagnostics ? ` · ${diagnostics}` : "");
+  const concise = concisePrimary + current + ` · ✓${completed} ↷${deferred} ⏭${schedulerSkips} · ${remaining} rem` + (diagnostics ? ` · ${diagnostics}` : "");
   if (concise.length <= width) return concise;
 
   const medium = primary + current + counts;

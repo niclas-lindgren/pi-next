@@ -456,35 +456,17 @@ export async function runIssueScopedPrompt(
   });
   if (executionCwd !== coordinationCwd) trackCrashLoggerCwd(executionCwd);
   try {
-    // ctx.newSession() cannot relocate a session's cwd: a new session
-    // always inherits the cwd of whichever session/runtime is currently
-    // active (traced through pi's own dist — AgentSessionRuntime.newSession
-    // forwards `this.cwd`, which is never re-read from process.cwd()), so
-    // `next.cwd` is always the coordination root here, never executionCwd.
-    // The pi-coding-agent SDK gives extensions no other way to bind this
-    // new session's tool execution (bash in particular) to executionCwd, so
-    // The child worker owns its process cwd, so concurrent issue workers
-    // never observe or clobber each other's worktree. An
-    // assertion on next.cwd was therefore always false whenever executionCwd
-    // differed from the coordination root — and since any exception thrown
-    // inside withSession() is fatal to the *entire* pi process (interactive
-    // mode routes it straight to handleFatalRuntimeError -> exit(1), not
-    // just this command), that assertion silently killed the whole CLI on
-    // every worktree-scoped run. The worker receives executionCwd explicitly.
+    // Child workers own their process cwd, so concurrent issue workers never
+    // observe or clobber each other's canonical worktrees. The parent host
+    // session is not a freshness boundary and is never replaced for this
+    // issue-scoped command, including when an authority adapter is injected.
     const phase = existsSync(planFile(executionCwd)) ? "implementation" : "planning";
     const dispatch = createWorkerDispatch({
       phase,
       hasPlan: phase === "implementation",
       issueNumber: claimedLease.issueNumber,
     });
-    if (authorityOverride && !workerOverride) {
-      await ctx.newSession({
-        withSession: async (next) => {
-          await next.sendUserMessage(buildPiNextPrompt(executionCwd, args, undefined, dispatch));
-        },
-      });
-    } else {
-      await executeIssueWorker(
+    await executeIssueWorker(
         executionCwd,
         buildPiNextPrompt(executionCwd, args, undefined, dispatch),
         workerOverride,
@@ -518,7 +500,6 @@ export async function runIssueScopedPrompt(
           },
         },
       );
-    }
   } finally {
     await heartbeat.stop();
     try {

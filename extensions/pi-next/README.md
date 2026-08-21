@@ -38,10 +38,10 @@ worker; direct commands must not observe or dispose another run's worker.
 1. `ForegroundSupervisor.launch()` establishes the foreground runtime and
    drives the claim, canonical-worktree, isolated-child-worker, reconcile,
    release, and select-next flow through the owning runtime.
-2. Every `ctx.newSession()` transition asks that same runtime to replace its
-   generation. Replacement teardown is bounded; `isDisposed()` becomes true
-   as teardown begins, and tracked subprocesses receive the generation abort
-   signal.
+2. Every controller worker-batch transition replaces only the isolated child
+   worker generation. Replacement teardown is bounded; `isDisposed()` becomes
+   true as teardown begins, and tracked subprocesses receive the generation
+   abort signal. Ordinary progression never calls `ctx.newSession()`.
 3. `ForegroundSupervisor.abort()` tears down only its own runtime generation,
    marks only its own durable run stopped, and never resets, stashes, or
    commits issue-worktree edits.
@@ -49,6 +49,13 @@ worker; direct commands must not observe or dispose another run's worker.
    The live-supervisor registry is keyed by canonical `cwd` and `runId` and is
    diagnostic only; GitHub/shared lease CAS authority remains the ownership
    source of truth.
+5. Normal auto progression uses one interactive Pi host session. Planning,
+   implementation, repair, review, verification, and maintenance freshness is
+   provided by isolated `runIssueWorker()` child processes plus durable
+   artifact/authority rehydration. `ctx.newSession()` is reserved for genuine
+   Pi lifecycle operations such as `/new`, resume/switch, fork, reload, or
+   restart recovery; external replacement rebinds through `live-ctx.ts` and
+   preserves durable run/lease/worktree state.
 5. Restart recovery selects only the local run matching the fresh authoritative
    issue lease. Historical loop records, timestamps, stale controller files,
    and coordination-root continuation markers cannot claim ownership. Dirty

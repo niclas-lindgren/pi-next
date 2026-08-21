@@ -234,6 +234,53 @@ test("the outer runLoopSteps preflight reaches planning repair before bounded co
   }
 });
 
+test("stable-host auto progression keeps 20+ worker batches off ctx.newSession", async () => {
+  const fixture = await setupRepairFixture();
+  try {
+    const initial = {
+      ...state(fixture.repo, fixture.workspace),
+      runId: "stable-host-controller",
+      maxSteps: 30,
+      planRepair: undefined,
+    };
+    let calls = 0;
+    const worker: IssueWorkerRunner = async (_cwd, _prompt, options = {}) => {
+      calls += 1;
+      if (calls < 21) {
+        await writeFile(join(fixture.workspace, "stable-host-marker"), String(calls));
+        await exec("git", ["-C", fixture.workspace, "add", "stable-host-marker"]);
+        await exec("git", ["-C", fixture.workspace, "commit", "-m", `stable host worker ${calls}`]);
+      }
+      writeLoopResult(fixture.repo, {
+        runId: options.runId || initial.runId,
+        step: calls,
+        outcome: calls >= 21 ? "blocked" : "continue",
+        reason: calls >= 21 ? "stable-host regression finished" : undefined,
+        writtenAt: new Date().toISOString(),
+      });
+      return { ok: true, output: "", code: 0, signal: null, telemetry: { status: "unavailable" } };
+    };
+    let replacements = 0;
+    const context = {
+      cwd: fixture.workspace,
+      hasUI: false,
+      newSession: async () => {
+        replacements += 1;
+        throw new Error("routine host replacement is forbidden");
+      },
+    } as unknown as ExtensionCommandContext;
+    await runLoopSteps(context, initial, worker, createSupervisorRuntime());
+    assert.equal(calls, 21);
+    assert.equal(replacements, 0);
+    const durable = readLoopState(fixture.repo, initial.runId);
+    assert.equal(durable?.status, "blocked");
+    assert.equal(durable?.metrics.hostSessionReplacements, 0);
+    assert.equal(durable?.metrics.workerTurns, 21);
+  } finally {
+    await teardownRepairFixture(fixture);
+  }
+});
+
 test("completed task checkboxes and log entries survive a repair cycle", async () => {
   const fixture = await setupRepairFixture();
   try {
