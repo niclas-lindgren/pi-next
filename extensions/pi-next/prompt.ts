@@ -8,6 +8,7 @@ import {
   renderWorkerEnvelope,
   type WorkerDispatchInput,
   type WorkerDispatchPolicy,
+  type WorkerWorkflowPaths,
 } from "../../src/coordination/worker-dispatch.ts";
 
 function stripFrontmatter(markdown: string): string {
@@ -30,6 +31,15 @@ function promptPolicy(config?: PiNextConfig): PromptPolicy {
     priorities: value.selection.priorities,
     repositoryPolicy: repositoryPolicyText(value),
     workflow: value.workflow,
+  };
+}
+
+function workflowPaths(workflow: PiNextConfig["workflow"]): WorkerWorkflowPaths {
+  return {
+    plan: workflow.planPath,
+    verify: workflow.verifyPath,
+    state: workflow.stateDir,
+    diagnostics: workflow.diagnosticsPath,
   };
 }
 
@@ -91,6 +101,7 @@ export function buildPiNextPrompt(
     ...dispatchInput,
     phase: role,
     modelPolicy: dispatchInput.modelPolicy ?? config.workerDispatch.models[role as keyof typeof config.workerDispatch.models],
+    workflowPaths: dispatchInput.workflowPaths ?? workflowPaths(config.workflow),
   });
   const userArgs = args.trim() || "(no arguments)";
   const kernel = `${repositoryPolicyText(config)}\n${renderWorkerEnvelope(policy)}\n${WORK_LOG_INSTRUCTIONS}`;
@@ -164,11 +175,14 @@ export function buildLoopPrompt(input: {
   const freshness = input.planFreshness?.trim()
     ? `Active-plan GitHub freshness gate:\n${input.planFreshness.trim()}`
     : "";
+  const dispatch = input.dispatch
+    ? { ...input.dispatch, workflowPaths: input.dispatch.workflowPaths ?? workflowPaths(policy.workflow) }
+    : undefined;
   const overlay = loopTuningOverlay(input.cwd);
 
   return [
     `${policy.repositoryPolicy} Pi-next unattended workflow step. The configured ${policy.authorityName} authority is the only autonomous backlog.`,
-    input.dispatch ? renderWorkerEnvelope(input.dispatch) : "",
+    dispatch ? renderWorkerEnvelope(dispatch) : "",
     "Use the four pi_next_* tools for workflow state, checks, explicit-path commits, and loop reporting. Start with pi_next_inspect(action=\"state\").",
     WORK_LOG_INSTRUCTIONS,
     selection,
@@ -199,7 +213,11 @@ export function buildLoopMaintenancePrompt(
   const overlayPath = configuredPath(cwd, policy.workflow.tuningPath);
   const diagnosticsDir = configuredPath(cwd, policy.workflow.diagnosticsPath);
   const resultPath = join(cwd, ".pi", "runtime", "pi-next-loop-maintenance-result.json");
-  const dispatch = createWorkerDispatch({ phase: "maintenance", issueNumber: input.issueNumber });
+  const dispatch = createWorkerDispatch({
+    phase: "maintenance",
+    issueNumber: input.issueNumber,
+    workflowPaths: workflowPaths(config.workflow),
+  });
   const methodology = selectedSkillText(cwd, dispatch.skills);
   const prompt = `Pi-next issue-boundary maintenance checkpoint after archived issue #${input.issueNumber} (completed issue ${input.completedCount} in this loop).
 
