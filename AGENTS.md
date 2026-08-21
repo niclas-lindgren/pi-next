@@ -46,11 +46,20 @@ before selecting the next issue.
    plan or verification artifact remains, and integration into `origin/main` is
    proven. Preserve the remote branch when it is useful for audit or recovery.
    Never delete dirty, unintegrated, foreign, or ambiguous workspaces.
-8. **Continue safely.** Re-query open GitHub issues after every completed or
-   explicitly deferred issue. Continue only for an issue-local, safely released
-   failure; stop for ownership, authority, verification, merge, push, or other
-   loop-global failures. At exhaustion, report what was completed, deferred,
-   or blocked and leave `git status` clean.
+8. **Reset context between issues.** After every completed or explicitly
+   deferred issue, release its lease and clean or preserve its workspace
+   according to the cleanup rule above, then terminate the current issue
+   context before selecting another issue. Start the next issue in a fresh
+   agent/session context (use the harness context-clear operation, such as
+   `/clear`, when available). Do not carry the prior issue's plan, transcript,
+   assumptions, or authority snapshot into the next issue; re-read the live
+   issue and repository policy from scratch.
+9. **Continue safely.** Re-query open GitHub issues after every completed or
+   explicitly deferred issue and only after the required context reset. Continue
+   only for an issue-local, safely released failure; stop for ownership,
+   authority, verification, merge, push, or other loop-global failures. At
+   exhaustion, report what was completed, deferred, or blocked and leave
+   `git status` clean.
 
 Prefer `/pi-next auto` for this loop. For manual operation, use the same
 sequence and the coordination/finalization tooling; do not replace its safety
