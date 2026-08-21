@@ -999,8 +999,11 @@ export async function runOneStep(
     : undefined;
   let planRepair = state.planRepair;
   if (pendingRepair) {
-    const attempts = (planRepair?.attempts || 0) + 1;
-    const maxAttempts = planRepair?.maxAttempts || DEFAULT_MAX_PLAN_REPAIR_ATTEMPTS;
+    const sameRepair = planRepair?.fingerprint === pendingRepair.fingerprint;
+    const attempts = (sameRepair ? planRepair?.attempts || 0 : 0) + 1;
+    const maxAttempts = sameRepair
+      ? planRepair?.maxAttempts || DEFAULT_MAX_PLAN_REPAIR_ATTEMPTS
+      : DEFAULT_MAX_PLAN_REPAIR_ATTEMPTS;
     if (attempts > maxAttempts) {
       const reason = `PLAN task metadata repair exhausted after ${maxAttempts} bounded attempts (${pendingRepair.errors.join("; ")})`;
       recordLifecycleEvent(runtimeCwdFor(ctx.cwd, state), {
@@ -1032,10 +1035,10 @@ export async function runOneStep(
       updatedAt: loopNow(),
     };
     state = { ...state, planRepair, updatedAt: loopNow() };
-    writeJsonAtomic(runtimeCwdFor(ctx.cwd, state), state);
+    writeJsonAtomic(loopStateFile(runtimeCwdFor(ctx.cwd, state), state.runId), state);
   } else if (planRepair) {
     state = { ...state, planRepair: undefined, updatedAt: loopNow() };
-    writeJsonAtomic(runtimeCwdFor(ctx.cwd, state), state);
+    writeJsonAtomic(loopStateFile(runtimeCwdFor(ctx.cwd, state), state.runId), state);
   }
   const planFreshnessResult = hasPlan
     ? await activePlanFreshness(ctx.cwd)
