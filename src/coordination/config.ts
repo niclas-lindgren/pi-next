@@ -37,6 +37,10 @@ export interface PiNextConfig {
     stateDir: string;
     planPath: string;
     verifyPath: string;
+    stateProvider: {
+      type: "builtin" | "helper";
+      path?: string;
+    };
     archiveDir: string;
     deferredDir: string;
     skillPath: string;
@@ -85,6 +89,7 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
     stateDir: ".pi-next",
     planPath: ".pi-next/PLAN.md",
     verifyPath: ".pi-next/VERIFY.md",
+    stateProvider: { type: "builtin" as const },
     archiveDir: ".pi-next/ARCHIVED",
     deferredDir: ".pi-next/deferred",
     skillPath: ".pi-next/SKILL.md",
@@ -198,13 +203,27 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
 
   const workflow = object(root.workflow, "config.workflow");
   const workflowKeys = ["stateDir", "planPath", "verifyPath", "archiveDir", "deferredDir", "skillPath", "tuningPath", "diagnosticsPath", "helperDir"] as const;
-  rejectUnknown(workflow, workflowKeys, "config.workflow");
+  const workflowAllowedKeys = [...workflowKeys, "stateProvider"];
+  rejectUnknown(workflow, workflowAllowedKeys, "config.workflow");
   const paths = Object.fromEntries(workflowKeys.map((key) => [
     key,
     workflow[key] === undefined && key === "diagnosticsPath"
       ? DEFAULT_PI_NEXT_CONFIG.workflow.diagnosticsPath
       : pathValue(workflow[key], `config.workflow.${key}`),
-  ])) as PiNextConfig["workflow"];
+  ])) as Omit<PiNextConfig["workflow"], "stateProvider">;
+  const stateProviderValue = workflow.stateProvider === undefined
+    ? DEFAULT_PI_NEXT_CONFIG.workflow.stateProvider
+    : object(workflow.stateProvider, "config.workflow.stateProvider");
+  rejectUnknown(stateProviderValue, ["type", "path"], "config.workflow.stateProvider");
+  if (stateProviderValue.type !== "builtin" && stateProviderValue.type !== "helper") {
+    throw new PiNextConfigError("config.workflow.stateProvider.type must be builtin or helper");
+  }
+  if (stateProviderValue.type === "builtin" && stateProviderValue.path !== undefined) {
+    throw new PiNextConfigError("config.workflow.stateProvider.path is only valid for helper providers");
+  }
+  const stateProvider = stateProviderValue.type === "helper"
+    ? { type: "helper" as const, path: pathValue(stateProviderValue.path, "config.workflow.stateProvider.path") }
+    : { type: "builtin" as const };
 
   const dispatchValue = root.workerDispatch === undefined
     ? DEFAULT_PI_NEXT_CONFIG.workerDispatch
@@ -278,7 +297,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     },
     selection: { priorities, readyStates, blockedStates },
     repositoryPolicy: { entrypoints },
-    workflow: paths,
+    workflow: { ...paths, stateProvider },
     workerDispatch: { version: 1, models, maxEscalations: Number(maxEscalations) },
     adversarialReview: { enabled: reviewValue.enabled, requiredRisk: reviewValue.requiredRisk, maxRounds: reviewValue.maxRounds, axes: axesValue },
     assessment,

@@ -7,11 +7,10 @@ import { currentTask, validatePlan } from "./plan.ts";
 import {
   changeFiles,
   markerFile,
-  parseState,
   pathMatches,
   planFile,
-  runHelper,
 } from "./util.ts";
+import { formatWorkflowState, workflowState } from "./workflow-state-provider.ts";
 
 const scopeSchema = Type.Union([
   Type.Literal("all"),
@@ -50,16 +49,12 @@ export function registerInspectTool(pi: ExtensionAPI) {
       Type.Object({ action: Type.Literal("handoff") }),
       Type.Object({ action: Type.Literal("drift"), scope: Type.Optional(scopeSchema) }),
     ]),
-    async execute(_id, params, _signal, _update, ctx) {
+    async execute(_id, params, signal, _update, ctx) {
       if (params.action === "state") {
-        const { stdout, stderr } = await runHelper(
-          ctx.cwd,
-          "pi-next-state.sh",
-          [ctx.cwd, params.args || ""],
-        );
+        const result = await workflowState(ctx.cwd, params.args || "", signal);
         return {
-          content: [{ type: "text", text: stdout }],
-          details: { state: parseState(stdout), stderr },
+          content: [{ type: "text", text: formatWorkflowState(result.state) }],
+          details: { provider: result.provider, state: result.state, stderr: result.stderr },
         };
       }
 
@@ -88,10 +83,11 @@ export function registerInspectTool(pi: ExtensionAPI) {
 
       if (params.action === "handoff") {
         const state = await handoffState(ctx.cwd);
-        const { stdout } = await runHelper(ctx.cwd, "pi-next-state.sh", [ctx.cwd]);
+        const result = await workflowState(ctx.cwd, "", undefined);
         const text = [
           `Safe handoff: ${state.safe ? "yes" : "no"}`,
-          stdout,
+          `State provider: ${result.provider}`,
+          formatWorkflowState(result.state),
           `Dirty=${state.dirtyFiles.length ? "yes" : "no"}`,
           state.dirtyFiles.length ? state.dirtyFiles.join("\n") : "",
           `Continue marker=${state.marked ? state.marker : "none"}`,
