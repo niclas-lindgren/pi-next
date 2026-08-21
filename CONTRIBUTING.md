@@ -13,6 +13,13 @@ its generic kernel boundary separate from consumer product policy.
 4. Treat Pi host APIs and the version-1 configuration/authority contracts as
    compatibility boundaries. Update documentation and tests when they change.
 
+For the mandatory serial issue workflow—discover live GitHub issues, implement
+one in its isolated worktree, commit, guarded-merge, push, complete through the
+authority, and clean up before selecting the next issue—see [`AGENTS.md`](AGENTS.md).
+Do not close an issue before the pushed candidate is proven reachable from
+`origin/main`; stop and preserve recovery state when a global safety check
+fails.
+
 ## Development
 
 Requirements are Node.js 22.19+, Git, and the supported Pi host packages.
