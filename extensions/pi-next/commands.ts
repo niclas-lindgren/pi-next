@@ -5,6 +5,8 @@ import type {
 import { existsSync } from "node:fs";
 
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
+import { createWorkAuthority, type AuthorityWorkItem } from "../../src/coordination/work-authority.ts";
+import { isIssueLeaseFresh } from "./issue-authority.ts";
 import { findingPublicationEligible, type SelfAssessmentFinding } from "../../src/coordination/self-assessment.ts";
 import { sanitizeFeedbackText } from "../../src/coordination/feedback.ts";
 import { readHealthState, readSelfAssessmentFindings } from "./self-assessment.ts";
@@ -15,9 +17,12 @@ import { LocalIssueLeaseAuthority } from "./local-lease.ts";
 import {
   CandidateDiscoveryError,
   candidateShortlist,
+  isBlockedCandidate,
+  isHeldSelfAssessmentFinding,
   type CandidateShortlist,
 } from "./issue-candidates.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
+import { listLoopStates } from "./loop-state.ts";
 import {
   currentGeneration,
   currentSupervisorStatus,
@@ -138,6 +143,71 @@ function formatAssessmentFinding(
   const diagnostic = finding.publication?.reason ? ` reason=${boundedStatusText(finding.publication.reason)}` : "";
   const evidence = finding.evidence.slice(0, 3).map((item) => boundedStatusText(item, 100)).join(" | ") || "none";
   return `Finding ${boundedStatusText(finding.fingerprint, 80)} · ${finding.category}/${finding.severity}/${finding.confidence} · recurrence=${finding.recurrence} · approval=${finding.approvalState} · ${eligibility} · publication=${publication}${authority}${diagnostic} · evidence=${evidence} · action=${boundedStatusText(finding.proposedAction, 120)}`;
+}
+
+async function issueQueueStatusText(cwd: string, sessionId: string | undefined, args: string): Promise<string> {
+  const config = loadPiNextConfig(cwd);
+  const filter = args.trim().toLowerCase() || "summary";
+  const authority = createWorkAuthority(cwd, config);
+  const items = await authority.listCandidates(config);
+  const leases = new GitHubIssueLeaseAuthority(cwd);
+  const active = listLoopStates(cwd).filter((state) => state.sessionId === sessionId && state.activeIssueNumber);
+  const current = active.find((state) => state.status === "running")?.activeIssueNumber;
+  let shortlist: CandidateShortlist;
+  try {
+    shortlist = await candidateShortlist(cwd, {
+      authority,
+      config,
+      leaseAuthority: leases,
+      completedIssues: active.flatMap((state) => state.completedIssues),
+      deferredIssues: active.flatMap((state) => state.deferredIssues.map((issue) => issue.issueNumber)),
+      refreshMain: false,
+    });
+  } catch (error) {
+    return `Issue queue unavailable: ${boundedStatusText(error instanceof Error ? error.message : String(error))}`;
+  }
+  const rows: string[] = [];
+  let unknown = false;
+  const ordered = [...items].sort((left, right) => {
+    const lp = config.selection.priorities.indexOf(left.priority || "");
+    const rp = config.selection.priorities.indexOf(right.priority || "");
+    return (lp < 0 ? 999 : lp) - (rp < 0 ? 999 : rp) || (left.number || 0) - (right.number || 0);
+  });
+  for (const item of ordered.slice(0, filter === "all" ? 100 : 30)) {
+    if (!item.number) continue;
+    let lease;
+    try { lease = await leases.read(item.number); } catch { unknown = true; }
+    const labels = item.states.map((name) => ({ name }));
+    const pseudo = { number: item.number, title: item.title, updatedAt: item.updatedAt, labels };
+    const currentDisposition = current === item.number ? "current/owned-by-this-run" : undefined;
+    const disposition = currentDisposition
+      || (lease && isIssueLeaseFresh(lease) ? `leased-other/${boundedStatusText(lease.agent, 40)}` : undefined)
+      || (unknown ? "ownership-unknown" : undefined)
+      || (isBlockedCandidate(pseudo, config.selection.blockedStates) ? "blocked/excluded" : undefined)
+      || (isHeldSelfAssessmentFinding(pseudo, config) ? "held-finding/excluded" : undefined)
+      || (!config.selection.readyStates.some((state) => item.states.some((value) => value.toLowerCase() === state.toLowerCase())) ? "not-ready/excluded" : undefined)
+      || (active.some((state) => state.deferredIssues.some((issue) => issue.issueNumber === item.number)) ? "deferred-this-run" : "eligible");
+    const filterMatch = filter === "active"
+      ? disposition.startsWith("current/") || disposition.startsWith("leased-other")
+      : disposition.startsWith(filter);
+    if (filter !== "all" && filter !== "summary" && !filterMatch) continue;
+    const shortlistMark = shortlist.candidateIssueNumber === item.number ? " shortlist=next" : "";
+    rows.push(`#${item.number} ${item.priority || "-"} ${disposition}${shortlistMark} ${boundedStatusText(item.title, 160)}`);
+  }
+  const counts = {
+    eligible: rows.filter((row) => row.includes(" eligible")).length,
+    leased: rows.filter((row) => row.includes("leased-other")).length,
+    blocked: rows.filter((row) => row.includes("blocked") || row.includes("not-ready") || row.includes("held-finding")).length,
+    deferred: rows.filter((row) => row.includes("deferred")).length,
+  };
+  const lines = [
+    `Current: ${current ? `#${current}` : "none"}`,
+    `Eligible now: ${counts.eligible} · Leased by others: ${counts.leased} · Deferred this run: ${counts.deferred} · Blocked/not ready: ${counts.blocked}`,
+    `Shortlist: ${shortlist.candidateIssueNumber ? `#${shortlist.candidateIssueNumber}` : "none"} · authority=${authority.name} · result=${shortlist.outcome}`,
+    unknown ? "Ownership: unknown (lease authority unavailable; eligibility is fail-closed)" : "Ownership: lease authority read successfully",
+    ...(rows.length ? rows : [shortlist.reason ? `No eligible issues: ${boundedStatusText(shortlist.reason)}` : "No issues in the bounded authority result"]),
+  ];
+  return lines.join("\n");
 }
 
 /**
@@ -650,6 +720,17 @@ export function registerPiNextCommands(
           `pi-next doctor failed: ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
+      }
+    },
+  });
+
+  pi.registerCommand("pi-next-issues", {
+    description: "Show the bounded authoritative issue queue without mutating leases or work items",
+    handler: async (args, ctx) => {
+      try {
+        notifySafely(ctx, await issueQueueStatusText(ctx.cwd, sessionIdentity(ctx), args), "info");
+      } catch (error) {
+        notifySafely(ctx, `pi-next issues failed: ${boundedStatusText(error instanceof Error ? error.message : String(error))}`, "error");
       }
     },
   });
