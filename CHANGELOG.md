@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.64 - pending release
+
+Parent-host retention follow-up release.
+
+### Material changes
+
+- Stop the long-lived foreground supervisor from strongly retaining the initial Pi session context across replacements.
+- Release settled run/session presentation bindings so repeated unattended runs do not accumulate identity state.
+- Add retention regressions proving host contexts are non-owning and settled bindings are removed.
+
+### Compatibility/configuration/schema
+
+- Existing supervisor, session, and footer contracts remain compatible.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- A supervisor now fails explicitly if neither a live nor weakly-held initialization context is available; normal command paths always install the live context before launch.
+
+### Security/safety
+
+- Weak context fallback preserves lifecycle operation without retaining private session/history graphs.
+- Durable workflow state, leases, and canonical worktrees are unchanged.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.63 - pending release
 
 Restart recovery reliability release.

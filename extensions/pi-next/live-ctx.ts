@@ -46,6 +46,14 @@ export function liveAutoRunBinding(ctx: unknown): string | undefined {
   return key ? boundRunIds.get(key) : undefined;
 }
 
+/** Release presentation-only identity after its supervisor has settled. */
+export function clearLiveAutoRunBinding(cwd: string, runId: string): void {
+  for (const [key, boundRunId] of boundRunIds) {
+    if (boundRunId !== runId || !key.startsWith(`${cwd}\u0000`)) continue;
+    boundRunIds.delete(key);
+  }
+}
+
 export function getLiveCtx(): ExtensionCommandContext | undefined {
   return current;
 }
