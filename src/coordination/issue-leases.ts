@@ -652,11 +652,12 @@ export async function recoverIssueLease(
   authority: IssueLeaseAuthority,
   input: Parameters<typeof createIssueLease>[0],
   now = new Date(),
+  options: LeaseLifecycleOptions = {},
 ): Promise<IssueLease> {
   const current = await authority.read(input.issueNumber);
   if (current && isIssueLeaseFresh(current, now))
     throw new LeaseConflictError(input.issueNumber);
-  return claimIssueLease(authority, input, now);
+  return claimIssueLease(authority, input, now, options);
 }
 
 /**
@@ -669,6 +670,7 @@ export async function reconcileIssueLeaseForResume(
   authority: IssueLeaseAuthority,
   expected: IssueLease,
   now = new Date(),
+  options: LeaseLifecycleOptions = {},
 ): Promise<IssueLease> {
   let current: IssueLease | undefined;
   try {
@@ -683,12 +685,13 @@ export async function reconcileIssueLeaseForResume(
       new Error("active loop lease is missing; refusing resume"),
     );
   }
-  if (isIssueLeaseFresh(current, now)) {
-    if (!issueLeaseMatchesOwner(current, expected)) {
-      throw new LeaseConflictError(expected.issueNumber);
-    }
-    return current;
+  if (!issueLeaseMatchesOwner(current, expected)) {
+    // A stale lease owned by a different run is still ambiguous ownership;
+    // durable local state never grants permission to steal it. Only the exact
+    // persisted owner may enter the stale CAS takeover path.
+    throw new LeaseConflictError(expected.issueNumber);
   }
+  if (isIssueLeaseFresh(current, now)) return current;
   return recoverIssueLease(
     authority,
     {
@@ -700,6 +703,7 @@ export async function reconcileIssueLeaseForResume(
       expiresAt: new Date(now.getTime() + ISSUE_LEASE_DURATION_MS).toISOString(),
     },
     now,
+    options,
   );
 }
 
