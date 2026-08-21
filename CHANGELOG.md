@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.2.42 - pending release
+## 0.2.43 - pending release
+
+Release-gate fixture cleanup release.
+
+### Material changes
+
+- Make finalize integration fixtures retain their temporary repositories until
+  the suite completes, preventing cleanup races in the hosted release gate.
+- Preserve exact-tag verification, authenticated authority checks, and the
+  deterministic package smoke gate.
+
+### Compatibility/configuration/schema
+
+- No Pi API, package/config schema, or authority contract changes are intended.
+- The supported Node.js 22.19+ and Pi 0.84.2+ compatibility range is unchanged.
+
+### Breaking/behavior changes
+
+- No runtime or consumer configuration behavior changes are intended.
+- Only test fixture lifecycle and release evidence behavior changed.
+
+### Security/safety
+
+- Exact release verification remains bound to the immutable tag commit.
+- GitHub Actions uses its built-in read token and consumers remain pinned to
+  immutable revisions.
+
+### Upgrade guidance
+
+- Consumers may wait for a later bundled runtime release. Review the release
+  notes and run the documented immutable pin plus fresh-process checks when
+  upgrading.
+
+## 0.2.42 - 2026-08-21
 
 Release-gate fixture reliability release.
 

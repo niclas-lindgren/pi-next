@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, test } from "node:test";
+import { after, describe, test } from "node:test";
 
 import { createIssueLease, type IssueLease } from "../src/coordination/issue-authority.ts";
 import type { IssueLeaseAuthority } from "../src/coordination/issue-leases.ts";
@@ -23,7 +23,7 @@ import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordinati
  */
 
 const temporaryDirectories: string[] = [];
-afterEach(() => {
+after(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
