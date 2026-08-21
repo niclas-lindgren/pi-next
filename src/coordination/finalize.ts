@@ -2,9 +2,8 @@
  * Mechanical terminal-completion primitive for canonical `agent/issue-N`
  * branches.
  *
- * Ported from Campsty's `.agents/coordination/finalize.ts` (#619) so any
- * compatible agent harness gets the same guarded sequence instead of a set
- * of optional model-authored shell steps: fetch, switch, merge, push,
+ * This provides any compatible agent harness with a guarded sequence instead
+ * of a set of optional model-authored shell steps: fetch, switch, merge, push,
  * reachability check, then separately call complete/release. Nothing
  * enforced that sequence or its ordering, so a model could close a work
  * item while the verified candidate commit was never actually reachable
@@ -25,9 +24,9 @@
  * closure are allowed to diverge in that case; a stale worker must not
  * silently mark stale-authority work "Done").
  *
- * Unlike Campsty's copy, the close/comment step goes through the injected
- * `WorkAuthorityAdapter` (`work-authority.ts`) instead of hardcoded `gh`
- * calls, so this module stays authority-adapter-agnostic. Git integration
+ * The close/comment step goes through the injected `WorkAuthorityAdapter`
+ * (`work-authority.ts`) instead of hardcoded `gh` calls, so this module stays
+ * authority-adapter-agnostic. Git integration
  * itself (merge/push/reachability) has no GitHub dependency and is
  * unchanged. Worktree/branch cleanup remains the caller's separate, later
  * step, exactly like `release` remains separate from `complete`: a partial

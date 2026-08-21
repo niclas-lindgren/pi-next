@@ -6,8 +6,8 @@ its generic kernel boundary separate from consumer product policy.
 ## Before changing code
 
 1. Search existing issues and open a focused issue for new behavior.
-2. Do not copy Campsty-specific labels, paths, prompts, deployment rules, or
-   credentials into reusable core code.
+2. Keep repository-specific labels, paths, prompts, deployment rules, and
+   credentials out of reusable core code.
 3. Preserve fail-closed ownership, canonical-worktree, freshness, verification,
    and completion invariants.
 4. Treat Pi host APIs and the version-1 configuration/authority contracts as

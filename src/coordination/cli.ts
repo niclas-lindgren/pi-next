@@ -1,9 +1,8 @@
 /**
  * Harness-neutral CLI surface over the issue coordination module.
  *
- * Ported from Campsty's `.agents/coordination/cli.ts` (#588, #619) so any
- * agent harness (or a human operator) gets a stable, structured way to
- * interact with the shared lease/worktree/finalize algorithm without
+ * This gives any agent harness (or a human operator) a stable, structured way
+ * to interact with the shared lease/worktree/finalize algorithm without
  * importing TypeScript modules directly. `status`/`claim`/`renew`/
  * `release`/`workspace`/`prepare`/`finalize` each print exactly one JSON
  * object to stdout and set the process exit code; there is no other stdout

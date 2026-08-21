@@ -22,10 +22,9 @@ import {
  * Proves that `src/coordination/**` preserves the lease record format and
  * `agent/issue-N` / `.worktrees/issue-N` naming convention byte-for-byte, so
  * leases and worktrees already produced by any pre-existing compatible
- * harness (including Campsty's own `.agents/coordination` copy this module
- * was ported from) remain readable/renewable/releasable/recoverable without
- * a format change. This is a hot swap of the implementation behind an
- * existing production lease system, not a greenfield install (#19).
+ * harnesses remain readable/renewable/releasable/recoverable without a
+ * format change. This protects the established lease/worktree contract from
+ * accidental compatibility regressions (#19).
  */
 
 // A byte-for-byte golden record of the shape the shared coordination module
