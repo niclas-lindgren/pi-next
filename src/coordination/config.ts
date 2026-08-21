@@ -54,6 +54,15 @@ export interface PiNextConfig {
     maxEscalations: number;
   };
   adversarialReview: AdversarialReviewPolicy;
+  convergence: {
+    softTransitions: number;
+    hardTransitions: number;
+    softWallMs: number;
+    hardWallMs: number;
+    softTokens: number;
+    hardTokens: number;
+    maxPlanTasksWarning: number;
+  };
   /** Bounded self-assessment policy. Runtime changes remain disabled outside
    * explicitly configured/reversible actions. */
   assessment: {
@@ -99,6 +108,15 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
   },
   workerDispatch: { version: 1 as const, models: {}, maxEscalations: 2 },
   adversarialReview: { enabled: false, requiredRisk: "high" as const, maxRounds: 2, axes: ["spec", "standards"] as ReviewAxis[] },
+  convergence: {
+    softTransitions: 6,
+    hardTransitions: 12,
+    softWallMs: 15 * 60_000,
+    hardWallMs: 30 * 60_000,
+    softTokens: 100_000,
+    hardTokens: 200_000,
+    maxPlanTasksWarning: 12,
+  },
   assessment: {
     enabled: true,
     noProgressThreshold: 2,
@@ -160,7 +178,7 @@ function cloneDefaults(): PiNextConfig {
 
 export function validatePiNextConfig(value: unknown): PiNextConfig {
   const root = object(value, "config");
-  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview", "assessment"], "config");
+  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview", "convergence", "assessment"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
     throw new PiNextConfigError(`config.version must be ${PI_NEXT_CONFIG_VERSION}`);
   }
@@ -258,6 +276,28 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
   const axesValue = strings(reviewValue.axes, "config.adversarialReview.axes", 3) as ReviewAxis[];
   if (axesValue.some((axis) => !["spec", "standards", "risk"].includes(axis))) throw new PiNextConfigError("config.adversarialReview.axes contains an unsupported axis");
 
+  const convergenceValue = root.convergence === undefined
+    ? DEFAULT_PI_NEXT_CONFIG.convergence
+    : object(root.convergence, "config.convergence");
+  rejectUnknown(convergenceValue as Record<string, unknown>, ["softTransitions", "hardTransitions", "softWallMs", "hardWallMs", "softTokens", "hardTokens", "maxPlanTasksWarning"], "config.convergence");
+  const convergenceNumber = (key: keyof PiNextConfig["convergence"], fallback: number, min: number, max: number): number => {
+    const value = (convergenceValue as Record<string, unknown>)[key] === undefined ? fallback : (convergenceValue as Record<string, unknown>)[key];
+    if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw new PiNextConfigError(`config.convergence.${key} must be an integer between ${min} and ${max}`);
+    return value;
+  };
+  const convergence = {
+    softTransitions: convergenceNumber("softTransitions", 6, 1, 100),
+    hardTransitions: convergenceNumber("hardTransitions", 12, 2, 200),
+    softWallMs: convergenceNumber("softWallMs", 15 * 60_000, 1_000, 86_400_000),
+    hardWallMs: convergenceNumber("hardWallMs", 30 * 60_000, 2_000, 172_800_000),
+    softTokens: convergenceNumber("softTokens", 100_000, 1_000, 100_000_000),
+    hardTokens: convergenceNumber("hardTokens", 200_000, 2_000, 200_000_000),
+    maxPlanTasksWarning: convergenceNumber("maxPlanTasksWarning", 12, 1, 100),
+  };
+  if (convergence.hardTransitions <= convergence.softTransitions || convergence.hardWallMs <= convergence.softWallMs || convergence.hardTokens <= convergence.softTokens) {
+    throw new PiNextConfigError("config.convergence hard budgets must exceed soft budgets");
+  }
+
   const assessmentValue: Record<string, unknown> = root.assessment === undefined
     ? DEFAULT_PI_NEXT_CONFIG.assessment as unknown as Record<string, unknown>
     : object(root.assessment, "config.assessment");
@@ -300,6 +340,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     workflow: { ...paths, stateProvider },
     workerDispatch: { version: 1, models, maxEscalations: Number(maxEscalations) },
     adversarialReview: { enabled: reviewValue.enabled, requiredRisk: reviewValue.requiredRisk, maxRounds: reviewValue.maxRounds, axes: axesValue },
+    convergence,
     assessment,
   };
 }

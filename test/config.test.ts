@@ -55,6 +55,30 @@ test("versioned configuration validates custom authority and workflow policy", (
   );
 });
 
+test("convergence budgets are configurable and hard limits must exceed soft limits", () => {
+  assert.equal(validatedConfig.convergence.softTransitions, 6);
+  const custom = validatePiNextConfig({
+    ...config,
+    convergence: {
+      softTransitions: 2,
+      hardTransitions: 4,
+      softWallMs: 10_000,
+      hardWallMs: 20_000,
+      softTokens: 10_000,
+      hardTokens: 20_000,
+      maxPlanTasksWarning: 5,
+    },
+  });
+  assert.equal(custom.convergence.maxPlanTasksWarning, 5);
+  assert.throws(
+    () => validatePiNextConfig({
+      ...config,
+      convergence: { ...custom.convergence, hardTransitions: 2 },
+    }),
+    /hard budgets must exceed soft budgets/,
+  );
+});
+
 test("a non-GitHub authority can provide configurable candidates", async () => {
   const authority = new InMemoryWorkAuthority([
     {

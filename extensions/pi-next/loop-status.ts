@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import {
   listLoopStates,
   loopRuntimeDir,
@@ -137,6 +138,13 @@ function issueLabel(state: LoopState): string {
 
 function recordLine(record: LoopStatusRecord): string {
   const state = record.state;
+  const issue = state.activeIssueNumber
+    ? state.issueMetrics.find((item) => item.issueNumber === state.activeIssueNumber)
+    : state.issueMetrics.at(-1);
+  const policy = loadPiNextConfig(record.state.coordinationCwd || process.cwd()).convergence;
+  const budget = issue
+    ? ` · budget=${Math.round(Math.min(1, Math.max((issue.transitions || 0) / policy.hardTransitions, (issue.wallClockMs || 0) / policy.hardWallMs, issue.totalTokens / policy.hardTokens)) * 100)}% transitions=${issue.transitions || 0} workers=${issue.workerLaunches || 0}${issue.planTasksAtSelection !== undefined ? ` tasks=${issue.planTasksRemaining ?? 0}/${issue.planTasksAtSelection}` : ""}`
+    : "";
   const controller = record.controller === "alive"
     ? `controller alive pid=${record.controllerPid}`
     : record.controller === "dead"
@@ -145,7 +153,7 @@ function recordLine(record: LoopStatusRecord): string {
         ? "controller liveness unknown"
         : "controller not running";
   const reason = state.lastReason ? ` · ${state.lastReason.replace(/\s+/g, " ").slice(0, 160)}` : "";
-  return `${state.runId} · ${issueLabel(state)} · ${record.presentation} · ${controller}${reason}`;
+  return `${state.runId} · ${issueLabel(state)} · ${record.presentation} · ${controller}${budget}${reason}`;
 }
 
 function counts(records: readonly LoopStatusRecord[]): string {
