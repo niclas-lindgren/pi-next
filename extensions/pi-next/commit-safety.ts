@@ -7,6 +7,7 @@ import {
   verificationReportAuthorityErrors,
 } from "./acceptance-verification.ts";
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
+import { pendingPlanRepair } from "./execution-boundary.ts";
 import {
   acceptanceCriteria,
   currentTask,
@@ -281,6 +282,18 @@ export async function commitExplicitPaths(
   const issue = options.issueNumber ||
     (existsSync(planFile(cwd)) ? issueNumber(readFileSync(planFile(cwd), "utf8")) : null) ||
     undefined;
+  // A bounded planning-only repair turn may fix the owned PLAN's task
+  // metadata, but it must never smuggle product-source changes through while
+  // the PLAN remains semantically invalid. Once the PLAN is repaired on disk
+  // (even before this commit), pendingPlanRepair naturally clears.
+  if (kind === "substantive" && issue) {
+    const repair = pendingPlanRepair(cwd, issue);
+    if (repair) {
+      throw new Error(
+        `Issue #${issue} PLAN task metadata is unresolved (${repair.errors.join("; ")}); only the configured PLAN/workflow paths may be committed until it revalidates`,
+      );
+    }
+  }
   const inferredCorrectness = authorityReconciliationTransition(cwd, issue, normalized);
   const correctness = options.correctness || inferredCorrectness;
   if (correctness) {
