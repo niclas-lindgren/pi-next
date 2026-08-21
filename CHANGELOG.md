@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.58 - pending release
+
+Bounded PLAN repair recovery release.
+
+### Material changes
+
+- Persist pending PLAN-repair state transitions to the run-scoped loop state file before dispatching planning-only repair workers.
+- Reset the bounded repair-attempt budget when the invalid PLAN fingerprint changes, while retaining the bound for an unchanged defect.
+
+### Compatibility/configuration/schema
+
+- Existing PLAN ownership, lease, worktree, workflow-path, and loop-state contracts remain unchanged.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Owned task-metadata defects now receive a durable bounded planning repair attempt without inheriting attempts from a different defect fingerprint.
+
+### Security/safety
+
+- Foreign or ambiguous PLAN ownership remains fail-closed, and repair workers remain restricted to the planning role until metadata validates.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.57 - pending release
 
 Scheduler-only convergence yield persistence release.
