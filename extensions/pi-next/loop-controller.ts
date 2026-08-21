@@ -28,9 +28,11 @@ import { setLiveCtx } from "./live-ctx.ts";
 import { buildLoopPrompt } from "./prompt.ts";
 import {
   PlanAuthorityError,
+  safeNotify,
   resolvePlanIdentity,
   runIssueWorker,
   type IssueWorkerOptions,
+  type WorkerWatchdogEvent,
   type IssueWorkerRunner,
 } from "./util-core.ts";
 import { git, planFile, removeFile, workflowPath, writeJsonAtomic } from "./util.ts";
@@ -1032,6 +1034,20 @@ async function runOneStep(
         runId: state.runId,
         phase,
         dispatch,
+        onWatchdog: (event: WorkerWatchdogEvent) => {
+          try {
+            recordLifecycleEvent(runtimeCwdFor(ctx.cwd, state), {
+              event: "worker_stalled",
+              issueNumber: state.activeIssueNumber || 0,
+              runId: state.runId,
+              outcome: event.kind === "worker_timeout" ? "failure" : "skip",
+              reasonCode: event.kind,
+            });
+            safeNotify(ctx, `Issue #${state.activeIssueNumber || "?"} worker ${event.kind.replaceAll("_", " ")} · idle ${Math.round(event.idleMs / 1_000)}s`, event.kind === "worker_timeout" ? "warning" : "info");
+          } catch {
+            // Watchdog diagnostics and presentation cannot affect termination.
+          }
+        },
       },
     );
     const result = await task;

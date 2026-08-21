@@ -14,6 +14,18 @@ import type { AdversarialReviewPolicy, ReviewAxis } from "./adversarial-review.t
 export const PI_NEXT_CONFIG_VERSION = 1 as const;
 export const PI_NEXT_CONFIG_PATH = ".pi-next/config.json" as const;
 
+export interface WorkerWatchdogPolicy {
+  softIdleMs: number;
+  hardIdleMs: number;
+  hardWallMs: number;
+  terminationGraceMs: number;
+}
+
+export interface WorkerWatchdogPolicyConfig {
+  default: WorkerWatchdogPolicy;
+  roles: Partial<Record<WorkerRole, WorkerWatchdogPolicy>>;
+}
+
 export interface PiNextConfig {
   version: typeof PI_NEXT_CONFIG_VERSION;
   authority: {
@@ -63,6 +75,7 @@ export interface PiNextConfig {
     hardTokens: number;
     maxPlanTasksWarning: number;
   };
+  workerWatchdog: WorkerWatchdogPolicyConfig;
   /** Bounded self-assessment policy. Runtime changes remain disabled outside
    * explicitly configured/reversible actions. */
   assessment: {
@@ -116,6 +129,12 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
     softTokens: 100_000,
     hardTokens: 200_000,
     maxPlanTasksWarning: 12,
+  },
+  workerWatchdog: {
+    default: { softIdleMs: 120_000, hardIdleMs: 600_000, hardWallMs: 2_700_000, terminationGraceMs: 5_000 },
+    roles: {
+      verification: { softIdleMs: 180_000, hardIdleMs: 900_000, hardWallMs: 3_600_000, terminationGraceMs: 5_000 },
+    },
   },
   assessment: {
     enabled: true,
@@ -178,7 +197,7 @@ function cloneDefaults(): PiNextConfig {
 
 export function validatePiNextConfig(value: unknown): PiNextConfig {
   const root = object(value, "config");
-  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview", "convergence", "assessment"], "config");
+  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview", "convergence", "workerWatchdog", "assessment"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
     throw new PiNextConfigError(`config.version must be ${PI_NEXT_CONFIG_VERSION}`);
   }
@@ -298,6 +317,38 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     throw new PiNextConfigError("config.convergence hard budgets must exceed soft budgets");
   }
 
+  const workerWatchdogValue = root.workerWatchdog === undefined
+    ? DEFAULT_PI_NEXT_CONFIG.workerWatchdog
+    : object(root.workerWatchdog, "config.workerWatchdog");
+  rejectUnknown(workerWatchdogValue as Record<string, unknown>, ["default", "roles"], "config.workerWatchdog");
+  const parseWatchdog = (raw: unknown, name: string, fallback: WorkerWatchdogPolicy): WorkerWatchdogPolicy => {
+    const value: Record<string, unknown> = raw === undefined
+      ? fallback as unknown as Record<string, unknown>
+      : object(raw, name);
+    rejectUnknown(value, ["softIdleMs", "hardIdleMs", "hardWallMs", "terminationGraceMs"], name);
+    const numberValue = (key: keyof WorkerWatchdogPolicy, min: number, max: number): number => {
+      const candidate = value[key] === undefined ? fallback[key] : value[key];
+      if (typeof candidate !== "number" || !Number.isInteger(candidate) || candidate < min || candidate > max) throw new PiNextConfigError(`${name}.${key} must be an integer between ${min} and ${max}`);
+      return candidate;
+    };
+    const result = {
+      softIdleMs: numberValue("softIdleMs", 1_000, 86_400_000),
+      hardIdleMs: numberValue("hardIdleMs", 2_000, 172_800_000),
+      hardWallMs: numberValue("hardWallMs", 5_000, 604_800_000),
+      terminationGraceMs: numberValue("terminationGraceMs", 100, 60_000),
+    };
+    if (result.hardIdleMs <= result.softIdleMs || result.hardWallMs <= result.softIdleMs) throw new PiNextConfigError(`${name} hard watchdog limits must exceed softIdleMs`);
+    return result;
+  };
+  const watchdogDefault = parseWatchdog((workerWatchdogValue as Record<string, unknown>).default, "config.workerWatchdog.default", DEFAULT_PI_NEXT_CONFIG.workerWatchdog.default);
+  const rolesRaw = (workerWatchdogValue as Record<string, unknown>).roles === undefined ? {} : object((workerWatchdogValue as Record<string, unknown>).roles, "config.workerWatchdog.roles");
+  const roles: Partial<Record<WorkerRole, WorkerWatchdogPolicy>> = {};
+  for (const [role, raw] of Object.entries(rolesRaw)) {
+    if (!/^(controller|planning|implementation|repair|review-spec|review-standards|verification|maintenance)$/.test(role)) throw new PiNextConfigError(`config.workerWatchdog.roles.${role} is not a supported worker role`);
+    roles[role as WorkerRole] = parseWatchdog(raw, `config.workerWatchdog.roles.${role}`, watchdogDefault);
+  }
+  const workerWatchdog = { default: watchdogDefault, roles };
+
   const assessmentValue: Record<string, unknown> = root.assessment === undefined
     ? DEFAULT_PI_NEXT_CONFIG.assessment as unknown as Record<string, unknown>
     : object(root.assessment, "config.assessment");
@@ -341,6 +392,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     workerDispatch: { version: 1, models, maxEscalations: Number(maxEscalations) },
     adversarialReview: { enabled: reviewValue.enabled, requiredRisk: reviewValue.requiredRisk, maxRounds: reviewValue.maxRounds, axes: axesValue },
     convergence,
+    workerWatchdog,
     assessment,
   };
 }
