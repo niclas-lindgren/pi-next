@@ -48,13 +48,10 @@ import {
   changeFiles,
   guardedHostCall,
   markerFile,
-  parseState,
   PlanAuthorityError,
   planFile,
   resolvePlanIdentity,
-  runHelper,
   safeNotify,
-  workflowPath,
 } from "./util.ts";
 import {
   runIssueWorker,
@@ -67,6 +64,12 @@ import { attachWorkerDisplay } from "./worker-display.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
 import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
 import { createWorkerFailureEvidence, WorkerFailureError } from "./worker-failure.ts";
+import {
+  formatWorkflowState,
+  selectedWorkflowStateProvider,
+  WorkflowStateProviderError,
+  workflowState,
+} from "./workflow-state-provider.ts";
 
 /**
  * Delivers through the shared lifecycle-aware host boundary (#583) instead
@@ -556,28 +559,26 @@ export function registerPiNextCommands(
       try {
         const identity = piNextRuntimeIdentity();
         const config = loadPiNextConfig(ctx.cwd);
-        const helper = workflowPath(ctx.cwd, "helperDir");
-        const repository = await runHelper(ctx.cwd, "pi-next-state.sh", [ctx.cwd]).then(
-          () => "available",
-          () => "missing or not executable",
-        );
+        const state = await workflowState(ctx.cwd);
+        const provider = selectedWorkflowStateProvider(config);
         notifySafely(
           ctx,
           [
             `Pi-next version=${identity.version} revision=${identity.revision}`,
             `Config: valid (adapter=${config.authority.adapter}, schema=${config.version})`,
-            `Workflow helper: ${repository} (${helper})`,
+            `Workflow state provider: ${provider} (validated)`,
+            formatWorkflowState(state.state),
             `Project policy: ${config.repositoryPolicy.entrypoints.join(", ") || "none configured"}`,
           ].join("\n"),
-          repository === "available" ? "info" : "warning",
+          "info",
         );
       } catch (error) {
         void reportRuntimeFailure(ctx.cwd, {
           stage: "doctor",
-          category: "runtime",
+          category: error instanceof WorkflowStateProviderError ? "repository" : "runtime",
           severity: "error",
           outcome: "failed",
-          code: "doctor_failed",
+          code: error instanceof WorkflowStateProviderError ? "workflow_state_provider_failed" : "doctor_failed",
           summary: error instanceof Error ? error.message : String(error),
           error,
         });
@@ -594,13 +595,11 @@ export function registerPiNextCommands(
     description: "Show local plan state without invoking the model",
     handler: async (_args, ctx) => {
       try {
-        const { stdout } = await runHelper(ctx.cwd, "pi-next-state.sh", [
-          ctx.cwd,
-        ]);
-        const state = parseState(stdout);
+        const result = await workflowState(ctx.cwd);
+        const state = result.state;
         notifySafely(
           ctx,
-          `PLAN=${state.PLAN} TASKS=${state.UNCHECKED_TASKS ?? state.UNCHECKED} ACCEPTANCE=${state.UNCHECKED_ACCEPTANCE ?? "-"} GOAL=${state.PLAN_GOAL || "-"}`,
+          `Provider=${result.provider} PLAN=${state.PLAN} TASKS=${state.UNCHECKED_TASKS ?? state.UNCHECKED ?? "-"} ACCEPTANCE=${state.UNCHECKED_ACCEPTANCE ?? "-"} GOAL=${state.PLAN_GOAL || "-"}`,
           "info",
         );
         // A checked-off PLAN task or a "running"-looking durable loop-state

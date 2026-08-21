@@ -47,7 +47,7 @@ async function freshPiHostProbe(cwd: string, env: NodeJS.ProcessEnv, revision: s
     send({ type: "prompt", id: "doctor", message: "/pi-next-doctor" });
     const doctorEvent = await waitFor((event) => event.type === "extension_ui_request" && event.method === "notify" && String(event.message).includes(`revision=${revision}`));
     send({ type: "prompt", id: "status", message: "/pi-next-status" });
-    const statusEvent = await waitFor((event) => event.type === "extension_ui_request" && event.method === "notify" && String(event.message).includes("PLAN="));
+    const statusEvent = await waitFor((event) => event.type === "extension_ui_request" && event.method === "notify" && String(event.message).includes("Provider="));
     return { commands, doctor: String(doctorEvent.message), status: String(statusEvent.message) };
   } finally {
     child.kill("SIGTERM");
@@ -117,7 +117,8 @@ test("fresh consumer installs a pinned package and completes a disposable transi
     const expectedVersion = (JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as { version: string }).version;
     assert.match(host.doctor, new RegExp(`Pi-next version=${expectedVersion.replaceAll(".", "\\.")}`));
     assert.match(host.doctor, new RegExp(`revision=${revision}`));
-    assert.match(host.status, /PLAN=absent/);
+    assert.match(host.doctor, /Workflow state provider: builtin/);
+    assert.match(host.status, /Provider=builtin PLAN=absent/);
 
     // A fresh loader process is the activation boundary: no in-process
     // loader shortcut can make a copied extension appear active.
