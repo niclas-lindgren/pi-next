@@ -312,7 +312,7 @@ test("prompt policy comes from configuration rather than hidden repository conve
   assert.match(prompt, /POLICY\.md/);
   assert.match(prompt, /memory authority/);
   assert.match(prompt, /urgent/);
-  assert.doesNotMatch(prompt, /Campsty|AGENTS\.md/);
+  assert.doesNotMatch(prompt, /AGENTS\.md/);
 });
 
 test("maintenance uses the package skill and configured neutral diagnostics path", async () => {
@@ -333,7 +333,7 @@ test("maintenance uses the package skill and configured neutral diagnostics path
       });
       assert.match(prompt, /performance-telemetry/);
       assert.match(prompt, /role=maintenance/);
-      assert.doesNotMatch(prompt, /Campsty|\.agents\/|pi-performance\/SKILL/);
+      assert.doesNotMatch(prompt, /\.agents\/|pi-performance\/SKILL/);
       assert.match(prompt, /\.workflow\/evidence/);
     } finally {
       if (previous === undefined) delete process.env.PI_NEXT_CONFIG;

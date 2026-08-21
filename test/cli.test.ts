@@ -13,8 +13,7 @@ const exec = promisify(execFile);
 /**
  * Proves the stable, structured JSON-in/JSON-out contract every command
  * emits: exactly one JSON object on success or failure, and a stable `code`
- * on failure that callers branch on instead of message text (#19, ported
- * from Campsty's `.agents/coordination/cli.ts` behavior).
+ * on failure that callers branch on instead of message text (#19).
  */
 
 test("workspace derives canonical branch/worktree identity without touching any authority", async () => {
