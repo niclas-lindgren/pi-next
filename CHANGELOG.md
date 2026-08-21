@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.54 - pending release
+
+Canonical checkpoint branch release.
+
+### Material changes
+
+- Keep checkpoint commits on the leased `agent/issue-N` branch instead of creating per-run `pi-next/issue-N/<run>` branches.
+- Preserve run attribution through checkpoint metadata and lifecycle telemetry while keeping one issue workspace identity.
+
+### Compatibility/configuration/schema
+
+- Existing canonical lease, worktree, promotion, and explicit-path contracts remain unchanged.
+- Legacy per-run branches are no longer selected by checkpoint recovery.
+
+### Breaking/behavior changes
+
+- Checkpointing from a canonical issue worktree no longer switches to a second branch namespace.
+
+### Security/safety
+
+- Foreign branches and coordination `main` remain fail-closed; checkpoint commits continue to stage only explicit paths.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.53 - pending release
 
 Bounded legacy worktree attribution release.
