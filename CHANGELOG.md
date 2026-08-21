@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.68 - prepared release
+
+Bound stable-host candidate discovery and scheduler liveness.
+
+### Material changes
+
+- Bound GitHub discovery, lease, and main-refresh operations with cancellation and explicit unavailable diagnostics.
+- Inspect candidate leases progressively with capped concurrency instead of fanning out across the entire open queue.
+- Surface refresh, query, lease-check, and timeout phases through the stable supervisor display.
+
+### Compatibility/configuration/schema
+
+- Existing lease/CAS, loop-state, and host-session telemetry contracts remain compatible.
+- `PI_NEXT_AUTHORITY_TIMEOUT_MS` optionally overrides the default authority operation timeout.
+
+### Breaking/behavior changes
+
+- Candidate selection now fails closed as unavailable when authority I/O exceeds its operation or scheduler deadline; it is never mistaken for an empty queue.
+
+### Security/safety
+
+- Foreign leases remain candidate-local skips and final claim ownership remains authoritative CAS.
+- Authority payloads are not retained indefinitely in the parent process.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.67 - prepared release
 
 Stable parent-host auto lifecycle release.
