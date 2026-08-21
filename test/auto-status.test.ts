@@ -12,6 +12,7 @@ import {
 } from "../extensions/pi-next/commands-recovery.ts";
 import { type LoopState } from "../extensions/pi-next/loop-state.ts";
 import { currentSupervisorStatus, formatSupervisorStatus } from "../extensions/pi-next/foreground-supervisor.ts";
+import { clearLiveCtx } from "../extensions/pi-next/live-ctx.ts";
 
 function state(runId: string, updatedAt: string, overrides: Partial<LoopState> = {}): LoopState {
   return {
@@ -112,6 +113,37 @@ test("auto footer updates in place and preserves a terminal status", async () =>
   } finally {
     // stop is idempotent and also protects the test process from a leaked timer.
     stop();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("final command repaint uses its valid context after supervisor clears the live bridge", async () => {
+  const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-final-repaint-"));
+  try {
+    const runId = "recovered-final-run";
+    const dir = join(cwd, ".pi", "runtime", "pi-next-loops", runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:00.000Z", {
+      status: "stopped",
+      activeIssueNumber: 641,
+      lastReason: "host_memory_pressure: restart_required",
+    })));
+    const statuses: Array<[string, string | undefined]> = [];
+    const ctx = context(cwd, statuses, "recovery-session");
+    let preferredRunId: string | undefined;
+    const stop = startAutoStatusHeartbeat(ctx, () => preferredRunId, { replaceExisting: true });
+    try {
+      assert.match(statuses.at(-1)?.[1] || "", /no issue attached/);
+      preferredRunId = runId;
+      clearLiveCtx();
+      stop();
+      assert.match(statuses.at(-1)?.[1] || "", /#641/);
+      assert.doesNotMatch(statuses.at(-1)?.[1] || "", /no issue attached/);
+      assert.ok(statuses.every(([, text]) => text !== undefined));
+    } finally {
+      stop();
+    }
+  } finally {
     await rm(cwd, { recursive: true, force: true });
   }
 });

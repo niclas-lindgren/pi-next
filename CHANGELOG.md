@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.65 - pending release
+
+Bound auto-footer final repaint release.
+
+### Material changes
+
+- Repaint the exact recovered auto run during command finalization even after supervisor teardown clears the live-context bridge.
+- Keep the heartbeat free of strong stale-context fallbacks while allowing one final repaint through the valid command context.
+- Add regression coverage for neutral initial status, recovered binding, supervisor cleanup, and terminal final status.
+
+### Compatibility/configuration/schema
+
+- Existing footer binding and session lifecycle contracts remain compatible.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Completed auto commands retain the exact durable terminal status instead of leaving the initial neutral placeholder visible.
+
+### Security/safety
+
+- Final repaint uses only the command's still-valid context and an already-established run ID; it does not infer workflow authority or weaken ambiguous status selection.
+- Parallel session isolation and explicit footer clearing remain unchanged.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.64 - pending release
 
 Parent-host retention follow-up release.

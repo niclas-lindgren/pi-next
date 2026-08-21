@@ -306,7 +306,7 @@ export function startAutoStatusHeartbeat(
     // completion is not a request to clear the footer; the durable terminal
     // state is the useful handoff to the operator and to a replacement
     // session. Shutdown cancels first, so this never touches a disposed ctx.
-    update();
+    update(ctx);
     binding.active = false;
     persistStatusBinding(binding);
     autoStatusBindings.delete(binding);
@@ -314,11 +314,15 @@ export function startAutoStatusHeartbeat(
   };
   autoStatusHeartbeatCancellations.add(cancel);
 
-  const update = () => {
+  const update = (finalCtx?: ExtensionCommandContext) => {
     // session_shutdown cancels the timer before the replacement context is
     // disposed. This guard also handles an already queued timer callback.
     if (!active) return;
-    const liveCtx = getLiveCtx();
+    // The heartbeat intentionally has no strong fallback to the initial host
+    // context. Command finalization may, however, still have a valid direct
+    // context after the supervisor has cleared the live bridge, so stop()
+    // supplies it for one final exact-run repaint.
+    const liveCtx = getLiveCtx() ?? finalCtx;
     if (liveCtx) {
       // Bind once to this session's own durable run. Before that happens,
       // deliberately render a neutral state instead of borrowing the newest
