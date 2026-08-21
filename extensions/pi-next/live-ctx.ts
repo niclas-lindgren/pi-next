@@ -22,7 +22,9 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
  * variable, so it always targets whatever session is actually live.
  */
 let current: ExtensionCommandContext | undefined;
+const contexts = new Map<string, ExtensionCommandContext>();
 const boundRunIds = new Map<string, string>();
+const autoRunBoundListeners = new Set<(ctx: ExtensionCommandContext, runId: string) => void>();
 
 function runBindingKey(ctx: unknown): string | undefined {
   const typed = ctx as { cwd?: string } | undefined;
@@ -33,12 +35,37 @@ function runBindingKey(ctx: unknown): string | undefined {
 
 export function setLiveCtx(ctx: ExtensionCommandContext): void {
   current = ctx;
+  const key = runBindingKey(ctx);
+  if (key) contexts.set(key, ctx);
+}
+
+/** Resolve the live context for one cwd/session pair without borrowing another
+ * concurrently running supervisor's UI context. */
+export function getLiveCtxFor(cwd: string, sessionId?: string): ExtensionCommandContext | undefined {
+  if (sessionId) return contexts.get(`${cwd}\u0000${sessionId}`);
+  return current?.cwd === cwd ? current : undefined;
 }
 
 /** Bind presentation to a run at the controller's creation boundary. */
 export function bindLiveAutoRun(ctx: ExtensionCommandContext, runId: string): void {
   const key = runBindingKey(ctx);
   if (key) boundRunIds.set(key, runId);
+  for (const listener of autoRunBoundListeners) {
+    try {
+      listener(ctx, runId);
+    } catch {
+      // Presentation observers are diagnostic-only and never affect control.
+    }
+  }
+}
+
+/** Observe controller binding creation without coupling loop control to the
+ * footer implementation. The callback is presentation-only. */
+export function onLiveAutoRunBound(
+  listener: (ctx: ExtensionCommandContext, runId: string) => void,
+): () => void {
+  autoRunBoundListeners.add(listener);
+  return () => autoRunBoundListeners.delete(listener);
 }
 
 export function liveAutoRunBinding(ctx: unknown): string | undefined {
@@ -61,6 +88,7 @@ export function getLiveCtx(): ExtensionCommandContext | undefined {
 /** Clear the host-context reference once no foreground supervisor remains. */
 export function clearLiveCtx(): void {
   current = undefined;
+  contexts.clear();
 }
 
 /**
@@ -82,5 +110,6 @@ export function sessionIdentity(ctx: unknown): string | undefined {
 /** Test-only reset so unrelated specs never observe a leaked singleton. */
 export function __resetLiveCtxForTests(): void {
   current = undefined;
+  contexts.clear();
   boundRunIds.clear();
 }

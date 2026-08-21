@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.66 - pending release
+
+Bound auto-footer host-lifecycle handoff release.
+
+### Material changes
+
+- Persist and repaint the exact bound auto-footer run when the host tears down and replaces a session.
+- Bind the presentation identity before the first transition and isolate heartbeat writes by cwd/session context.
+- Add host-lifecycle coverage for ten transitions, scheduler/recovery-compatible states, and concurrent bound supervisors.
+
+### Compatibility/configuration/schema
+
+- Existing loop state, lease, and footer status contracts remain compatible.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- A bound auto run no longer waits for the heartbeat to restore its footer after session replacement.
+
+### Security/safety
+
+- Presentation bindings never grant workflow authority and exact-run repaint does not weaken conservative generic selection.
+- Foreign session contexts are not used for concurrent footer writes; explicit footer clearing remains unchanged.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.65 - pending release
 
 Bound auto-footer final repaint release.
