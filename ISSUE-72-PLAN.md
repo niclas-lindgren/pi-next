@@ -29,3 +29,4 @@
 
 - 2026-08-21: Claimed issue #72 and created canonical `agent/issue-72` worktree.
 - 2026-08-21: Implemented stable-host worker batches, additive telemetry migration, live-context run binding, and outer-path regressions. Typecheck and full test suite pass.
+- 2026-08-21: Re-queried authority after implementation; reconciled the new policy comment and refreshed `origin/main` so the lifecycle decision record and child-worker freshness policy are included in the candidate.
