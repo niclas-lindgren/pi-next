@@ -3,6 +3,28 @@ import { test } from "node:test";
 
 import { WorkerDisplayController, attachWorkerDisplay } from "../extensions/pi-next/worker-display.ts";
 
+test("live text deltas join faithfully and completed text replaces the preview", () => {
+  const display = new WorkerDisplayController({
+    bold: (text) => text,
+    fg: (_color, text) => text,
+  });
+
+  display.liveDelta({ issueNumber: 64, runId: "stream", delta: "Hello" });
+  display.liveDelta({ issueNumber: 64, runId: "stream", delta: " world" });
+  assert.match(display.renderLines().join("\n"), /Hello world/);
+  display.event({
+    issueNumber: 64,
+    runId: "stream",
+    phase: "implementation",
+    kind: "assistant",
+    summary: "Completed assistant message",
+  });
+  const lines = display.renderLines().join("\n");
+  assert.match(lines, /Completed assistant message/);
+  assert.doesNotMatch(lines, /Hello world/);
+  display.dispose();
+});
+
 test("tool errors remain non-terminal until the worker explicitly finishes", () => {
   const display = new WorkerDisplayController({
     bold: (text) => text,

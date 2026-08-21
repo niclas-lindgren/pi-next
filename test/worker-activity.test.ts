@@ -2,12 +2,20 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  extractLiveTextDelta,
   IncrementalWorkerActivityParser,
   normalizeWorkerStreamEvent,
 } from "../extensions/pi-next/worker-activity.ts";
 import { parseWorkerTelemetry } from "../extensions/pi-next/worker-telemetry.ts";
 
 const context = { issueNumber: 46, runId: "run-a", phase: "verification" };
+
+function liveDelta(text: string, type = "text_delta") {
+  return extractLiveTextDelta({
+    type: "message_update",
+    assistantMessageEvent: { type, delta: text },
+  }, context)?.delta;
+}
 
 function failed(result: unknown, extra: Record<string, unknown> = {}) {
   return normalizeWorkerStreamEvent({
@@ -18,6 +26,31 @@ function failed(result: unknown, extra: Record<string, unknown> = {}) {
     ...extra,
   }, context);
 }
+
+test("streamed visible deltas preserve boundary whitespace and subword joins", () => {
+  assert.equal([liveDelta("Hello"), liveDelta(" world")].join(""), "Hello world");
+  assert.equal([liveDelta("foo "), liveDelta("bar")].join(""), "foo bar");
+  assert.equal([liveDelta("Camp"), liveDelta("sty")].join(""), "Campsty");
+  assert.equal([liveDelta("A"), liveDelta("  "), liveDelta("B")].join(""), "A  B");
+});
+
+test("streamed visible deltas preserve newlines while replacing unsafe controls", () => {
+  assert.equal([liveDelta("A"), liveDelta("\n"), liveDelta("B")].join(""), "A\nB");
+  assert.equal(liveDelta("A\u0000B"), "A B");
+});
+
+test("streamed visible deltas redact secrets and remain bounded", () => {
+  const redacted = liveDelta("token=secret-value https://example.test/private");
+  assert.ok(redacted);
+  assert.doesNotMatch(redacted!, /secret-value|example\.test/);
+  assert.ok(liveDelta("x".repeat(1_000))!.length <= 300);
+});
+
+test("only visible text deltas enter the live stream", () => {
+  assert.equal(liveDelta("hidden", "thinking_delta"), undefined);
+  assert.equal(liveDelta("hidden", "toolcall_delta"), undefined);
+  assert.equal(extractLiveTextDelta({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: 42 } }, context), undefined);
+});
 
 test("tool failure display retains bounded exit and sanitized reason", () => {
   const event = failed({
