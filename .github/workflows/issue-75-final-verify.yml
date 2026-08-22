@@ -1,0 +1,39 @@
+name: issue-75-final-verify
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: github.head_ref == 'agent/issue-75-remote'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/issue-75-remote
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Verify public coordination export and adapter tests
+        run: |
+          node --import tsx -e 'import { WORKER_ADAPTER_VERSION } from "./src/coordination/index.ts"; if (WORKER_ADAPTER_VERSION !== "1") process.exit(1)'
+          node --import tsx --test test/worker-adapter.test.ts test/worker-dispatch.test.ts
+      - run: npm test
+      - name: Remove temporary verification workflow
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/issue-75-final-verify.yml
+          git commit -m "chore: remove temporary #75 verifier"
+          git push origin HEAD:agent/issue-75-remote
