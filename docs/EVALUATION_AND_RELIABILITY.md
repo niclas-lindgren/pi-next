@@ -1,0 +1,138 @@
+# Evaluation, replay, and reference-driven reliability
+
+Pi-next should become cheaper to maintain as it matures. Valuable consumer repositories must not remain the primary test bench for kernel behavior.
+
+The target loop is:
+
+```text
+real failure once
+  -> capture bounded scenario/evidence
+  -> deterministic reproduction
+  -> fix
+  -> generated lifecycle tests + replay
+  -> independent agent canaries
+  -> consumer upgrade
+```
+
+Most lifecycle failures do not require an LLM to reproduce. Lease races, stale authority, crash recovery, canonical-workspace selection, partial finalization, retry idempotence, pending verification, and upgrade compatibility should be exercised with scripted workers at effectively zero model-token cost.
+
+## Reference-driven engineering
+
+Before introducing a non-trivial lifecycle, persistence, evaluation, context-management, execution, or recovery mechanism:
+
+1. inspect mature implementations of the same narrow problem;
+2. record the invariant or implementation pattern worth adopting;
+3. choose one disposition: **adopt**, **adapter**, or **reject**;
+4. implement the smallest pi-next-specific mechanism that satisfies the useful invariant;
+5. add regression evidence through the outermost affected pi-next path.
+
+This is not a feature-parity exercise. Pi-next should harvest proven mechanisms while staying lean.
+
+### Initial reference feature harvest
+
+| Source | Feature/pattern to evaluate | Initial disposition |
+| --- | --- | --- |
+| mini-SWE-agent / SWE-agent | small Agent/Environment/Model separation; simple per-command execution; low harness overhead | adopt pattern; experimental worker adapter |
+| SWE-bench | task fixture separated from independent grading; reproducible repository start state | adopt |
+| Aider | token-budgeted repository map/context selection; mature edit/context strategies | evaluate and adopt only if it improves measured tokens per verified completion |
+| OpenHands | typed append-only lifecycle events plus resumable current state | adopt the small event/replay pattern, not the platform |
+| Temporal | idempotent durable transitions; external side effects separated from deterministic decisions | adopt invariants, not server/runtime dependency |
+| fast-check | model/property testing with generated command sequences and shrinking | likely direct dependency if it stays small |
+| Codex | structured worker events/results; sandbox/security ideas; native model/harness optimization | evaluate behind adapter |
+| Claude Agent SDK | structured headless worker execution and cancellation; native Claude optimization | evaluate behind adapter |
+
+The table is intentionally revisitable. New useful features discovered in mature frameworks should be added here before implementation so they are consciously adopted or rejected rather than rediscovered ad hoc.
+
+## Test layers
+
+### 1. Protocol/model tests — no LLM
+
+Create a simplified lifecycle model and execute generated command sequences against real kernel transitions.
+
+Model dimensions should include work-item state, lease ownership, workspace state, candidate state, authority freshness, controller state, and pending verification.
+
+Representative commands include discover, claim, prepare, startWorker, finishWorker, verify, promote, close, release, cleanup, crash, resume, authorityChanged, and leaseExpired.
+
+Core invariants include:
+
+- never two fresh owners for one work item;
+- never mutate after known ownership loss;
+- never close without current verified authority;
+- never delete unique or unintegrated work;
+- never promote an unverified candidate;
+- never claim external verification as PASS;
+- static preflight failures launch no expensive worker;
+- re-running an already completed idempotent terminal step is harmless;
+- a new-candidate claim race is candidate-local while active/resumed ownership loss fails closed;
+- optimization budgets cannot prevent correctness-required lifecycle transitions.
+
+Use model/property generation where practical. Preserve minimized failing sequences as permanent regressions.
+
+### 2. Integration tests — real Git, no LLM
+
+Use disposable temporary repositories and local bare remotes. Exercise real branches, canonical worktrees, commits, merges, pushes, reachability, cleanup, crash/restart, and migration boundaries without hosted remotes or deployment triggers. Workers remain scripted.
+
+### 3. Historical incident replay — no LLM by default
+
+Every meaningful real-world failure should be capturable as bounded structured evidence and replayable without private transcripts.
+
+Replay fixtures may contain initial repository state, normalized authority state, scripted worker outcomes, lifecycle/fault events, and expected final invariants.
+
+Permanent scenarios should include races, foreign/stale leases, non-zero worker exits, crash after claim/commit/push, crash after integration before cleanup, invalid consumer/provider preflight, authority changes before closure, PLAN narrowing live authority, pending external verification, unrelated main advancement, stale controller recovery, inherited cross-harness work, and scheduler continuation after candidate-local failure.
+
+## Fault injection
+
+Introduce named lifecycle checkpoints instead of timing-based sleeps. Initial checkpoints should cover candidate selection, lease claim, workspace preparation, authority load, plan readiness, worker start/finish, verification, candidate commit, promotion start/push, reachability proof, authority update, lease release, and workspace cleanup.
+
+Test mode must be able to terminate at a checkpoint and restart from durable evidence. Recovery must be idempotent and must not repeat unsafe side effects merely because a process died between steps.
+
+## Durable event journal
+
+Move toward a bounded typed lifecycle journal containing facts needed for recovery and replay, for example:
+
+```json
+{"seq":1,"type":"work.selected","workItem":"640"}
+{"seq":2,"type":"lease.claimed","owner":"run-17"}
+{"seq":3,"type":"workspace.prepared"}
+{"seq":4,"type":"worker.started","role":"implementation"}
+{"seq":5,"type":"worker.completed"}
+{"seq":6,"type":"verification.passed"}
+{"seq":7,"type":"promotion.pushed","candidate":"abc123"}
+```
+
+The journal is recovery evidence, never authority. Resume always reconciles it against live authority and Git. Prompts, hidden reasoning, secrets, and unbounded command output do not belong in it.
+
+## Agent evaluation — real worker, independent grader
+
+Only after protocol/integration layers pass should a real coding worker be involved.
+
+A fixture contains a known repository starting state plus an authoritative task specification. The worker produces a candidate and stops. A separate grader evaluates hidden tests/assertions and pi-next lifecycle assertions. Never grade success from the worker's own `completed` message.
+
+Initial worker matrix:
+
+- Pi: production/default baseline;
+- mini-SWE-agent: first independent experimental adapter;
+- Codex: later challenger if a small SDK adapter preserves the kernel contract;
+- Claude: later challenger under the same condition.
+
+Primary metrics are verified acceptance pass rate, tokens/cost per verified completion, wall time per verified completion, retries/escalations, turn/command count, regressions introduced, context growth/cache efficiency, and pi-next intervention/recovery required.
+
+## Release qualification
+
+A candidate release should progress through:
+
+```text
+unit/type tests
+  -> generated protocol/model tests
+  -> historical incident replay
+  -> real-Git integration/fault injection
+  -> small real-worker canary set
+  -> consumer compatibility smoke
+  -> release
+```
+
+Real-worker canaries should be small and bounded; protocol correctness should not depend on spending model tokens.
+
+## Development policy
+
+A non-trivial pi-next defect is not considered fully fixed until its real failure shape is represented by an automated regression at the highest practical layer. A newly discovered useful mechanism in another mature framework should be recorded in the reference feature harvest before pi-next independently reinvents it.
