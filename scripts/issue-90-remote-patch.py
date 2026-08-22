@@ -35,23 +35,24 @@ source_path.write_text(source)
 test_path = Path("test/cli.test.ts")
 tests = test_path.read_text()
 old = '''test("status never throws for a fixture with no resolvable GitHub repository", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-next-cli-status-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-next-cli-noauth-"));
   try {
     await exec("git", ["init", "-q", root]);
-    const lines: string[] = [];
-    const code = await runCli(["status", "--issue", "7"], { cwd: root, stdout: (line) => lines.push(line) });
-    assert.equal(code, 0);
-    assert.equal(lines.length, 1);
-    const parsed = JSON.parse(lines[0]!) as { ok: boolean; result?: { lease?: unknown } };
-    if (!parsed.ok) assert.fail(`expected success, got ${lines[0]}`);
-    assert.equal(parsed.result?.lease, null);
+    // No GitHub remote/repo is configured for this fixture, so the ref
+    // lookup behind `status` cannot resolve one; the CLI must still return
+    // exactly one structured JSON result (an absent lease), never throw.
+    const result = await runCoordinationCli(["status", "--issue", "7", "--cwd", root]);
+    if (!result.ok) assert.fail(`expected success, got ${JSON.stringify(result)}`);
+    assert.equal(result.command, "status");
+    assert.equal(result.lease, null);
+    assert.equal(result.fresh, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 '''
 new = '''test("status never throws for a fixture with no resolvable GitHub repository", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-next-cli-status-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-next-cli-noauth-"));
   const ambient = {
     GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
     GITHUB_REPOSITORY: process.env.GITHUB_REPOSITORY,
@@ -59,16 +60,16 @@ new = '''test("status never throws for a fixture with no resolvable GitHub repos
   };
   try {
     await exec("git", ["init", "-q", root]);
+    // Ambient automation metadata must not turn a no-remote fixture into
+    // whichever GitHub repository happens to host the test process.
     process.env.GITHUB_ACTIONS = "true";
     process.env.GITHUB_REPOSITORY = "ambient/should-not-bind";
     process.env.GH_REPO = "ambient/should-not-bind";
-    const lines: string[] = [];
-    const code = await runCli(["status", "--issue", "7"], { cwd: root, stdout: (line) => lines.push(line) });
-    assert.equal(code, 0);
-    assert.equal(lines.length, 1);
-    const parsed = JSON.parse(lines[0]!) as { ok: boolean; result?: { lease?: unknown } };
-    if (!parsed.ok) assert.fail(`expected success, got ${lines[0]}`);
-    assert.equal(parsed.result?.lease, null);
+    const result = await runCoordinationCli(["status", "--issue", "7", "--cwd", root]);
+    if (!result.ok) assert.fail(`expected success, got ${JSON.stringify(result)}`);
+    assert.equal(result.command, "status");
+    assert.equal(result.lease, null);
+    assert.equal(result.fresh, false);
   } finally {
     for (const [key, value] of Object.entries(ambient)) {
       if (value === undefined) delete process.env[key];
