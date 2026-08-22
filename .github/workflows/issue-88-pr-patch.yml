@@ -1,0 +1,40 @@
+name: issue-88-pr-patch
+
+on:
+  pull_request:
+    branches:
+      - main
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: ${{ github.head_ref == 'agent/issue-88-remote' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/issue-88-remote
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Apply patch
+        run: python scripts/issue-88-remote-patch.py
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Commit verified patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/issue-88-remote-patch.yml .github/workflows/issue-88-pr-patch.yml scripts/issue-88-remote-patch.py
+          git add scripts/bootstrap-self-host.ts test/bootstrap-self-host.test.ts
+          git commit -m "fix(dev): capture Pi reviewer verdict from message stream (#88)"
+          git push origin HEAD:agent/issue-88-remote
