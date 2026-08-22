@@ -1,6 +1,6 @@
 # Deterministic lifecycle scenario testing
 
-Pi-next lifecycle/controller/recovery defects should be reproduced without a model whenever the failure is a deterministic authority, lease, Git, workspace, verification, finalization, or recovery ordering problem.
+Pi-next lifecycle/controller/recovery defects should be reproduced without a model whenever the failure is a deterministic authority, lease, Git, workspace, verification, finalization, or recovery ordering problem. The normal scenario suite is a zero-token CI boundary and must not require provider credentials.
 
 The scenario layer introduced by #76 is intentionally small:
 
