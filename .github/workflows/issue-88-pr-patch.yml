@@ -29,7 +29,11 @@ jobs:
         run: python scripts/issue-88-remote-patch.py
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      - name: Run tests under fixture-neutral GitHub repo discovery
+        run: npm test
+        env:
+          GITHUB_REPOSITORY: ""
+          GH_REPO: ""
       - name: Commit verified patch
         run: |
           git config user.name github-actions[bot]
