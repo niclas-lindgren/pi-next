@@ -700,6 +700,8 @@ test("explicit --issue bypasses automatic selection and remains unchanged", asyn
       mechanicalPass: true,
       candidateReadyForReview: true,
       finalizationReady: true,
+      implementationOutcome: "implemented",
+      candidateHasDelta: true,
     };
   });
   assert.equal(code, 0);
@@ -770,6 +772,8 @@ test("automatic selection invokes the existing single-issue bootstrap path exact
       mechanicalPass: true,
       candidateReadyForReview: true,
       finalizationReady: true,
+      implementationOutcome: "implemented",
+      candidateHasDelta: true,
     };
   });
   assert.equal(code, 0);
@@ -785,7 +789,7 @@ test("reports bounded progress, activity, heartbeats and checks without leaking 
   const fixtureState = await fixture();
   try {
     const events: BootstrapProgressEvent[] = [];
-    const factory: WorkerFactory = async () => {
+    const factory: WorkerFactory = async ({ cwd }) => {
       let listener: ((event: unknown) => void) | undefined;
       return {
         model: { provider: "fake", id: "progress" },
@@ -795,6 +799,7 @@ test("reports bounded progress, activity, heartbeats and checks without leaking 
         },
         prompt: async () => {
           listener?.({ type: "tool_execution_end", toolName: "read", args: { secret: "ghp_PROGRESS_SECRET" } });
+          await writeFile(join(cwd, "progress-candidate.txt"), "candidate\n");
           await new Promise((resolve) => setTimeout(resolve, 30));
         },
         dispose: () => undefined,
@@ -823,6 +828,78 @@ test("reports bounded progress, activity, heartbeats and checks without leaking 
     assert.equal(events.at(-1)?.state, "pass");
     const rendered = JSON.stringify(events);
     assert.doesNotMatch(rendered, /SECRET_TASK_BODY|PROGRESS_SECRET/);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("worker completes with passing checks and dirty candidate keeps normal implemented PASS semantics", async () => {
+  const fixtureState = await fixture();
+  try {
+    const factory = fakeFactory([], async (_role, cwd) => {
+      await writeFile(join(cwd, "implemented.txt"), "candidate\n");
+    });
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+    assert.equal(report.disposition, "pass");
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.candidateHasDelta, true);
+    assert.equal(report.finalizationReady, true);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("worker no-op with passing checks is explicit unproven no-change and non-finalizable without extra model calls", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const events: BootstrapProgressEvent[] = [];
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+      { ...dependenciesFor(fixtureState.root, fakeFactory(sessions, async () => undefined), () => 0, []), reporter: (event) => events.push(event) },
+    );
+    assert.equal(report.disposition, "no-change");
+    assert.equal(report.implementationOutcome, "unproven-no-change");
+    assert.equal(report.candidateHasDelta, false);
+    assert.equal(report.finalizationReady, false);
+    assert.match(report.failureReason ?? "", /no candidate changes were produced/i);
+    assert.deepEqual(sessions.map((s) => s.role), ["implementation"]);
+    assert.match(events.at(-1)?.detail ?? "", /no candidate changes were produced/i);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("closed authoritative issue with zero delta is explicit already-satisfied and non-finalizable as a candidate", async () => {
+  const fixtureState = await fixture();
+  try {
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      { ...dependenciesFor(fixtureState.root, fakeFactory([], async () => undefined), () => 0, []), fetchIssue: async () => ({ ...issue(), state: "CLOSED" }) },
+    );
+    assert.equal(report.disposition, "already-satisfied");
+    assert.equal(report.implementationOutcome, "already-satisfied");
+    assert.equal(report.finalizationReady, false);
+    assert.equal(report.candidateReadyForReview, false);
+    assert.match(report.noChangeReason ?? "", /CLOSED/);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("verify-only clean open issue reports coherent unproven no-change", async () => {
+  const fixtureState = await fixture();
+  try {
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, verifyOnly: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, async () => { throw new Error("no worker"); }, () => 0, []),
+    );
+    assert.equal(report.disposition, "no-change");
+    assert.equal(report.implementationOutcome, "unproven-no-change");
+    assert.equal(report.finalizationReady, false);
   } finally {
     await fixtureState.cleanup();
   }
@@ -958,7 +1035,7 @@ test("review refuses safely when exact untracked evidence exceeds the bound", as
 test("review pass is captured as an explicit verdict", async () => {
   const fixtureState = await fixture();
   try {
-    const factory = fakeFactory([], async () => undefined, undefined, (role) => role === "review" ? { verdict: "pass" } : undefined);
+    const factory = fakeFactory([], async (role, cwd) => { if (role !== "review") await writeFile(join(cwd, "review-candidate.txt"), "candidate\n"); }, undefined, (role) => role === "review" ? { verdict: "pass" } : undefined);
     const report = await runBootstrap(
       { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
       dependenciesFor(fixtureState.root, factory, () => 0, []),
@@ -973,7 +1050,7 @@ test("review pass is captured as an explicit verdict", async () => {
 test("blocking reviewer findings fail review even when worker completed", async () => {
   const fixtureState = await fixture();
   try {
-    const factory = fakeFactory([], async () => undefined, undefined, (role) => role === "review" ? { verdict: "findings", findings: [{ severity: "blocking", path: "x.ts", summary: "wrong" }] } : undefined);
+    const factory = fakeFactory([], async (role, cwd) => { if (role !== "review") await writeFile(join(cwd, "review-blocking.txt"), "candidate\n"); }, undefined, (role) => role === "review" ? { verdict: "findings", findings: [{ severity: "blocking", path: "x.ts", summary: "wrong" }] } : undefined);
     const report = await runBootstrap(
       { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
       dependenciesFor(fixtureState.root, factory, () => 0, []),
@@ -991,7 +1068,7 @@ test("malformed or absent reviewer result fails closed", async () => {
   try {
     const report = await runBootstrap(
       { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
-      dependenciesFor(fixtureState.root, fakeFactory([], async () => undefined), () => 0, []),
+      dependenciesFor(fixtureState.root, fakeFactory([], async (role, cwd) => { if (role !== "review") await writeFile(join(cwd, "review-malformed.txt"), "candidate\n"); }), () => 0, []),
     );
     assert.equal(report.reviewer?.disposition, "completed");
     assert.equal(report.reviewerResult, undefined);
@@ -1004,7 +1081,7 @@ test("malformed or absent reviewer result fails closed", async () => {
 test("reviewer findings are bounded and omit raw transcript fields", async () => {
   const fixtureState = await fixture();
   try {
-    const factory = fakeFactory([], async () => undefined, undefined, (role) => role === "review" ? {
+    const factory = fakeFactory([], async (role, cwd) => { if (role !== "review") await writeFile(join(cwd, "review-warning.txt"), "candidate\n"); }, undefined, (role) => role === "review" ? {
       verdict: "findings",
       transcript: "hidden raw transcript",
       findings: [{ severity: "warning", summary: "a".repeat(800) }],

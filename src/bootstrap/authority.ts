@@ -9,7 +9,11 @@ export function issueFromJson(value: unknown): Issue {
   if (typeof item.number !== "number" || typeof item.title !== "string" || typeof item.body !== "string") {
     throw new BootstrapError("GitHub issue payload is missing number, title, or body");
   }
-  return { number: item.number, title: item.title, body: item.body, comments: Array.isArray(item.comments) ? item.comments : [] };
+  const state = item.state === "CLOSED" ? "CLOSED" : item.state === "OPEN" ? "OPEN" : undefined;
+  const labels = Array.isArray((item as { labels?: unknown }).labels)
+    ? ((item as { labels?: unknown[] }).labels ?? []).map((label) => typeof label === "string" ? label : typeof (label as { name?: unknown })?.name === "string" ? (label as { name: string }).name : "").filter(Boolean)
+    : undefined;
+  return { number: item.number, title: item.title, body: item.body, comments: Array.isArray(item.comments) ? item.comments : [], state, labels };
 }
 
 export function roadmapIssueFromJson(value: unknown): RoadmapIssue {
@@ -24,6 +28,6 @@ export function roadmapIssueFromJson(value: unknown): RoadmapIssue {
 }
 
 export async function fetchIssue(issueNumber: number, cwd: string, runner: CommandRunner = runCommand): Promise<Issue> {
-  const result = await runner("gh", ["issue", "view", String(issueNumber), "--json", "number,title,body,comments"], { cwd });
+  const result = await runner("gh", ["issue", "view", String(issueNumber), "--json", "number,title,body,comments,state,labels"], { cwd });
   return issueFromJson(JSON.parse(assertCommand(result, `fetch issue #${issueNumber}`)));
 }

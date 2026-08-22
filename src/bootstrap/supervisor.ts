@@ -86,8 +86,9 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
   }
   const candidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
+  const candidateHasDelta = candidate.changedFiles.length > 0 || candidate.committedChanges || candidate.uncommittedChanges;
   let reviewer: WorkerReport | undefined;
-  if (options.review && implementationCompleted && checks.every((check) => check.passed)) {
+  if (options.review && candidateHasDelta && implementationCompleted && checks.every((check) => check.passed)) {
     const reviewEvidence = await candidateEvidence(worktree.path, repository.baselineRevision, candidate.headRevision, runner);
     const reviewPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "review", undefined, reviewEvidence);
     reviewer = await runWorker(await getFactory(), "review", reviewPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
@@ -95,10 +96,13 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
 
   const mechanicalPass = checks.length === CHECKS.length && checks.every((check) => check.passed);
   const reviewerResult = reviewer?.reviewResult;
-  const reviewPass = options.review ? reviewer?.disposition === "completed" && reviewPassed(reviewerResult) : undefined;
-  const finalizationReady = mechanicalPass && !candidate.dirty && !candidate.behindOriginMain && (options.review ? reviewPass === true : true);
-  const disposition: Disposition = !implementationCompleted ? "blocked" : mechanicalPass ? options.review && reviewPass !== true ? "blocked" : "pass" : "repairable-failure";
-  const reason = disposition === "pass" ? undefined : reviewer && reviewPass !== true ? "independent review did not return a passing structured verdict" : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification");
+  const reviewPass = options.review ? candidateHasDelta ? reviewer?.disposition === "completed" && reviewPassed(reviewerResult) : undefined : undefined;
+  const closedByAuthority = issue.state === "CLOSED";
+  const noChangeReason = !candidateHasDelta && mechanicalPass ? closedByAuthority ? "authoritative issue state is CLOSED; no candidate changes were produced" : "no candidate changes were produced and satisfaction was not mechanically proven" : undefined;
+  const implementationOutcome: BootstrapReport["implementationOutcome"] = !implementationCompleted || !mechanicalPass ? "failed" : candidateHasDelta ? "implemented" : closedByAuthority ? "already-satisfied" : "unproven-no-change";
+  const finalizationReady = implementationOutcome === "implemented" && mechanicalPass && !candidate.behindOriginMain && (options.review ? reviewPass === true : true);
+  const disposition: Disposition = !implementationCompleted ? "blocked" : !mechanicalPass ? "repairable-failure" : !candidateHasDelta ? closedByAuthority ? "already-satisfied" : "no-change" : options.review && reviewPass !== true ? "blocked" : "pass";
+  const reason = disposition === "pass" || disposition === "already-satisfied" ? undefined : noChangeReason ?? (reviewer && reviewPass !== true ? "independent review did not return a passing structured verdict" : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification"));
   const report: BootstrapReport = {
     issueNumber: options.issueNumber,
     attempts: workerAttempts.length,
@@ -117,10 +121,13 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     reviewerResult,
     mechanicalPass,
     reviewPass,
-    candidateReadyForReview: mechanicalPass,
+    candidateReadyForReview: mechanicalPass && candidateHasDelta,
     finalizationReady,
+    implementationOutcome,
+    candidateHasDelta,
+    noChangeReason,
     failureReason: reason,
   };
-  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: disposition === "pass" ? "pass" : "fail", detail: disposition });
+  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: disposition === "pass" || disposition === "already-satisfied" ? "pass" : "fail", detail: noChangeReason ?? disposition });
   return report;
 }
