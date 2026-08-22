@@ -1,31 +1,40 @@
-name: issue-14-inventory
+name: issue-14-verify
 
 on:
   pull_request:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  inventory:
+  verify:
     if: ${{ github.head_ref == 'agent/issue-14-remote' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/issue-14-remote
-      - name: Inventory test Git mutation sites
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Prove tests cannot bypass the suite Git guard with an absolute executable
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-          patterns = re.compile(r'\b(commit|push|worktree|update-ref|merge|rebase|reset|clean|remote|branch|tag)\b')
-          for path in sorted(Path('test').rglob('*.ts')):
-              lines = path.read_text(errors='replace').splitlines()
-              hits = [(i+1, line.strip()) for i,line in enumerate(lines) if ('git' in line.lower() and patterns.search(line))]
-              if hits:
-                  print(f'## {path}')
-                  for n,line in hits:
-                      print(f'{n}: {line}')
-          PY
+          if grep -R -nE "['\"](/usr/bin/git|/opt/.*/git)['\"]|PI_NEXT_TEST_REAL_GIT" test --include='*.ts'; then
+            echo 'Tests must invoke git through PATH; only the safety harness may know the real git executable.' >&2
+            exit 1
+          fi
+      - run: npm test
+      - run: npm run package-smoke
+      - name: Remove temporary verification workflow and commit verified candidate
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/issue-14-inventory.yml
+          git add package.json scripts/run-tests-safe-git.mjs scripts/test-git-guard.mjs test/git-safety.test.ts
+          git commit -m "test: isolate Git mutation fixtures from real remotes (#14)"
+          git push origin HEAD:agent/issue-14-remote
