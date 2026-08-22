@@ -14,9 +14,9 @@ The supervisor creates/reuses the canonical `.worktrees/issue-N` worktree and la
 
 A long-running bootstrap run must be observable while it is executing. The terminal should emit bounded progress events for major phases such as repository preflight, worktree preparation, issue fetch, worker launch, worker/tool activity heartbeat, deterministic checks, repair/review, and terminal disposition. Progress output must never include prompts, hidden reasoning, secrets, or full transcripts.
 
-The final machine-readable report remains the authoritative summary, but it must not be the first visible output of a potentially long run.
+The final machine-readable report remains the authoritative summary on stdout. Human progress is rendered separately on stderr so callers can continue to parse the final JSON without interleaved status lines. Silent workers and long-running deterministic checks emit bounded periodic heartbeats.
 
-Until live progress rendering is implemented, a running worker may appear silent even though it is progressing. The canonical worktree can be inspected from another terminal with non-mutating commands such as:
+The canonical worktree can also be inspected from another terminal with non-mutating commands such as:
 
 ```sh
 git -C .worktrees/issue-N status --short

@@ -8,11 +8,30 @@ const MAX_OUTPUT = 32_000;
 const MAX_FAILURE_EVIDENCE = 8_000;
 const MAX_PACKET_BYTES = 256_000;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
+const DEFAULT_PROGRESS_HEARTBEAT_MS = 20_000;
 const MAX_CHANGED_FILES = 200;
 const CHECKS = ["npm run typecheck", "npm test"] as const;
 
 export type Disposition = "pass" | "repairable-failure" | "blocked";
 export type WorkerRole = "implementation" | "repair" | "review";
+
+export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "terminal";
+export type BootstrapProgressState = "start" | "ready" | "activity" | "heartbeat" | "pass" | "fail" | "completed";
+
+export interface BootstrapProgressEvent {
+  issueNumber: number;
+  phase: BootstrapProgressPhase;
+  state: BootstrapProgressState;
+  role?: WorkerRole;
+  command?: string;
+  tool?: string;
+  model?: string;
+  elapsedMs?: number;
+  toolCalls?: number;
+  detail?: string;
+}
+
+export type BootstrapReporter = (event: BootstrapProgressEvent) => void;
 
 export interface IssueComment {
   author?: { login?: string } | null;
@@ -129,6 +148,8 @@ export interface BootstrapDependencies {
   fetchIssue?: (issueNumber: number, cwd: string) => Promise<Issue>;
   createWorker?: WorkerFactory;
   now?: () => Date;
+  reporter?: BootstrapReporter;
+  heartbeatMs?: number;
 }
 
 export interface BootstrapOptions {
@@ -228,6 +249,43 @@ function redactSecrets(value: string): string {
 
 function redact(value: string): string {
   return bounded(redactSecrets(value));
+}
+
+function emitProgress(reporter: BootstrapReporter | undefined, event: BootstrapProgressEvent): void {
+  try {
+    reporter?.(event);
+  } catch {
+    // Operator feedback must never alter lifecycle semantics.
+  }
+}
+
+function progressToolName(event: unknown): string | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const item = event as { type?: unknown; toolName?: unknown };
+  return item.type === "tool_execution_end" && typeof item.toolName === "string" ? item.toolName.slice(0, 80) : undefined;
+}
+
+function progressDuration(elapsedMs: number): string {
+  return elapsedMs < 1_000 ? `${elapsedMs}ms` : `${Math.round(elapsedMs / 1_000)}s`;
+}
+
+export function formatBootstrapProgress(event: BootstrapProgressEvent): string {
+  const parts = [`bootstrap #${event.issueNumber}`, event.phase];
+  if (event.role) parts.push(event.role);
+  if (event.command) parts.push(event.command);
+  if (event.tool) parts.push(`tool=${event.tool}`);
+  parts.push(event.state.toUpperCase());
+  if (event.model) parts.push(`model=${event.model}`);
+  if (event.toolCalls !== undefined) parts.push(`calls=${event.toolCalls}`);
+  if (event.elapsedMs !== undefined) parts.push(`elapsed=${progressDuration(event.elapsedMs)}`);
+  if (event.detail) parts.push(event.detail.slice(0, 200));
+  return parts.join(" · ");
+}
+
+export function createCliProgressReporter(
+  write: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
+): BootstrapReporter {
+  return (event) => write(formatBootstrapProgress(event));
 }
 
 function commandLabel(command: string, args: string[]): string {
@@ -712,20 +770,43 @@ async function runWorker(
   cwd: string,
   timeoutMs: number,
   reports: WorkerReport[],
+  issueNumber: number,
+  reporter: BootstrapReporter | undefined,
+  heartbeatMs: number,
   parentSignal?: AbortSignal,
 ): Promise<WorkerReport> {
   const started = Date.now();
   const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
+  let heartbeat: NodeJS.Timeout | undefined;
   let session: WorkerSession | undefined;
   let unsubscribe: (() => void) | undefined;
   let toolCalls = 0;
   let assistantText = "";
+  let model: string | undefined;
+  let lastSafeProgress = started;
   let cancelParent: (() => void) | undefined;
+  emitProgress(reporter, { issueNumber, phase: "worker", state: "start", role });
+  if (heartbeatMs > 0) {
+    heartbeat = setInterval(() => {
+      const now = Date.now();
+      if (now - lastSafeProgress < heartbeatMs) return;
+      emitProgress(reporter, { issueNumber, phase: "worker", state: "heartbeat", role, model, elapsedMs: now - started, toolCalls });
+      lastSafeProgress = now;
+    }, heartbeatMs);
+  }
   try {
     session = await factory({ cwd, role, signal: controller.signal });
+    model = session.model?.provider && session.model.id ? `${session.model.provider}/${session.model.id}` : undefined;
+    emitProgress(reporter, { issueNumber, phase: "worker", state: "ready", role, model, elapsedMs: Date.now() - started, toolCalls });
+    lastSafeProgress = Date.now();
     unsubscribe = session.subscribe((event) => {
-      if (typeof event === "object" && event !== null && (event as { type?: string }).type === "tool_execution_end") toolCalls += 1;
+      if (typeof event === "object" && event !== null && (event as { type?: string }).type === "tool_execution_end") {
+        toolCalls += 1;
+        const tool = progressToolName(event);
+        emitProgress(reporter, { issueNumber, phase: "worker", state: "activity", role, model, tool, elapsedMs: Date.now() - started, toolCalls });
+        lastSafeProgress = Date.now();
+      }
       const delta = extractAssistantTextDelta(event);
       if (delta) assistantText = `${assistantText}${delta}`.slice(-16_000);
     });
@@ -748,7 +829,7 @@ async function runWorker(
     const report: WorkerReport = {
       role,
       disposition: "completed",
-      model: session.model?.provider && session.model.id ? `${session.model.provider}/${session.model.id}` : undefined,
+      model,
       durationMs: Date.now() - started,
       toolCalls: Math.max(toolCalls, stats.toolCalls),
       usage: stats.usage,
@@ -756,6 +837,7 @@ async function runWorker(
       reviewResult: role === "review" ? parseReviewResultText(assistantText) : undefined,
     };
     reports.push(report);
+    emitProgress(reporter, { issueNumber, phase: "worker", state: "completed", role, model, elapsedMs: report.durationMs, toolCalls: report.toolCalls });
     return report;
   } catch (error) {
     const timedOut = error instanceof BootstrapError && error.message.includes("timed out");
@@ -765,7 +847,7 @@ async function runWorker(
     const report: WorkerReport = {
       role,
       disposition: timedOut ? "timed_out" : cancelled ? "cancelled" : "failed",
-      model: session?.model?.provider && session.model.id ? `${session.model.provider}/${session.model.id}` : undefined,
+      model,
       durationMs: Date.now() - started,
       toolCalls: Math.max(toolCalls, stats.toolCalls),
       usage: stats.usage,
@@ -773,19 +855,45 @@ async function runWorker(
       reason: redact(error instanceof Error ? error.message : String(error)),
     };
     reports.push(report);
+    emitProgress(reporter, { issueNumber, phase: "worker", state: "fail", role, model, elapsedMs: report.durationMs, toolCalls: report.toolCalls, detail: report.disposition });
     return report;
   } finally {
     if (timer) clearTimeout(timer);
+    if (heartbeat) clearInterval(heartbeat);
     unsubscribe?.();
     if (parentSignal && cancelParent) parentSignal.removeEventListener("abort", cancelParent);
     session?.dispose();
   }
 }
 
-async function runChecks(cwd: string, runner: CommandRunner, timeoutMs: number, signal?: AbortSignal): Promise<CheckReport[]> {
+async function runChecks(
+  cwd: string,
+  runner: CommandRunner,
+  timeoutMs: number,
+  issueNumber: number,
+  reporter: BootstrapReporter | undefined,
+  heartbeatMs: number,
+  signal?: AbortSignal,
+): Promise<CheckReport[]> {
   const checks: CheckReport[] = [];
   for (const command of CHECKS) {
-    const result = await runner("sh", ["-c", command], { cwd, timeoutMs, signal });
+    const started = Date.now();
+    emitProgress(reporter, { issueNumber, phase: "check", state: "start", command });
+    let heartbeat: NodeJS.Timeout | undefined;
+    if (heartbeatMs > 0) {
+      heartbeat = setInterval(() => {
+        emitProgress(reporter, { issueNumber, phase: "check", state: "heartbeat", command, elapsedMs: Date.now() - started });
+      }, heartbeatMs);
+    }
+    let result: CommandResult;
+    try {
+      result = await runner("sh", ["-c", command], { cwd, timeoutMs, signal });
+    } catch (error) {
+      emitProgress(reporter, { issueNumber, phase: "check", state: "fail", command, elapsedMs: Date.now() - started });
+      throw error;
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+    }
     const evidence = result.exitCode === 0 ? undefined : redact(bounded((result.stderr || result.stdout).slice(-MAX_FAILURE_EVIDENCE), MAX_FAILURE_EVIDENCE));
     checks.push({
       command,
@@ -795,6 +903,7 @@ async function runChecks(cwd: string, runner: CommandRunner, timeoutMs: number, 
       passed: result.exitCode === 0,
       failureEvidence: evidence,
     });
+    emitProgress(reporter, { issueNumber, phase: "check", state: result.exitCode === 0 ? "pass" : "fail", command, elapsedMs: result.durationMs });
     if (result.exitCode !== 0) break;
   }
   return checks;
@@ -931,41 +1040,81 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   const now = dependencies.now ?? (() => new Date());
   const started = now();
   const runner = dependencies.runCommand ?? runCommand;
+  const reporter = dependencies.reporter;
+  const heartbeatMs = dependencies.heartbeatMs ?? DEFAULT_PROGRESS_HEARTBEAT_MS;
   const cwd = resolve(options.cwd ?? process.cwd());
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const repository = await prepareRepository(cwd, runner);
-  const worktree = await prepareWorktree(repository, options.issueNumber, runner);
-  // This is deliberately before creating or launching a worker. A fresh
-  // worktree must be verifiable on its own, and setup failures must cost zero
-  // model tokens while leaving the candidate files untouched.
-  const dependencySetup = await prepareDependencies(worktree.path, runner, timeoutMs, options.signal);
-  const issue = dependencies.fetchIssue ? await dependencies.fetchIssue(options.issueNumber, repository.root) : await fetchIssue(options.issueNumber, repository.root, runner);
+
+  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "preflight", state: "start" });
+  let repository: RepositoryState;
+  try {
+    repository = await prepareRepository(cwd, runner);
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "preflight", state: "pass" });
+  } catch (error) {
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "preflight", state: "fail" });
+    throw error;
+  }
+
+  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "worktree", state: "start" });
+  let worktree: { path: string; branch: string };
+  try {
+    worktree = await prepareWorktree(repository, options.issueNumber, runner);
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "worktree", state: "ready", detail: relative(repository.root, worktree.path) || "." });
+  } catch (error) {
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "worktree", state: "fail" });
+    throw error;
+  }
+
+  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "dependencies", state: "start" });
+  let dependencySetup: DependencySetupReport;
+  try {
+    dependencySetup = await prepareDependencies(worktree.path, runner, timeoutMs, options.signal);
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "dependencies", state: "ready", detail: dependencySetup.action });
+  } catch (error) {
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "dependencies", state: "fail" });
+    throw error;
+  }
+
+  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "issue", state: "start" });
+  let issue: Issue;
+  try {
+    issue = dependencies.fetchIssue ? await dependencies.fetchIssue(options.issueNumber, repository.root) : await fetchIssue(options.issueNumber, repository.root, runner);
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "issue", state: "ready" });
+  } catch (error) {
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "issue", state: "fail" });
+    throw error;
+  }
+
   const contextFiles = await loadContextFiles(worktree.path, issue);
   const workerAttempts: WorkerReport[] = [];
   let factory: WorkerFactory | undefined;
   const getFactory = async (): Promise<WorkerFactory> => {
-    factory ??= dependencies.createWorker ?? await createDefaultWorkerFactory();
+    if (factory) return factory;
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "worker", state: "start", detail: "factory" });
+    factory = dependencies.createWorker ?? await createDefaultWorkerFactory();
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "worker", state: "ready", detail: "factory" });
     return factory;
   };
+
   let initialWorker: WorkerReport | undefined;
   if (!options.verifyOnly) {
     const initialPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "implementation");
-    initialWorker = await runWorker(await getFactory(), "implementation", initialPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
+    initialWorker = await runWorker(await getFactory(), "implementation", initialPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
   }
-  let checks = await runChecks(worktree.path, runner, timeoutMs, options.signal);
+  let checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
   let repairWorker: WorkerReport | undefined;
   const implementationCompleted = options.verifyOnly || initialWorker?.disposition === "completed";
   if (!checks.every((check) => check.passed) && options.allowRepair && implementationCompleted) {
     const repairPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "repair", failureEvidence(checks));
-    repairWorker = await runWorker(await getFactory(), "repair", repairPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
-    checks = await runChecks(worktree.path, runner, timeoutMs, options.signal);
+    repairWorker = await runWorker(await getFactory(), "repair", repairPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
+    checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
   }
   const candidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
   let reviewer: WorkerReport | undefined;
   if (options.review && implementationCompleted && checks.every((check) => check.passed)) {
     const reviewEvidence = await candidateEvidence(worktree.path, repository.baselineRevision, candidate.headRevision, runner);
     const reviewPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "review", undefined, reviewEvidence);
-    reviewer = await runWorker(await getFactory(), "review", reviewPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
+    reviewer = await runWorker(await getFactory(), "review", reviewPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
   }
   const mechanicalPass = checks.length === CHECKS.length && checks.every((check) => check.passed);
   const reviewerResult = reviewer?.reviewResult;
@@ -984,7 +1133,7 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     : reviewer && reviewPass !== true
       ? "independent review did not return a passing structured verdict"
       : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification");
-  return {
+  const report: BootstrapReport = {
     issueNumber: options.issueNumber,
     attempts: workerAttempts.length,
     start: started.toISOString(),
@@ -1006,6 +1155,8 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     finalizationReady,
     failureReason: reason,
   };
+  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: disposition === "pass" ? "pass" : "fail", detail: disposition });
+  return report;
 }
 
 function parseArgs(args: string[]): BootstrapOptions {
@@ -1035,11 +1186,15 @@ export function exitCodeForDisposition(disposition: Disposition): number {
 }
 
 export async function main(args = process.argv.slice(2)): Promise<number> {
+  const reporter = createCliProgressReporter();
+  let options: BootstrapOptions | undefined;
   try {
-    const report = await runBootstrap(parseArgs(args));
+    options = parseArgs(args);
+    const report = await runBootstrap(options, { reporter });
     console.log(JSON.stringify(report, null, 2));
     return exitCodeForDisposition(report.disposition);
   } catch (error) {
+    if (options) emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "blocked" });
     console.error(JSON.stringify({
       disposition: "blocked",
       code: error instanceof BootstrapError ? error.code : "BOOTSTRAP_FAILED",
