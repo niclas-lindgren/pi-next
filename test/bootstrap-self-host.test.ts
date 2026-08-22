@@ -472,13 +472,68 @@ test("roadmap discovery preserves row order without treating dependency referenc
     const number = Number(args[2]);
     viewed.push(number);
     const payload = number === 73
-      ? { number: 73, title: "roadmap", body: "- #79 ready\n- #80 blocked by #78/#79\n", comments: [], state: "OPEN", labels: [] }
-      : { number, title: `issue ${number}`, body: "", comments: [], state: "OPEN", labels: [] };
+      ? {
+          number: 73,
+          title: "roadmap",
+          body: [
+            "Roadmap prose mentions #90 and issue #91 but is not a backlog row.",
+            "Dependency diagram: #78 -> #79 -> #80",
+            "1. **#74 — bootstrap foundation**",
+            "2. [x] **#75 — candidate loop**",
+            "3. **#76 — verification pass**",
+            "4. **#77 — next repair**",
+            "- [ ] **#79 — ready**",
+            "* #80 blocked by #78/#79",
+          ].join("\n"),
+          comments: [],
+          state: "OPEN",
+          labels: [],
+        }
+      : { number, title: `issue ${number}`, body: "", comments: [], state: number <= 76 ? "CLOSED" : "OPEN", labels: [] };
     return { command, args, cwd: options.cwd, exitCode: 0, stdout: JSON.stringify(payload), stderr: "", durationMs: 1 };
   });
 
-  assert.deepEqual(viewed, [73, 79, 80]);
-  assert.deepEqual(result.map((item) => item.number), [79, 80]);
+  assert.deepEqual(viewed, [73, 74, 75, 76, 77, 79, 80]);
+  assert.deepEqual(result.map((item) => item.number), [74, 75, 76, 77, 79, 80]);
+});
+
+function roadmapRunner(roadmapBody: string, overrides: Record<number, Partial<RoadmapIssue>> = {}) {
+  return async (command: string, args: string[], options: { cwd: string; timeoutMs?: number; signal?: AbortSignal }) => {
+    assert.equal(command, "gh");
+    const number = Number(args[2]);
+    const payload = number === 73
+      ? { number: 73, title: "roadmap", body: roadmapBody, comments: [], state: "OPEN", labels: [] }
+      : {
+          number,
+          title: `issue ${number}`,
+          body: "",
+          comments: [],
+          state: "OPEN",
+          labels: [],
+          ...overrides[number],
+        };
+    return { command, args, cwd: options.cwd, exitCode: 0, stdout: JSON.stringify(payload), stderr: "", durationMs: 1 };
+  };
+}
+
+test("real #73 numbered-list roadmap shape skips closed items and selects reopened #77", async () => {
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: (cwd) => fetchRoadmapIssues(cwd, roadmapRunner([
+      "Intro mentions #100 and dependency diagram #76 -> #77; neither is a row.",
+      "1. **#74 — bootstrap foundation**",
+      "2. **#75 — implementation loop**",
+      "3. **#76 — deterministic verification**",
+      "4. **#77 — reopened next candidate**",
+    ].join("\n"), {
+      74: { state: "CLOSED" },
+      75: { state: "CLOSED" },
+      76: { state: "CLOSED" },
+      77: { state: "OPEN" },
+    })),
+  });
+
+  assert.equal(selection.selectedIssueNumber, 77);
+  assert.deepEqual(selection.skips.map((skip) => [skip.issueNumber, skip.status]), [[74, "closed"], [75, "closed"], [76, "closed"]]);
 });
 
 test("automatic selection skips closed predecessors and chooses the first dependency-ready open roadmap issue", async () => {
@@ -511,6 +566,46 @@ test("open dependencies block dependents until the dependency closes", async () 
     ]),
   });
   assert.equal(ready.selectedIssueNumber, 80);
+});
+
+test("multiline dependency sections block through the next markdown heading", async () => {
+  const blocked = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 76, labels: ["on-hold"] },
+      { number: 77, body: "## Depends on\n\n#76\n\n## Notes\nMentions #999 as prose only." },
+    ]),
+  });
+  assert.equal(blocked.selectedIssueNumber, undefined);
+  assert.equal(blocked.skips[1]?.reason, "blocked by #76");
+
+  const ready = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 76, state: "CLOSED" },
+      { number: 77, body: "## Depends on\n\n#76\n\n## Notes\nMentions #999 as prose only." },
+    ]),
+  });
+  assert.equal(ready.selectedIssueNumber, 77);
+});
+
+test("dependency metadata supports inline, no-dependency sections, and malformed sections fail closed", async () => {
+  const inline = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 76, state: "CLOSED" },
+      { number: 77, body: "Blocked by: #76" },
+      { number: 78, body: "## Dependencies\nNone" },
+    ]),
+  });
+  assert.equal(inline.selectedIssueNumber, 77);
+
+  await assert.rejects(
+    resolveNextIssue(process.cwd(), {
+      fetchRoadmapIssues: async () => roadmap([
+        { number: 76, state: "CLOSED" },
+        { number: 77, body: "## Dependencies\nThe previous bootstrap issue." },
+      ]),
+    }),
+    /ambiguous dependency metadata/,
+  );
 });
 
 test("roadmap order wins when multiple items are dependency-ready", async () => {
