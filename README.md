@@ -165,6 +165,16 @@ The reusable lease, compare-and-swap, worktree coordination, and provider-neutra
 
 The planned next reliability work is described in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md): a scripted worker seam, deterministic scenario runner, lifecycle fault injection, typed event/replay evidence, model/property testing, real-Git integration, and independently graded worker canaries before consumer dogfooding.
 
+### Bootstrap one implementation issue
+
+Issue #74 provides a temporary developer utility for bootstrapping the next issue in #73 with one fresh plain-Pi worker. Run it from a clean coordination checkout on `main`:
+
+```sh
+npm run bootstrap:self-host -- --issue 75
+```
+
+It prepares the canonical `.worktrees/issue-75` / `agent/issue-75` workspace, fetches the complete issue, runs deterministic checks outside the worker, and leaves merge and issue closure to the operator. A bounded fresh repair or read-only review can be enabled with `--repair` or `--review`; `--queue` is intentionally not supported.
+
 ### Release automation
 
 Install the repository's local pre-push hook once for fast feedback. It does not replace the hosted exact-tag gate: `.github/workflows/release-gate.yml` rechecks the pushed immutable tag on GitHub.

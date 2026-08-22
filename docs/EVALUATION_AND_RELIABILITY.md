@@ -43,6 +43,13 @@ This is not a feature-parity exercise. Pi-next should harvest proven mechanisms 
 
 The table is intentionally revisitable. New useful features discovered in mature frameworks should be added here before implementation so they are consciously adopted or rejected rather than rediscovered ad hoc.
 
+### Bootstrap supervisor decisions (issue #74)
+
+- **adopt-pattern** — mini-SWE-agent's small `Agent`/`Environment`/`Model` separation and local environment process-group timeout pattern. The bootstrap utility keeps the same narrow seam: an injectable worker session factory, a canonical cwd, bounded cancellation, and no lifecycle authority in the worker. Its shell adapter kills the process group on timeout rather than importing the framework.
+- **adopt-pattern** — SWE-bench's separation of candidate generation from mechanical grading. The utility treats Pi output as execution evidence, runs `npm run typecheck` and `npm test` itself, and never accepts worker completion prose as success.
+- **adapter** — Pi's SDK `createAgentSession()` with `SessionManager.inMemory()` and a fresh session per implementation/repair/review attempt. This is the smallest plain-Pi adapter for the temporary developer tool; it does not load the pi-next extension or replace the parent host session.
+- **reject** — queue progression, persistent chat management, lease/authority operations, automatic merge/push/close, and a second orchestration framework. The utility intentionally handles one explicit issue and leaves finalization to the existing trusted lifecycle/operator.
+
 ## Test layers
 
 ### 1. Protocol/model tests — no LLM
