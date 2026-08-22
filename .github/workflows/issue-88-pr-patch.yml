@@ -30,10 +30,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - name: Run tests under fixture-neutral GitHub repo discovery
-        run: npm test
-        env:
-          GITHUB_REPOSITORY: ""
-          GH_REPO: ""
+        run: env -u GITHUB_ACTIONS -u GITHUB_REPOSITORY -u GH_REPO npm test
       - name: Commit verified patch
         run: |
           git config user.name github-actions[bot]
