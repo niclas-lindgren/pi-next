@@ -633,8 +633,7 @@ function orderedIssueNumbersFromRoadmap(body: string): number[] {
   const numbers: number[] = [];
   const seen = new Set<number>();
   for (const line of body.split("\n")) {
-    if (!/^\s*(?:[-*]\s*)?(?:\[[ xX]\]\s*)?(?:#\d+|.*\bissue\b.*#\d+)/i.test(line)) continue;
-    const match = line.match(/#(\d+)/);
+    const match = line.match(/^\s*(?:(?:[-*+]\s+)|(?:\d+[.)]\s+))(?:\[[ xX]\]\s*)?(?:[*_`~]+\s*)?#(\d+)\b/);
     if (!match) continue;
     const number = Number(match[1]);
     if (number === DEFAULT_ROADMAP_ISSUE || seen.has(number)) continue;
@@ -661,14 +660,51 @@ function dependencyMetadataText(issue: RoadmapIssue): string {
   return [issue.title, issue.body, ...issue.comments.map((comment) => comment.body ?? "")].join("\n");
 }
 
+function dependencyLineNoDeps(normalized: string): boolean {
+  return /(?:\b(no|none|n\/a)\b.*\b(dependencies?|depends|blocked|required|requires?)\b)|(?:\b(dependencies?|depends|blocked by|required|requires?)\b\s*:?\s*\b(none|no|n\/a)\b)/.test(normalized);
+}
+
+function dependencyIssueNumbers(text: string): number[] {
+  return [...text.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+}
+
 function declaredDependencies(issue: RoadmapIssue): number[] {
   const dependencies = new Set<number>();
-  for (const line of dependencyMetadataText(issue).split("\n")) {
+  const lines = dependencyMetadataText(issue).split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
     const normalized = line.toLowerCase();
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(depends on|dependencies?|blocked by|requires?)\b(.*)$/i);
+    if (heading) {
+      const sectionLines = [heading[2] ?? ""];
+      let cursor = index + 1;
+      while (cursor < lines.length && !/^\s{0,3}#{1,6}\s+\S/.test(lines[cursor]!)) {
+        sectionLines.push(lines[cursor]!);
+        cursor += 1;
+      }
+      index = cursor - 1;
+      const sectionText = sectionLines.join("\n");
+      const matches = dependencyIssueNumbers(sectionText);
+      const noDeps = dependencyLineNoDeps(`${normalized}\n${sectionText.toLowerCase()}`);
+      const meaningfulText = sectionText.replace(/<!--.*?-->/g, "").trim();
+      if (matches.length === 0) {
+        if (!noDeps && meaningfulText !== "") {
+          throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+        }
+        if (!noDeps && meaningfulText === "") {
+          throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+        }
+        continue;
+      }
+      if (noDeps) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+      for (const dependency of matches) dependencies.add(dependency);
+      continue;
+    }
+
     const hasKeyword = /\b(depends on|dependencies?|blocked by|requires?)\b/.test(normalized);
     if (!hasKeyword) continue;
-    const noDeps = /(?:\b(no|none|n\/a)\b.*\b(dependencies?|depends|blocked|required|requires?)\b)|(?:\b(dependencies?|depends|blocked by|required|requires?)\b\s*:?\s*\b(none|no|n\/a)\b)/.test(normalized);
-    const matches = [...line.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+    const noDeps = dependencyLineNoDeps(normalized);
+    const matches = dependencyIssueNumbers(line);
     if (matches.length === 0) {
       if (!noDeps) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
       continue;
