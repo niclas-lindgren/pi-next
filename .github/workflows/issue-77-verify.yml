@@ -1,0 +1,43 @@
+name: issue-77-verify
+
+on:
+  push:
+    branches:
+      - agent/issue-77-journal-replay
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/issue-77-journal-replay
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Journal and replay focused suite
+        run: node --import tsx --test test/lifecycle-journal.test.ts test/lifecycle-journal-integration.test.ts test/lifecycle-replay.test.ts
+      - name: Replay CLI fixture
+        run: npm run eval:replay -- test/fixtures/replay/crash-boundaries.json
+      - name: Full guarded suite
+        run: npm test
+      - name: Remove temporary verifier
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/issue-77-verify.yml
+          git commit -m "chore: remove temporary #77 verifier"
+          git push origin HEAD:agent/issue-77-journal-replay
