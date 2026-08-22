@@ -629,10 +629,30 @@ function roadmapIssueFromJson(value: unknown): RoadmapIssue {
   return { ...issue, state, labels };
 }
 
+function unfencedMarkdownLines(text: string): string[] {
+  const lines = text.split("\n");
+  const result: string[] = [];
+  let fenceMarker: string | undefined;
+  for (const line of lines) {
+    const fence = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1]![0]!;
+      if (!fenceMarker) {
+        fenceMarker = marker;
+      } else if (marker === fenceMarker) {
+        fenceMarker = undefined;
+      }
+      continue;
+    }
+    if (!fenceMarker) result.push(line);
+  }
+  return result;
+}
+
 function orderedIssueNumbersFromRoadmap(body: string): number[] {
   const numbers: number[] = [];
   const seen = new Set<number>();
-  for (const line of body.split("\n")) {
+  for (const line of unfencedMarkdownLines(body)) {
     const match = line.match(/^\s*(?:(?:[-*+]\s+)|(?:\d+[.)]\s+))(?:\[[ xX]\]\s*)?(?:[*_`~]+\s*)?#(\d+)\b/);
     if (!match) continue;
     const number = Number(match[1]);
@@ -670,10 +690,20 @@ function dependencyIssueNumbers(text: string): number[] {
 
 function declaredDependencies(issue: RoadmapIssue): number[] {
   const dependencies = new Set<number>();
-  const lines = dependencyMetadataText(issue).split("\n");
+  const lines = unfencedMarkdownLines(dependencyMetadataText(issue));
+  let declaredNoDependencies = false;
+
+  const recordDependencies = (matches: number[], line: string): void => {
+    if (declaredNoDependencies) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+    for (const dependency of matches) dependencies.add(dependency);
+  };
+  const recordNoDependencies = (line: string): void => {
+    if (dependencies.size > 0) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+    declaredNoDependencies = true;
+  };
+
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
-    const normalized = line.toLowerCase();
     const heading = line.match(/^\s{0,3}#{1,6}\s+(depends on|dependencies?|blocked by|requires?)\b(.*)$/i);
     if (heading) {
       const sectionLines = [heading[2] ?? ""];
@@ -685,32 +715,37 @@ function declaredDependencies(issue: RoadmapIssue): number[] {
       index = cursor - 1;
       const sectionText = sectionLines.join("\n");
       const matches = dependencyIssueNumbers(sectionText);
-      const noDeps = dependencyLineNoDeps(`${normalized}\n${sectionText.toLowerCase()}`);
+      const noDeps = dependencyLineNoDeps(`${line.toLowerCase()}\n${sectionText.toLowerCase()}`);
       const meaningfulText = sectionText.replace(/<!--.*?-->/g, "").trim();
       if (matches.length === 0) {
-        if (!noDeps && meaningfulText !== "") {
-          throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+        if (noDeps) {
+          recordNoDependencies(line);
+          continue;
         }
-        if (!noDeps && meaningfulText === "") {
-          throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
-        }
-        continue;
+        throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
       }
       if (noDeps) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
-      for (const dependency of matches) dependencies.add(dependency);
+      if (meaningfulText === "") throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+      recordDependencies(matches, line);
       continue;
     }
 
-    const hasKeyword = /\b(depends on|dependencies?|blocked by|requires?)\b/.test(normalized);
-    if (!hasKeyword) continue;
-    const noDeps = dependencyLineNoDeps(normalized);
-    const matches = dependencyIssueNumbers(line);
+    const anchored = line.match(/^\s*(depends on|dependencies?|blocked by|requires?)\s*:\s*(.*?)\s*$/i)
+      ?? line.match(/^\s*(depends on|blocked by|requires?)\s+(#\d+\b.*)$/i)
+      ?? line.match(/^\s*(dependencies?)\s+(#\d+\b.*)$/i);
+    if (!anchored) continue;
+    const value = anchored[2] ?? "";
+    const noDeps = dependencyLineNoDeps(line.toLowerCase());
+    const matches = dependencyIssueNumbers(value);
     if (matches.length === 0) {
-      if (!noDeps) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
-      continue;
+      if (noDeps) {
+        recordNoDependencies(line);
+        continue;
+      }
+      throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
     }
     if (noDeps) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
-    for (const dependency of matches) dependencies.add(dependency);
+    recordDependencies(matches, line);
   }
   dependencies.delete(issue.number);
   return [...dependencies].sort((a, b) => a - b);

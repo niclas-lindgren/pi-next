@@ -478,6 +478,10 @@ test("roadmap discovery preserves row order without treating dependency referenc
           body: [
             "Roadmap prose mentions #90 and issue #91 but is not a backlog row.",
             "Dependency diagram: #78 -> #79 -> #80",
+            "```md",
+            "1. **#999 — fenced example must not become roadmap order**",
+            "- #998 also fenced",
+            "```",
             "1. **#74 — bootstrap foundation**",
             "2. [x] **#75 — candidate loop**",
             "3. **#76 — verification pass**",
@@ -587,21 +591,62 @@ test("multiline dependency sections block through the next markdown heading", as
   assert.equal(ready.selectedIssueNumber, 77);
 });
 
-test("dependency metadata supports inline, no-dependency sections, and malformed sections fail closed", async () => {
+test("fenced code and ordinary dependency prose are ignored by dependency parsing", async () => {
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      {
+        number: 107,
+        body: [
+          "This issue discusses dependencies and requires careful setup in prose only.",
+          "```text",
+          "dependencies.ts              # npm/pnpm/yarn setup",
+          "Depends on: #999",
+          "#123",
+          "Blocked by: #998",
+          "```",
+          "Documentation later mentions blocked work without declaring metadata.",
+        ].join("\n"),
+      },
+    ]),
+  });
+  assert.equal(selection.selectedIssueNumber, 107);
+  assert.deepEqual(selection.skips, []);
+});
+
+test("dependency metadata supports anchored inline declarations and explicit none", async () => {
   const inline = await resolveNextIssue(process.cwd(), {
     fetchRoadmapIssues: async () => roadmap([
       { number: 76, state: "CLOSED" },
-      { number: 77, body: "Blocked by: #76" },
-      { number: 78, body: "## Dependencies\nNone" },
+      { number: 77, body: "Depends on: #76" },
+      { number: 78, body: "Dependencies: none" },
     ]),
   });
   assert.equal(inline.selectedIssueNumber, 77);
 
+  const none = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 78, body: "Dependencies: none" },
+    ]),
+  });
+  assert.equal(none.selectedIssueNumber, 78);
+});
+
+test("malformed and conflicting explicit dependency declarations fail closed", async () => {
   await assert.rejects(
     resolveNextIssue(process.cwd(), {
       fetchRoadmapIssues: async () => roadmap([
         { number: 76, state: "CLOSED" },
         { number: 77, body: "## Dependencies\nThe previous bootstrap issue." },
+      ]),
+    }),
+    /ambiguous dependency metadata/,
+  );
+
+  await assert.rejects(
+    resolveNextIssue(process.cwd(), {
+      fetchRoadmapIssues: async () => roadmap([
+        { number: 76, state: "CLOSED" },
+        { number: 77, body: "Dependencies: none\nDepends on: #76" },
       ]),
     }),
     /ambiguous dependency metadata/,
@@ -623,10 +668,10 @@ test("no eligible item is a bounded no-work result", async () => {
   assert.equal(selection.skips.length, 2);
 });
 
-test("ambiguous dependency metadata fails closed", async () => {
+test("malformed anchored dependency metadata fails closed", async () => {
   await assert.rejects(
     resolveNextIssue(process.cwd(), {
-      fetchRoadmapIssues: async () => roadmap([{ number: 79, body: "Depends on the previous bootstrap issue" }]),
+      fetchRoadmapIssues: async () => roadmap([{ number: 79, body: "Depends on:" }]),
     }),
     /ambiguous dependency metadata/,
   );
@@ -665,6 +710,35 @@ test("--next-only launches zero workers or bootstrap executions", async () => {
   let executions = 0;
   const code = await runBootstrapCli(["--next-only"], {
     fetchRoadmapIssues: async () => roadmap([{ number: 79 }]),
+  }, async () => {
+    executions += 1;
+    throw new Error("no worker/model should launch");
+  });
+  assert.equal(code, 0);
+  assert.equal(executions, 0);
+});
+
+test("--next-only evaluates the real #73/#107 fenced dependency shape without ambiguity or model calls", async () => {
+  let executions = 0;
+  const code = await runBootstrapCli(["--next-only"], {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 100, state: "CLOSED" },
+      {
+        number: 107,
+        body: [
+          "## Goal",
+          "Decompose bootstrap setup.",
+          "",
+          "```text",
+          "dependencies.ts              # npm/pnpm/yarn setup",
+          "Depends on: #999",
+          "#123",
+          "```",
+          "",
+          "Prose mentions dependency parsing and requires no lifecycle metadata.",
+        ].join("\n"),
+      },
+    ]),
   }, async () => {
     executions += 1;
     throw new Error("no worker/model should launch");
