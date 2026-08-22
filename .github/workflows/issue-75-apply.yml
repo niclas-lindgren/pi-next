@@ -1,0 +1,97 @@
+name: issue-75-apply
+
+on:
+  push:
+    branches:
+      - agent/issue-75-remote
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Route production issue workers through PiWorkerAdapter
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("extensions/pi-next/loop.ts")
+          text = path.read_text()
+
+          old_import = 'import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";'
+          new_import = '''import type { IssueWorkerRunner } from "./util-core.ts";
+          import {
+            PiWorkerAdapter,
+            issueWorkerRunnerFromAdapter,
+            type PiWorkerCompatibleAdapter,
+          } from "./pi-worker-adapter.ts";'''
+          assert text.count(old_import) == 1, "unexpected runIssueWorker import shape"
+          text = text.replace(old_import, new_import)
+
+          old_signature = '''  /** Stable display supplied by the foreground supervisor across issue cycles. */
+            displayOverride?: WorkerDisplayController,
+          ): Promise<LoopState> {'''
+          new_signature = '''  /** Stable display supplied by the foreground supervisor across issue cycles. */
+            displayOverride?: WorkerDisplayController,
+            /** Harness-neutral worker execution seam; Pi remains the default adapter. */
+            workerAdapter: PiWorkerCompatibleAdapter = new PiWorkerAdapter(),
+          ): Promise<LoopState> {'''
+          assert text.count(old_signature) == 1, "unexpected runOwnedIssueCycle signature shape"
+          text = text.replace(old_signature, new_signature)
+
+          old_worker = '''        let replacementWorkerPending = false;
+                  const visibleWorker: IssueWorkerRunner = ('''
+          new_worker = '''        let replacementWorkerPending = false;
+                  const adapterWorker = issueWorkerRunnerFromAdapter(workerAdapter);
+                  const visibleWorker: IssueWorkerRunner = ('''
+          assert text.count(old_worker) == 1, "unexpected visible worker boundary shape"
+          text = text.replace(old_worker, new_worker)
+
+          old_call = '          return runIssueWorker(workerCwd, prompt, {'
+          new_call = '          return adapterWorker(workerCwd, prompt, {'
+          assert text.count(old_call) == 1, "unexpected direct Pi runner call count"
+          text = text.replace(old_call, new_call)
+
+          old_comment = ''' * step still runs in an isolated issue worker — a dedicated child process
+           * spawned by `runIssueWorker` (util-core.ts) — never inline in the parent.'''
+          new_comment = ''' * step still runs in an isolated issue worker through the harness-neutral
+           * WorkerAdapter boundary. PiWorkerAdapter is the current default and delegates
+           * to the proven isolated child-process runner — never inline in the parent.'''
+          assert text.count(old_comment) == 1, "unexpected lifecycle comment shape"
+          text = text.replace(old_comment, new_comment)
+
+          path.write_text(text)
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Adapter regressions
+        run: node --import tsx --test test/worker-adapter.test.ts test/worker-dispatch.test.ts test/host-memory.test.ts test/replacement-worker-context.test.ts
+
+      - name: Complete guarded suite
+        run: npm test
+
+      - name: Commit verified implementation and remove temporary workflow
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/issue-75-apply.yml
+          git add extensions/pi-next/loop.ts src/coordination/worker-adapter.ts extensions/pi-next/pi-worker-adapter.ts test/worker-adapter.test.ts
+          git commit -m "refactor(worker): route Pi through WorkerAdapter (#75)"
+          git push origin HEAD:agent/issue-75-remote
