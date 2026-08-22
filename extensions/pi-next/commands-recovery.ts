@@ -290,9 +290,10 @@ export function startAutoStatusHeartbeat(
 ): () => void {
   // Read cwd before any session replacement. It is plain data and remains
   // valid after the command context becomes stale. UI writes resolve the
-  // current context at call time; the captured context is only a fallback for
-  // direct/test callers that have not installed the registry.
+  // current context at call time; a weak fallback supports direct/test callers
+  // without retaining the full host session graph in the heartbeat closure.
   setLiveCtx(ctx);
+  const fallbackCtx = new WeakRef(ctx);
   const cwd = ctx.cwd;
   const startedAt = Date.now();
   const version = piNextRuntimeIdentity().version;
@@ -335,7 +336,7 @@ export function startAutoStatusHeartbeat(
     // completion is not a request to clear the footer; the durable terminal
     // state is the useful handoff to the operator and to a replacement
     // session. Shutdown cancels first, so this never touches a disposed ctx.
-    update(ctx);
+    update(fallbackCtx.deref());
     binding.active = false;
     persistStatusBinding(binding);
     autoStatusBindings.delete(binding);

@@ -131,10 +131,17 @@ contexts, session graphs, listeners, timers, displays, and status bindings, and
 contributed to the parent-memory work tracked in #69.
 
 The stable-host architecture is the baseline that memory diagnostics must now
-measure. A representative long-run test should execute many isolated worker and
-controller transitions in one parent Pi host session and verify that retained
-parent memory reaches a bounded envelope rather than growing with transition
-count.
+measure. `live-ctx` keeps only the current host context strongly; historical
+session-key bridges are weak and a run rebind retires its superseded key. The
+status heartbeat likewise uses a weak fallback, so an external replacement does
+not remain reachable through a stale lifecycle closure.
+
+An opt-in `PI_NEXT_HOST_MEMORY_FORCE_GC=1` diagnostic mode samples retained heap
+when Node is started with `--expose-gc`. Its payload-free bounded ring separates
+settled growth from a transient peak. A representative long-run test should
+execute 50+ isolated worker and controller transitions in one parent Pi host
+session and verify that retained parent memory reaches a bounded envelope rather
+than growing with transition count.
 
 The memory-pressure `restart_required` safety fence remains necessary until
 bounded behavior is proven. Raising V8's heap limit is not a substitute for
@@ -165,7 +172,7 @@ initiate a Pi host-session replacement.
 At minimum, representative tests should establish:
 
 ```text
-20+ ordinary worker/controller transitions
+50+ ordinary worker/controller transitions
 -> fresh isolated child workers as required
 -> same parent host session identity
 -> zero Pi-next-initiated ctx.newSession() calls

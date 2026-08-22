@@ -41,6 +41,9 @@ export interface HostMemorySample extends HostMemoryBoundaryContext {
   rssDelta: number;
   fromBaselineHeapUsed: number;
   fromBaselineRss: number;
+  /** Present only when opt-in forced-GC diagnostics actually ran. */
+  retainedHeapUsed?: number;
+  retainedHeapUsedDelta?: number;
   pressure: HostMemoryPressure;
 }
 
@@ -66,7 +69,23 @@ export interface HostMemoryPolicy {
 export interface HostMemoryObservationOptions {
   /** Start a new process baseline while retaining the bounded sample history. */
   resetBaseline?: boolean;
+  /** Opt-in only: call global.gc() before sampling when --expose-gc is active. */
+  forceGc?: boolean;
 }
+
+export interface HostMemoryEnvelope {
+  sampleCount: number;
+  retainedSampleCount: number;
+  firstRetainedHeapUsed?: number;
+  lastRetainedHeapUsed?: number;
+  peakRetainedHeapUsed?: number;
+  settledGrowthBytes?: number;
+  transientPeakBytes?: number;
+  bounded: boolean;
+}
+
+const RETAINED_HEAP_TOLERANCE_BYTES = 64 * 1024 * 1024;
+const MIN_ENVELOPE_SAMPLES = 50;
 
 interface HostMemoryFile {
   version: 1;
@@ -132,18 +151,30 @@ function readFile(cwd: string): HostMemoryFile | undefined {
 export function observeHostMemory(
   cwd: string,
   context: HostMemoryBoundaryContext,
-  usage: HostMemoryUsage = process.memoryUsage(),
+  usage?: HostMemoryUsage,
   heapLimit = finite(getHeapStatistics().heap_size_limit),
   policy: HostMemoryPolicy = {},
   options: HostMemoryObservationOptions = {},
 ): { sample: HostMemorySample; health: HostMemoryHealth } {
+  const forceGc = options.forceGc ?? process.env.PI_NEXT_HOST_MEMORY_FORCE_GC === "1";
+  const gc = Reflect.get(globalThis, "gc") as (() => void) | undefined;
+  const gcPerformed = forceGc && typeof gc === "function";
+  if (gcPerformed) {
+    try {
+      gc();
+    } catch {
+      // Diagnostics must never alter the controller's safety decision.
+    }
+  }
+  const measuredUsage = usage ?? process.memoryUsage();
   const previous = readFile(cwd);
   const sameRun = previous?.health.runId === context.runId && !options.resetBaseline;
   const oldSample = sameRun ? previous?.samples.at(-1) : undefined;
-  const baselineHeapUsed = sameRun ? previous!.health.baselineHeapUsed : finite(usage.heapUsed);
-  const baselineRss = sameRun ? previous!.health.baselineRss : finite(usage.rss);
-  const heapUsed = finite(usage.heapUsed);
-  const rss = finite(usage.rss);
+  const baselineHeapUsed = sameRun ? previous!.health.baselineHeapUsed : finite(measuredUsage.heapUsed);
+  const baselineRss = sameRun ? previous!.health.baselineRss : finite(measuredUsage.rss);
+  const heapUsed = finite(measuredUsage.heapUsed);
+  const rss = finite(measuredUsage.rss);
+  const retainedHeapUsed = gcPerformed ? heapUsed : undefined;
   const pressure = classifyHostMemoryPressure(heapUsed, heapLimit, policy);
   const criticalStreak = pressure === "critical"
     ? (sameRun ? previous!.health.criticalStreak : 0) + 1
@@ -153,14 +184,20 @@ export function observeHostMemory(
     at: new Date().toISOString(),
     heapLimit,
     heapUsed,
-    heapTotal: finite(usage.heapTotal),
+    heapTotal: finite(measuredUsage.heapTotal),
     rss,
-    external: finite(usage.external),
-    ...(usage.arrayBuffers === undefined ? {} : { arrayBuffers: finite(usage.arrayBuffers) }),
+    external: finite(measuredUsage.external),
+    ...(measuredUsage.arrayBuffers === undefined ? {} : { arrayBuffers: finite(measuredUsage.arrayBuffers) }),
     heapUsedDelta: oldSample ? heapUsed - oldSample.heapUsed : 0,
     rssDelta: oldSample ? rss - oldSample.rss : 0,
     fromBaselineHeapUsed: heapUsed - baselineHeapUsed,
     fromBaselineRss: rss - baselineRss,
+    ...(retainedHeapUsed === undefined ? {} : {
+      retainedHeapUsed,
+      ...(oldSample?.retainedHeapUsed === undefined
+        ? {}
+        : { retainedHeapUsedDelta: retainedHeapUsed - oldSample.retainedHeapUsed }),
+    }),
     pressure,
   };
   const samples = [...(previous?.samples || []), sample].slice(-MAX_SAMPLES);
@@ -178,6 +215,36 @@ export function observeHostMemory(
   };
   writeJsonAtomic(hostMemoryFile(cwd), { version: 1, health, samples } satisfies HostMemoryFile);
   return { sample, health };
+}
+
+/**
+ * Summarize forced-GC samples without retaining any worker/session payload.
+ * A large transient peak is reported separately from settled growth; callers
+ * can use `bounded` as evidence for a long-run diagnostic, not as authority.
+ */
+export function analyzeHostMemoryEnvelope(
+  samples: readonly HostMemorySample[],
+  toleranceBytes = RETAINED_HEAP_TOLERANCE_BYTES,
+): HostMemoryEnvelope {
+  const retained = samples
+    .map((sample) => sample.retainedHeapUsed)
+    .filter((value): value is number => value !== undefined && Number.isFinite(value));
+  const first = retained[0];
+  const last = retained.at(-1);
+  const peak = retained.length ? Math.max(...retained) : undefined;
+  const settledGrowthBytes = first !== undefined && last !== undefined ? last - first : undefined;
+  const transientPeakBytes = peak !== undefined && last !== undefined ? Math.max(0, peak - last) : undefined;
+  return {
+    sampleCount: samples.length,
+    retainedSampleCount: retained.length,
+    ...(first === undefined ? {} : { firstRetainedHeapUsed: first }),
+    ...(last === undefined ? {} : { lastRetainedHeapUsed: last }),
+    ...(peak === undefined ? {} : { peakRetainedHeapUsed: peak }),
+    ...(settledGrowthBytes === undefined ? {} : { settledGrowthBytes }),
+    ...(transientPeakBytes === undefined ? {} : { transientPeakBytes }),
+    bounded: retained.length >= MIN_ENVELOPE_SAMPLES &&
+      settledGrowthBytes !== undefined && settledGrowthBytes <= toleranceBytes,
+  };
 }
 
 export function memoryPressureReason(health: HostMemoryHealth): string {
