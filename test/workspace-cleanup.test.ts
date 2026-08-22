@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
@@ -9,56 +8,52 @@ import {
   cleanupCompletedIssueWorktree,
   IssueWorkspaceCleanupError,
 } from "../extensions/pi-next/main-refresh.ts";
+import { createDisposableGitFixture, type DisposableGitFixture } from "./helpers/git-fixture.ts";
 
-const temporaryDirectories: string[] = [];
+const fixtures: DisposableGitFixture[] = [];
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
+afterEach(async () => {
+  for (const fixture of fixtures.splice(0)) {
+    await fixture.cleanup();
   }
 });
-
-function mktemp(prefix: string): string {
-  const directory = mkdtempSync(join(tmpdir(), prefix));
-  temporaryDirectories.push(directory);
-  return directory;
-}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
-function setupRepo(issueNumber: number): { root: string; workspace: string } {
-  const origin = mktemp("workspace-cleanup-origin-");
-  execFileSync("git", ["init", "--bare", "-q", origin]);
-  const root = mktemp("workspace-cleanup-root-");
-  execFileSync("git", ["clone", "-q", origin, root]);
-  git(root, ["config", "user.name", "Cleanup Test"]);
-  git(root, ["config", "user.email", "cleanup@example.invalid"]);
-  writeFileSync(join(root, "README.md"), "baseline\n");
-  git(root, ["add", "README.md"]);
-  git(root, ["commit", "-qm", "baseline"]);
-  git(root, ["branch", "-M", "main"]);
-  git(root, ["push", "-q", "-u", "origin", "main"]);
+async function newFixture(prefix: string): Promise<DisposableGitFixture> {
+  const fixture = await createDisposableGitFixture({
+    prefix,
+    userName: "Cleanup Test",
+    userEmail: "cleanup@example.invalid",
+    initialFiles: { "README.md": "baseline\n" },
+  });
+  fixtures.push(fixture);
+  return fixture;
+}
 
-  git(root, ["switch", "-c", `agent/issue-${issueNumber}`]);
+async function setupRepo(issueNumber: number): Promise<{ fixture: DisposableGitFixture; root: string; workspace: string }> {
+  const fixture = await newFixture("workspace-cleanup-");
+  const root = fixture.repo;
+  const branch = `agent/issue-${issueNumber}`;
+
+  git(root, ["switch", "-c", branch]);
   writeFileSync(join(root, "integrated.txt"), "integrated\n");
   git(root, ["add", "integrated.txt"]);
   git(root, ["commit", "-qm", `feat: issue #${issueNumber}`]);
   git(root, ["switch", "main"]);
-  git(root, ["merge", "--ff-only", `agent/issue-${issueNumber}`]);
+  git(root, ["merge", "--ff-only", branch]);
   git(root, ["push", "-q", "origin", "main"]);
 
-  const workspace = join(root, ".worktrees", `issue-${issueNumber}`);
-  mkdirSync(join(root, ".worktrees"), { recursive: true });
-  git(root, ["worktree", "add", "-q", workspace, `agent/issue-${issueNumber}`]);
-  return { root, workspace };
+  const { path: workspace } = await fixture.addIssueWorktree(issueNumber);
+  return { fixture, root, workspace };
 }
 
 describe("cleanupCompletedIssueWorktree", () => {
   test("removes the closed issue worktree and local branch after integration", async () => {
     const issueNumber = 701;
-    const { root, workspace } = setupRepo(issueNumber);
+    const { root, workspace } = await setupRepo(issueNumber);
 
     await cleanupCompletedIssueWorktree(root, workspace, issueNumber);
 
@@ -69,7 +64,7 @@ describe("cleanupCompletedIssueWorktree", () => {
 
   test("also removes an open-awaiting-verification workspace after the same integration proof", async () => {
     const issueNumber = 702;
-    const { root, workspace } = setupRepo(issueNumber);
+    const { root, workspace } = await setupRepo(issueNumber);
 
     // Cleanup is intentionally authority-neutral: the caller may have left the
     // issue open with a durable pending-verification record.
@@ -80,7 +75,7 @@ describe("cleanupCompletedIssueWorktree", () => {
 
   test("allows only the generated verification-artifact cleanup commit after integration", async () => {
     const issueNumber = 703;
-    const { root, workspace } = setupRepo(issueNumber);
+    const { root, workspace } = await setupRepo(issueNumber);
     const verify = join(root, ".ps-next", "VERIFY.md");
     mkdirSync(join(root, ".ps-next"), { recursive: true });
     writeFileSync(verify, "pending evidence\n");
@@ -99,25 +94,15 @@ describe("cleanupCompletedIssueWorktree", () => {
 
   test("preserves an unintegrated branch instead of deleting unique work", async () => {
     const issueNumber = 704;
-    const origin = mktemp("workspace-cleanup-origin-");
-    execFileSync("git", ["init", "--bare", "-q", origin]);
-    const root = mktemp("workspace-cleanup-root-");
-    execFileSync("git", ["clone", "-q", origin, root]);
-    git(root, ["config", "user.name", "Cleanup Test"]);
-    git(root, ["config", "user.email", "cleanup@example.invalid"]);
-    writeFileSync(join(root, "README.md"), "baseline\n");
-    git(root, ["add", "README.md"]);
-    git(root, ["commit", "-qm", "baseline"]);
-    git(root, ["branch", "-M", "main"]);
-    git(root, ["push", "-q", "-u", "origin", "main"]);
-    git(root, ["switch", "-c", `agent/issue-${issueNumber}`]);
+    const fixture = await newFixture("workspace-cleanup-");
+    const root = fixture.repo;
+    const branch = `agent/issue-${issueNumber}`;
+    git(root, ["switch", "-c", branch]);
     writeFileSync(join(root, "unique.txt"), "not integrated\n");
     git(root, ["add", "unique.txt"]);
     git(root, ["commit", "-qm", "feat: unique work"]);
     git(root, ["switch", "main"]);
-    const workspace = join(root, ".worktrees", `issue-${issueNumber}`);
-    mkdirSync(join(root, ".worktrees"), { recursive: true });
-    git(root, ["worktree", "add", "-q", workspace, `agent/issue-${issueNumber}`]);
+    const { path: workspace } = await fixture.addIssueWorktree(issueNumber);
 
     await assert.rejects(
       cleanupCompletedIssueWorktree(root, workspace, issueNumber),
