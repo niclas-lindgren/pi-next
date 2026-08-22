@@ -64,10 +64,32 @@ export interface WorkerStats {
 export interface CandidateState {
   headRevision: string;
   baselineRevision: string;
+  originMainRevision: string;
+  mergeBaseRevision: string;
   dirty: boolean;
   changedFiles: string[];
   committedChanges: boolean;
   uncommittedChanges: boolean;
+  committedFiles: string[];
+  stagedFiles: string[];
+  unstagedFiles: string[];
+  untrackedFiles: string[];
+  commitsAheadOfMergeBase: number;
+  commitsAheadOfOriginMain: number;
+  commitsBehindOriginMain: number;
+  behindOriginMain: boolean;
+  divergedFromOriginMain: boolean;
+}
+
+export interface ReviewerFinding {
+  severity: "blocking" | "warning";
+  path?: string;
+  summary: string;
+}
+
+export interface ReviewerResult {
+  verdict: "pass" | "findings";
+  findings?: ReviewerFinding[];
 }
 
 export type DependencyManager = "npm" | "pnpm" | "yarn";
@@ -92,6 +114,7 @@ export interface WorkerSession {
     tokens?: Partial<WorkerStats>;
     toolCalls?: number;
   });
+  getStructuredResult?: () => unknown;
 }
 
 export interface WorkerFactoryInput {
@@ -137,6 +160,7 @@ export interface WorkerReport {
   usage?: WorkerStats;
   reason?: string;
   telemetryWarning?: string;
+  reviewResult?: ReviewerResult;
 }
 
 export interface BootstrapReport {
@@ -154,6 +178,11 @@ export interface BootstrapReport {
   workerAttempts: WorkerReport[];
   checks: CheckReport[];
   reviewer?: WorkerReport;
+  reviewerResult?: ReviewerResult;
+  mechanicalPass: boolean;
+  reviewPass?: boolean;
+  candidateReadyForReview: boolean;
+  finalizationReady: boolean;
   failureReason?: string;
 }
 
@@ -191,13 +220,15 @@ function bounded(value: string, limit = MAX_OUTPUT): string {
   return `${value.slice(0, limit)}\n...[truncated]`;
 }
 
+function redactSecrets(value: string): string {
+  return value
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1[REDACTED]")
+    .replace(/(gh[pousr]_[A-Za-z0-9_]+)/g, "[REDACTED_GITHUB_TOKEN]")
+    .replace(/(sk-[A-Za-z0-9_-]+)/g, "[REDACTED_API_KEY]");
+}
+
 function redact(value: string): string {
-  return bounded(
-    value
-      .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1[REDACTED]")
-      .replace(/(gh[pousr]_[A-Za-z0-9_]+)/g, "[REDACTED_GITHUB_TOKEN]")
-      .replace(/(sk-[A-Za-z0-9_-]+)/g, "[REDACTED_API_KEY]"),
-  );
+  return bounded(redactSecrets(value));
 }
 
 function commandLabel(command: string, args: string[]): string {
@@ -531,7 +562,7 @@ function buildWorkerPrompt(issue: Issue, cwd: string, contextFiles: Array<{ path
   const comments = issue.comments.length ? issue.comments.map(commentText).join("\n\n") : "(no comments)";
   const context = contextFiles.map((file) => `--- BEGIN ${file.path} ---\n${file.content}\n--- END ${file.path} ---`).join("\n\n");
   const roleInstruction = role === "review"
-    ? "Review the exact candidate evidence for correctness and contract violations. Do not edit files, run mutating commands, merge, push, close issues, or claim acceptance. Return concise findings only."
+    ? "Review the exact candidate evidence for correctness and contract violations. Do not edit files, run mutating commands, merge, push, close issues, or claim acceptance. Return only the structured result contract: {\"verdict\":\"pass\"} or {\"verdict\":\"findings\",\"findings\":[{\"severity\":\"blocking\"|\"warning\",\"path\":\"optional\",\"summary\":\"concise bounded finding\"}]}. Do not include transcript, hidden reasoning, or unbounded prose."
     : role === "repair"
       ? "This is one fresh repair attempt. Inspect the current worktree and repair only the reported deterministic failures. Do not merge, push, close the issue, release authority, or grade your own work."
       : "Implement the issue completely in this worktree. Do not merge, push, close the issue, release authority, or grade your own work.";
@@ -613,6 +644,53 @@ export async function createDefaultWorkerFactory(): Promise<WorkerFactory> {
   };
 }
 
+function extractEventText(event: unknown): string | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const item = event as Record<string, unknown>;
+  for (const key of ["text", "content", "message", "response", "output"]) {
+    const value = item[key];
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+      const joined = value.map((part) => typeof part === "string" ? part : part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "").join("");
+      if (joined) return joined;
+    }
+  }
+  return undefined;
+}
+
+function parseReviewResultText(text: string | undefined): ReviewerResult | undefined {
+  if (!text) return undefined;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
+  try {
+    return sanitizeReviewResult(JSON.parse(trimmed));
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeReviewResult(value: unknown): ReviewerResult | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as { verdict?: unknown; findings?: unknown };
+  if (item.verdict === "pass") return { verdict: "pass" };
+  if (item.verdict !== "findings" || !Array.isArray(item.findings)) return undefined;
+  const findings = item.findings.slice(0, 20).map((finding): ReviewerFinding | undefined => {
+    if (!finding || typeof finding !== "object") return undefined;
+    const raw = finding as { severity?: unknown; path?: unknown; summary?: unknown };
+    if (raw.severity !== "blocking" && raw.severity !== "warning") return undefined;
+    if (typeof raw.summary !== "string" || raw.summary.trim().length === 0) return undefined;
+    const sanitized: ReviewerFinding = { severity: raw.severity, summary: redact(raw.summary).slice(0, 500) };
+    if (typeof raw.path === "string" && raw.path.length <= 300 && !raw.path.includes("\0")) sanitized.path = raw.path;
+    return sanitized;
+  });
+  if (findings.some((finding) => finding === undefined)) return undefined;
+  return { verdict: "findings", findings: findings as ReviewerFinding[] };
+}
+
+function reviewPassed(result: ReviewerResult | undefined): boolean {
+  return result?.verdict === "pass" || (result?.verdict === "findings" && !(result.findings ?? []).some((finding) => finding.severity === "blocking"));
+}
+
 function workerStats(session: WorkerSession): { toolCalls: number; usage?: WorkerStats; warning?: string } {
   const stats = session.getSessionStats?.();
   if (!stats) return { toolCalls: 0 };
@@ -649,11 +727,14 @@ async function runWorker(
   let session: WorkerSession | undefined;
   let unsubscribe: (() => void) | undefined;
   let toolCalls = 0;
+  const eventTexts: string[] = [];
   let cancelParent: (() => void) | undefined;
   try {
     session = await factory({ cwd, role, signal: controller.signal });
     unsubscribe = session.subscribe((event) => {
       if (typeof event === "object" && event !== null && (event as { type?: string }).type === "tool_execution_end") toolCalls += 1;
+      const text = extractEventText(event);
+      if (text) eventTexts.push(text.slice(-4_000));
     });
     const cancellation = new Promise<never>((_, reject) => {
       cancelParent = () => {
@@ -679,6 +760,7 @@ async function runWorker(
       toolCalls: Math.max(toolCalls, stats.toolCalls),
       usage: stats.usage,
       telemetryWarning: stats.warning,
+      reviewResult: role === "review" ? (sanitizeReviewResult(session.getStructuredResult?.()) ?? parseReviewResultText(eventTexts.at(-1))) : undefined,
     };
     reports.push(report);
     return report;
@@ -725,50 +807,125 @@ async function runChecks(cwd: string, runner: CommandRunner, timeoutMs: number, 
   return checks;
 }
 
+function parseStatusLine(line: string): { index: string; worktree: string; path: string; untracked: boolean } | undefined {
+  if (!line) return undefined;
+  const match = line.match(/^([ MADRCU?!])([ MADRCU?!]) (.+)$/) ?? line.match(/^([MADRCU?!]) (.+)$/);
+  if (!match) return { index: " ", worktree: " ", path: line.split(" -> ").at(-1) ?? line, untracked: false };
+  const compact = match.length === 3;
+  // git() trims the complete output, so a first-line unstaged status like
+  // " M file" can arrive as "M file". A true staged entry keeps two status
+  // columns ("M  file") and is handled by the non-compact match.
+  const index = compact ? " " : match[1]!;
+  const worktree = compact ? match[1]! : match[2]!;
+  const rawPath = compact ? match[2]! : match[3]!;
+  return { index, worktree, path: rawPath.split(" -> ").at(-1) ?? rawPath, untracked: index === "?" && worktree === "?" };
+}
+
+function statusEntries(status: string): Array<{ index: string; worktree: string; path: string; untracked: boolean }> {
+  return status.split("\n").map(parseStatusLine).filter((entry): entry is NonNullable<ReturnType<typeof parseStatusLine>> => Boolean(entry));
+}
+
 function statusFileNames(status: string): string[] {
-  return status.split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      // git() trims the complete output, so the first porcelain line may
-      // lose its leading index-column space. Handle both the normal two-byte
-      // status prefix and that trimmed form.
-      const path = /^[ MADRCU?!][ MADRCU?!] /.test(line)
-        ? line.slice(3)
-        : /^[MADRCU?!] /.test(line)
-          ? line.slice(2)
-          : line;
-      return path.split(" -> ").at(-1) ?? path;
-    })
-    .filter(Boolean);
+  return statusEntries(status).map((entry) => entry.path).filter(Boolean);
+}
+
+function splitLines(value: string): string[] {
+  return value.split("\n").filter(Boolean);
+}
+
+async function revCount(cwd: string, range: string, runner: CommandRunner): Promise<number> {
+  return Number(await git(cwd, ["rev-list", "--count", range], runner));
 }
 
 async function readCandidateState(cwd: string, baselineRevision: string, runner: CommandRunner): Promise<CandidateState> {
   const headRevision = await git(cwd, ["rev-parse", "HEAD"], runner);
-  const [status, committedFiles] = await Promise.all([
+  const mergeBaseRevision = await git(cwd, ["merge-base", baselineRevision, headRevision], runner);
+  const [status, committedFilesText, stagedFilesText, unstagedFilesText, aheadMerge, aheadMain, behindMain] = await Promise.all([
     git(cwd, ["status", "--short", "--untracked-files=all"], runner),
-    git(cwd, ["diff", "--name-only", `${baselineRevision}...${headRevision}`], runner),
+    git(cwd, ["diff", "--name-only", `${mergeBaseRevision}..${headRevision}`], runner),
+    git(cwd, ["diff", "--cached", "--name-only"], runner),
+    git(cwd, ["diff", "--name-only"], runner),
+    revCount(cwd, `${mergeBaseRevision}..${headRevision}`, runner),
+    revCount(cwd, `${baselineRevision}..${headRevision}`, runner),
+    revCount(cwd, `${headRevision}..${baselineRevision}`, runner),
   ]);
+  const entries = statusEntries(status);
+  const committedFiles = splitLines(committedFilesText);
+  const stagedFiles = [...new Set([...splitLines(stagedFilesText), ...entries.filter((entry) => entry.index !== " " && !entry.untracked).map((entry) => entry.path)])];
+  const unstagedFiles = [...new Set([...splitLines(unstagedFilesText), ...entries.filter((entry) => entry.worktree !== " " && !entry.untracked).map((entry) => entry.path)])];
+  const untrackedFiles = entries.filter((entry) => entry.untracked).map((entry) => entry.path);
   const changedFiles = [...new Set([
-    ...committedFiles.split("\n").filter(Boolean),
-    ...statusFileNames(status),
+    ...committedFiles,
+    ...stagedFiles,
+    ...unstagedFiles,
+    ...untrackedFiles,
   ])].slice(0, MAX_CHANGED_FILES);
   return {
     headRevision,
     baselineRevision,
+    originMainRevision: baselineRevision,
+    mergeBaseRevision,
     dirty: status.length > 0,
     changedFiles,
-    committedChanges: headRevision !== baselineRevision,
+    committedChanges: aheadMerge > 0,
     uncommittedChanges: status.length > 0,
+    committedFiles,
+    stagedFiles,
+    unstagedFiles,
+    untrackedFiles,
+    commitsAheadOfMergeBase: aheadMerge,
+    commitsAheadOfOriginMain: aheadMain,
+    commitsBehindOriginMain: behindMain,
+    behindOriginMain: behindMain > 0,
+    divergedFromOriginMain: aheadMain > 0 && behindMain > 0,
   };
 }
 
+function assertRelativeGitPath(path: string): void {
+  if (path.startsWith("/") || path.includes("..") || path.includes("\0")) throw new BootstrapError(`unsafe candidate path in git status: ${path}`);
+}
+
+async function untrackedEvidence(cwd: string, files: string[]): Promise<string> {
+  if (files.length === 0) return "(none)";
+  const sections: string[] = [];
+  let total = 0;
+  for (const file of files) {
+    assertRelativeGitPath(file);
+    const absolute = resolve(cwd, file);
+    if (!absolute.startsWith(`${resolve(cwd)}/`)) throw new BootstrapError(`unsafe candidate path in git status: ${file}`);
+    const entry = await stat(absolute).catch(() => undefined);
+    if (!entry?.isFile()) throw new BootstrapError(`untracked candidate path is not a regular text file: ${file}`);
+    const bytes = await readFile(absolute);
+    if (bytes.includes(0)) throw new BootstrapError(`untracked candidate file cannot be represented as bounded text evidence: ${file}`);
+    const content = redactSecrets(bytes.toString("utf8"));
+    const section = `--- BEGIN UNTRACKED FILE ${file} ---\n${content}\n--- END UNTRACKED FILE ${file} ---`;
+    total += section.length;
+    if (total > MAX_PACKET_BYTES) throw new BootstrapError("exact candidate evidence is too large for the bounded reviewer packet");
+    sections.push(section);
+  }
+  return sections.join("\n\n");
+}
+
 async function candidateEvidence(cwd: string, baselineRevision: string, revision: string, runner: CommandRunner): Promise<string> {
-  const [status, committed, unstaged] = await Promise.all([
-    git(cwd, ["status", "--short"], runner),
-    git(cwd, ["diff", "--no-ext-diff", `${baselineRevision}...${revision}`], runner),
+  const mergeBaseRevision = await git(cwd, ["merge-base", baselineRevision, revision], runner);
+  const status = await git(cwd, ["status", "--short", "--untracked-files=all"], runner);
+  const untrackedFiles = statusEntries(status).filter((entry) => entry.untracked).map((entry) => entry.path);
+  const [committed, staged, unstaged, untracked] = await Promise.all([
+    git(cwd, ["diff", "--no-ext-diff", `${mergeBaseRevision}..${revision}`], runner),
+    git(cwd, ["diff", "--cached", "--no-ext-diff"], runner),
     git(cwd, ["diff", "--no-ext-diff"], runner),
+    untrackedEvidence(cwd, untrackedFiles),
   ]);
-  const evidence = [`REVISION: ${revision}`, `BASELINE: ${baselineRevision}`, `STATUS:\n${status || "(clean)"}`, `COMMITTED DIFF:\n${committed || "(none)"}`, `UNSTAGED DIFF:\n${unstaged || "(none)"}`].join("\n\n");
+  const evidence = [
+    `ORIGIN_MAIN: ${baselineRevision}`,
+    `REVISION: ${revision}`,
+    `MERGE_BASE: ${mergeBaseRevision}`,
+    `STATUS:\n${status || "(clean)"}`,
+    `COMMITTED DIFF (MERGE_BASE..HEAD):\n${committed || "(none)"}`,
+    `STAGED DIFF:\n${staged || "(none)"}`,
+    `UNSTAGED DIFF:\n${unstaged || "(none)"}`,
+    `UNTRACKED FILE CONTENTS:\n${untracked}`,
+  ].join("\n\n");
   if (evidence.length > MAX_PACKET_BYTES) throw new BootstrapError("exact candidate evidence is too large for the bounded reviewer packet");
   return evidence;
 }
@@ -818,14 +975,22 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     reviewer = await runWorker(await getFactory(), "review", reviewPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
   }
   const mechanicalPass = checks.length === CHECKS.length && checks.every((check) => check.passed);
+  const reviewerResult = reviewer?.reviewResult;
+  const reviewPass = options.review ? reviewer?.disposition === "completed" && reviewPassed(reviewerResult) : undefined;
+  const candidateReadyForReview = mechanicalPass;
+  const finalizationReady = mechanicalPass && !candidate.dirty && !candidate.behindOriginMain && (options.review ? reviewPass === true : true);
   const disposition: Disposition = !implementationCompleted
     ? "blocked"
     : mechanicalPass
-      ? "pass"
+      ? options.review && reviewPass !== true
+        ? "blocked"
+        : "pass"
       : "repairable-failure";
   const reason = disposition === "pass"
     ? undefined
-    : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification");
+    : reviewer && reviewPass !== true
+      ? "independent review did not return a passing structured verdict"
+      : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification");
   return {
     issueNumber: options.issueNumber,
     attempts: workerAttempts.length,
@@ -841,6 +1006,11 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     workerAttempts,
     checks,
     reviewer,
+    reviewerResult,
+    mechanicalPass,
+    reviewPass,
+    candidateReadyForReview,
+    finalizationReady,
     failureReason: reason,
   };
 }

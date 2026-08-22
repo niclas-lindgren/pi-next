@@ -125,6 +125,7 @@ function fakeFactory(
   sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }>,
   action: (role: string, cwd: string, prompt: string) => Promise<void>,
   stats?: () => ReturnType<NonNullable<WorkerSession["getSessionStats"]>>,
+  structured?: (role: string) => unknown,
 ): WorkerFactory {
   return async ({ cwd, role }) => {
     const record = { role, prompt: "", disposed: false, aborted: false };
@@ -143,6 +144,7 @@ function fakeFactory(
         record.disposed = true;
       },
       getSessionStats: stats,
+      getStructuredResult: () => structured?.(role),
     };
     return session;
   };
@@ -231,7 +233,7 @@ test("review gets a fresh read-only context and exact candidate evidence", async
     const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
     const factory = fakeFactory(sessions, async (role, cwd) => {
       if (role !== "review") await writeFile(join(cwd, "candidate.txt"), "candidate\n");
-    });
+    }, undefined, (role) => role === "review" ? { verdict: "pass" } : undefined);
     const report = await runBootstrap(
       { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
       dependenciesFor(fixtureState.root, factory, () => 0, []),
@@ -242,7 +244,7 @@ test("review gets a fresh read-only context and exact candidate evidence", async
     assert.deepEqual(sessions.map((session) => session.role), ["implementation", "review"]);
     assert.match(sessions[1]!.prompt, /EXACT CANDIDATE EVIDENCE/);
     assert.match(sessions[1]!.prompt, /REVISION:/);
-    assert.match(sessions[1]!.prompt, /COMMITTED DIFF:/);
+    assert.match(sessions[1]!.prompt, /COMMITTED DIFF \(MERGE_BASE\.\.HEAD\):/);
     assert.match(sessions[1]!.prompt, /Do not edit files/);
   } finally {
     await fixtureState.cleanup();
@@ -430,4 +432,197 @@ test("marks nonzero cost with zero SDK tokens as suspicious telemetry", async ()
 
 test("rejects implicit multi-issue progression", async () => {
   assert.equal(await main(["--queue", "75,76"]), 2);
+});
+
+test("review evidence includes untracked file contents instead of only git diff names", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (role, cwd) => {
+      if (role !== "review") await writeFile(join(cwd, "src-new.ts"), "export const value = 42;\n");
+    }, undefined, (role) => role === "review" ? { verdict: "pass" } : undefined);
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.equal(report.disposition, "pass");
+    assert.match(sessions[1]!.prompt, /UNTRACKED FILE CONTENTS:/);
+    assert.match(sessions[1]!.prompt, /--- BEGIN UNTRACKED FILE src-new\.ts ---/);
+    assert.match(sessions[1]!.prompt, /export const value = 42;/);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("branch at original base but behind newer origin main has zero committed candidate changes", async () => {
+  const fixtureState = await fixture();
+  try {
+    const noWorker = async () => { throw new Error("no worker"); };
+    await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, verifyOnly: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, noWorker, () => 0, []),
+    );
+    await writeFile(join(fixtureState.root, "main-advanced.txt"), "main\n");
+    await git(fixtureState.root, "add", "main-advanced.txt");
+    await git(fixtureState.root, "commit", "-qm", "advance main");
+    await git(fixtureState.root, "push", "-q", "origin", "main");
+
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, verifyOnly: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, noWorker, () => 0, []),
+    );
+    assert.equal(report.candidate.committedChanges, false);
+    assert.equal(report.candidate.commitsAheadOfMergeBase, 0);
+    assert.equal(report.candidate.behindOriginMain, true);
+    assert.equal(report.candidate.commitsBehindOriginMain, 1);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("issue commit on old base is reported separately from newer main divergence", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (_role, cwd) => {
+      await writeFile(join(cwd, "issue-commit.txt"), "issue\n");
+      await git(cwd, "add", "issue-commit.txt");
+      await git(cwd, "commit", "-qm", "issue commit");
+    });
+    await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+    await writeFile(join(fixtureState.root, "main-advanced.txt"), "main\n");
+    await git(fixtureState.root, "add", "main-advanced.txt");
+    await git(fixtureState.root, "commit", "-qm", "advance main");
+    await git(fixtureState.root, "push", "-q", "origin", "main");
+
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, verifyOnly: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, async () => { throw new Error("no worker"); }, () => 0, []),
+    );
+    assert.equal(report.candidate.committedChanges, true);
+    assert.equal(report.candidate.commitsAheadOfMergeBase, 1);
+    assert.equal(report.candidate.commitsBehindOriginMain, 1);
+    assert.equal(report.candidate.divergedFromOriginMain, true);
+    assert.deepEqual(report.candidate.committedFiles, ["issue-commit.txt"]);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("dirty tracked plus untracked plus committed evidence is complete and bounded", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (role, cwd) => {
+      if (role === "review") return;
+      await writeFile(join(cwd, "committed.txt"), "committed\n");
+      await git(cwd, "add", "committed.txt");
+      await git(cwd, "commit", "-qm", "candidate commit");
+      await writeFile(join(cwd, "committed.txt"), "committed\ntracked dirty\n");
+      await writeFile(join(cwd, "untracked.txt"), "untracked body\n");
+    }, undefined, (role) => role === "review" ? { verdict: "pass" } : undefined);
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    const prompt = sessions[1]!.prompt;
+    assert.equal(report.disposition, "pass");
+    assert.ok(prompt.length < 256_000);
+    assert.match(prompt, /COMMITTED DIFF \(MERGE_BASE\.\.HEAD\):/);
+    assert.match(prompt, /\+committed/);
+    assert.match(prompt, /UNSTAGED DIFF:/);
+    assert.match(prompt, /\+tracked dirty/);
+    assert.match(prompt, /untracked body/);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("review refuses safely when exact untracked evidence exceeds the bound", async () => {
+  const fixtureState = await fixture();
+  try {
+    const factory = fakeFactory([], async (_role, cwd) => {
+      await writeFile(join(cwd, "huge.txt"), "x".repeat(260_000));
+    });
+    await assert.rejects(
+      runBootstrap(
+        { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+        dependenciesFor(fixtureState.root, factory, () => 0, []),
+      ),
+      /bounded reviewer packet/,
+    );
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("review pass is captured as an explicit verdict", async () => {
+  const fixtureState = await fixture();
+  try {
+    const factory = fakeFactory([], async () => undefined, undefined, (role) => role === "review" ? { verdict: "pass" } : undefined);
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+    assert.deepEqual(report.reviewerResult, { verdict: "pass" });
+    assert.equal(report.reviewPass, true);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("blocking reviewer findings fail review even when worker completed", async () => {
+  const fixtureState = await fixture();
+  try {
+    const factory = fakeFactory([], async () => undefined, undefined, (role) => role === "review" ? { verdict: "findings", findings: [{ severity: "blocking", path: "x.ts", summary: "wrong" }] } : undefined);
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+    assert.equal(report.reviewer?.disposition, "completed");
+    assert.equal(report.disposition, "blocked");
+    assert.equal(report.reviewPass, false);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("malformed or absent reviewer result fails closed", async () => {
+  const fixtureState = await fixture();
+  try {
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, fakeFactory([], async () => undefined), () => 0, []),
+    );
+    assert.equal(report.reviewer?.disposition, "completed");
+    assert.equal(report.reviewerResult, undefined);
+    assert.equal(report.disposition, "blocked");
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("reviewer findings are bounded and omit raw transcript fields", async () => {
+  const fixtureState = await fixture();
+  try {
+    const factory = fakeFactory([], async () => undefined, undefined, (role) => role === "review" ? {
+      verdict: "findings",
+      transcript: "hidden raw transcript",
+      findings: [{ severity: "warning", summary: "a".repeat(800) }],
+    } : undefined);
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+    assert.equal(report.disposition, "pass");
+    assert.equal(report.reviewerResult?.findings?.[0]?.summary.length, 500);
+    assert.ok(!JSON.stringify(report.reviewerResult).includes("hidden raw transcript"));
+  } finally {
+    await fixtureState.cleanup();
+  }
 });
