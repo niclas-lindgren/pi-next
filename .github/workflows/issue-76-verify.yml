@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/issue-76-scenarios
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -15,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: agent/issue-76-scenarios
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
