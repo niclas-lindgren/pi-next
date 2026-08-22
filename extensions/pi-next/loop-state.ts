@@ -66,8 +66,15 @@ export interface LoopUsage {
 }
 
 export interface LoopMetrics extends LoopUsage {
+  /** Legacy batch/session counter retained for persisted-state compatibility. */
   sessions: number;
   prompts: number;
+  /** Number of isolated child-worker turns launched by the controller. */
+  workerTurns?: number;
+  /** Number of controller transitions recorded by the run. */
+  controllerTransitions?: number;
+  /** Genuine Pi host-runtime replacements, never routine worker batches. */
+  hostSessionReplacements?: number;
   modelDurationMs: number;
   /** Count of prompts where child-worker usage telemetry could not be
    * recovered at all (#599) — distinct from a prompt that genuinely used
@@ -171,8 +178,12 @@ export interface LoopState {
   /** Requested issues not yet settled; deferred and blocked issues count as settled. */
   remainingIssues: number;
   step: number;
-  /** Current bounded session transition (1..3) for controller status display. */
+  /** Current bounded worker transition within a controller batch. */
+  workerBatchTransition?: number;
+  workerBatchTransitionLimit?: number;
+  /** @deprecated Read only for v1 persisted-state compatibility. */
   sessionTransition?: number;
+  /** @deprecated Read only for v1 persisted-state compatibility. */
   sessionTransitionLimit?: number;
   settledStep: number;
   maxSteps: number;
@@ -230,6 +241,9 @@ export function emptyLoopMetrics(): LoopMetrics {
     ...ZERO_USAGE,
     sessions: 0,
     prompts: 0,
+    workerTurns: 0,
+    controllerTransitions: 0,
+    hostSessionReplacements: 0,
     modelDurationMs: 0,
     telemetryUnavailable: 0,
   };
@@ -276,7 +290,7 @@ export function addPromptMetrics(
   metrics: LoopMetrics | undefined,
   delta: LoopUsage,
   durationMs: number,
-  newSession: boolean,
+  hostSessionReplaced: boolean,
   telemetryAvailable = true,
 ): LoopMetrics {
   const current = { ...emptyLoopMetrics(), ...metrics };
@@ -287,8 +301,13 @@ export function addPromptMetrics(
     cacheWrite: current.cacheWrite + delta.cacheWrite,
     totalTokens: current.totalTokens + delta.totalTokens,
     cost: current.cost + delta.cost,
-    sessions: current.sessions + (newSession ? 1 : 0),
+    // `sessions` historically counted pi-next-created batches. Keep it as a
+    // legacy field rather than silently changing old persisted telemetry.
+    sessions: current.sessions,
     prompts: current.prompts + 1,
+    workerTurns: (current.workerTurns || 0) + 1,
+    controllerTransitions: (current.controllerTransitions || 0) + 1,
+    hostSessionReplacements: (current.hostSessionReplacements || 0) + (hostSessionReplaced ? 1 : 0),
     modelDurationMs: current.modelDurationMs + Math.max(0, durationMs),
     telemetryUnavailable: current.telemetryUnavailable + (telemetryAvailable ? 0 : 1),
   };
@@ -299,14 +318,14 @@ export function addIssuePromptMetrics(
   issueNumber: number | undefined,
   delta: LoopUsage,
   durationMs: number,
-  newSession: boolean,
+  hostSessionReplaced: boolean,
   telemetryAvailable = true,
 ): LoopIssueMetrics[] {
   const current = [...(metrics || [])];
   if (!issueNumber || issueNumber <= 0) return current.slice(-MAX_ISSUE_METRICS);
   const index = current.findIndex((item) => item.issueNumber === issueNumber);
   const previous = index >= 0 ? current[index] : undefined;
-  const aggregate = addPromptMetrics(previous, delta, durationMs, newSession, telemetryAvailable);
+  const aggregate = addPromptMetrics(previous, delta, durationMs, hostSessionReplaced, telemetryAvailable);
   const next: LoopIssueMetrics = {
     ...aggregate,
     issueNumber,
@@ -509,13 +528,22 @@ export function readLoopState(cwd: string, runId?: string): LoopState | null {
   if (!existsSync(path)) return null;
   try {
     const state = JSON.parse(readFileSync(path, "utf8")) as LoopState;
+    const normalizeMetrics = <T extends LoopMetrics>(metric: T): T => ({
+      ...metric,
+      // These additive counters were introduced after v1 persisted states.
+      // Baseline them from historical prompts without reclassifying legacy
+      // `sessions` values as host-runtime replacements.
+      workerTurns: metric.workerTurns ?? metric.prompts ?? 0,
+      controllerTransitions: metric.controllerTransitions ?? metric.prompts ?? 0,
+      hostSessionReplacements: metric.hostSessionReplacements ?? 0,
+    });
     return {
       ...state,
       completedIssues: state.completedIssues || [],
       deferredIssues: state.deferredIssues || [],
       schedulerSkips: state.schedulerSkips || [],
-      issueMetrics: state.issueMetrics || [],
-      metrics: { ...emptyLoopMetrics(), ...state.metrics },
+      issueMetrics: (state.issueMetrics || []).map((metric) => normalizeMetrics(metric)),
+      metrics: normalizeMetrics({ ...emptyLoopMetrics(), ...state.metrics }),
       recovery: state.recovery
         ? {
             missingLoopResults: Math.max(0, Math.trunc(state.recovery.missingLoopResults || 0)),
@@ -617,7 +645,7 @@ function formatCount(value: number): string {
 
 function formatIssueMetric(metric: LoopIssueMetrics): string {
   const duration = (metric.modelDurationMs / 60_000).toFixed(1);
-  return `#${metric.issueNumber}:${metric.disposition} p=${metric.prompts} s=${metric.sessions} tok=${formatCount(metric.totalTokens)} min=${duration}`;
+  return `#${metric.issueNumber}:${metric.disposition} workers=${metric.workerTurns ?? metric.prompts} controller=${metric.controllerTransitions ?? metric.prompts} host_replacements=${metric.hostSessionReplacements ?? 0} tok=${formatCount(metric.totalTokens)} min=${duration}`;
 }
 
 export function safeLoopNotify(
@@ -656,7 +684,6 @@ export function notifyLoopState(
     : "none";
   const metrics = state.metrics || emptyLoopMetrics();
   const issueCount = state.completedIssues.length;
-  const sessionsPerIssue = issueCount ? (metrics.sessions / issueCount).toFixed(1) : "-";
   const tokensPerIssue = issueCount ? formatCount(metrics.totalTokens / issueCount) : "-";
   const cacheDenominator = metrics.input + metrics.cacheRead;
   const cacheRate = cacheDenominator
@@ -671,7 +698,7 @@ export function notifyLoopState(
     : "";
   safeLoopNotify(
     ctx,
-    `Pi loop ${state.status}: step=${state.step}/${state.maxSteps} issues_remaining=${state.remainingIssues} completed=${completed} deferred=${deferred} scheduler_skips=${schedulerSkips}\nTelemetry: sessions=${metrics.sessions} prompts=${metrics.prompts} sessions/issue=${sessionsPerIssue} tokens=${formatCount(metrics.totalTokens)} tokens/issue=${tokensPerIssue} cache_read=${formatCount(metrics.cacheRead)} cache_rate=${cacheRate} model_min=${(metrics.modelDurationMs / 60_000).toFixed(1)} elapsed_min=${elapsedMinutes}${cost}${recovery}${recent ? `\nRecent issues: ${recent}` : ""}${state.lastReason ? `\nReason: ${state.lastReason}` : ""}`,
+    `Pi loop ${state.status}: step=${state.step}/${state.maxSteps} issues_remaining=${state.remainingIssues} completed=${completed} deferred=${deferred} scheduler_skips=${schedulerSkips}\nTelemetry: worker_turns=${metrics.workerTurns || metrics.prompts} controller_transitions=${metrics.controllerTransitions || metrics.prompts} host_session_replacements=${metrics.hostSessionReplacements || 0} legacy_sessions=${metrics.sessions} prompts=${metrics.prompts} tokens=${formatCount(metrics.totalTokens)} tokens/issue=${tokensPerIssue} cache_read=${formatCount(metrics.cacheRead)} cache_rate=${cacheRate} model_min=${(metrics.modelDurationMs / 60_000).toFixed(1)} elapsed_min=${elapsedMinutes}${cost}${recovery}${recent ? `\nRecent issues: ${recent}` : ""}${state.lastReason ? `\nReason: ${state.lastReason}` : ""}`,
     ["failed", "blocked", "interrupted"].includes(state.status)
       ? "warning"
       : "info",

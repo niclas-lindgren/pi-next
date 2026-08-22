@@ -320,7 +320,12 @@ function productMetrics(metric: LoopIssueMetrics) {
   const cacheDenominator = finite(metric.input) + finite(metric.cacheRead);
   return {
     prompts,
+    // `sessions` is historical batch telemetry. New consumers should use the
+    // explicit counters below rather than infer host churn from it.
     sessions: finite(metric.sessions),
+    workerTurns: finite(metric.workerTurns ?? metric.prompts),
+    controllerTransitions: finite(metric.controllerTransitions ?? metric.prompts),
+    hostSessionReplacements: finite(metric.hostSessionReplacements),
     input: finite(metric.input),
     output: finite(metric.output),
     freshTokens: issueFreshTokens,

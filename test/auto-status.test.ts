@@ -12,6 +12,7 @@ import {
 } from "../extensions/pi-next/commands-recovery.ts";
 import { type LoopState } from "../extensions/pi-next/loop-state.ts";
 import { currentSupervisorStatus, formatSupervisorStatus } from "../extensions/pi-next/foreground-supervisor.ts";
+import { bindLiveAutoRun, clearLiveCtx } from "../extensions/pi-next/live-ctx.ts";
 
 function state(runId: string, updatedAt: string, overrides: Partial<LoopState> = {}): LoopState {
   return {
@@ -112,6 +113,37 @@ test("auto footer updates in place and preserves a terminal status", async () =>
   } finally {
     // stop is idempotent and also protects the test process from a leaked timer.
     stop();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("final command repaint uses its valid context after supervisor clears the live bridge", async () => {
+  const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-final-repaint-"));
+  try {
+    const runId = "recovered-final-run";
+    const dir = join(cwd, ".pi", "runtime", "pi-next-loops", runId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:00.000Z", {
+      status: "stopped",
+      activeIssueNumber: 641,
+      lastReason: "host_memory_pressure: restart_required",
+    })));
+    const statuses: Array<[string, string | undefined]> = [];
+    const ctx = context(cwd, statuses, "recovery-session");
+    let preferredRunId: string | undefined;
+    const stop = startAutoStatusHeartbeat(ctx, () => preferredRunId, { replaceExisting: true });
+    try {
+      assert.match(statuses.at(-1)?.[1] || "", /no issue attached/);
+      preferredRunId = runId;
+      clearLiveCtx();
+      stop();
+      assert.match(statuses.at(-1)?.[1] || "", /#641/);
+      assert.doesNotMatch(statuses.at(-1)?.[1] || "", /no issue attached/);
+      assert.ok(statuses.every(([, text]) => text !== undefined));
+    } finally {
+      stop();
+    }
+  } finally {
     await rm(cwd, { recursive: true, force: true });
   }
 });
@@ -278,6 +310,142 @@ test("bound footer handoff survives repeated mocked newSession transitions befor
       stop();
     }
   } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("host teardown keeps a bound footer visible across ten outer lifecycle transitions", async () => {
+  const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-host-lifecycle-"));
+  try {
+    const runId = "host-bound-run";
+    const runDir = join(cwd, ".pi", "runtime", "pi-next-loops", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:00.000Z", {
+      activeIssueNumber: 70,
+      sessionId: "host-old-session",
+    })));
+
+    // Model Pi's host-owned status map separately from extension callbacks.
+    // Teardown clears the session-scoped map and schedules a render; the real
+    // host coalesces that render with the replacement-session paint.
+    const visible: Array<string | undefined> = [];
+    const order: string[] = [];
+    let current: string | undefined;
+    let renderQueued = false;
+    const host = {
+      setStatus: (_key: string, text: string | undefined) => {
+        current = text;
+        renderQueued = true;
+        order.push("bound-footer-paint");
+      },
+      teardown: () => {
+        current = undefined;
+        renderQueued = true;
+        order.push("host-ui-teardown");
+      },
+      flush: () => {
+        if (!renderQueued) return;
+        renderQueued = false;
+        visible.push(current);
+        order.push("visible-frame");
+      },
+    };
+
+    const events = new Map<string, (event: any, ctx: ExtensionCommandContext) => unknown>();
+    const pi = {
+      registerCommand: () => undefined,
+      on: (name: string, handler: (event: unknown, ctx: ExtensionCommandContext) => unknown) => events.set(name, handler),
+    } as unknown as ExtensionAPI;
+    registerPiNextCommands(pi);
+
+    const oldCtx = context(cwd, [], "host-old-session", "/tmp/host-old.json");
+    oldCtx.ui.setStatus = host.setStatus;
+    const stop = startAutoStatusHeartbeat(oldCtx, () => undefined);
+    // Mirror the outer controller path: the heartbeat starts before recovery
+    // creates/binds the run, then the controller establishes exact identity.
+    bindLiveAutoRun(oldCtx, runId);
+    try {
+      host.flush();
+      assert.match(visible.at(-1) || "", /#70/);
+      let currentCtx = oldCtx;
+      for (let transition = 0; transition < 10; transition += 1) {
+        const nextFile = `/tmp/host-new-${transition}.json`;
+        const nextCtx = context(cwd, [], `host-new-${transition}`, nextFile);
+        nextCtx.ui.setStatus = host.setStatus;
+        order.push("session_shutdown");
+        events.get("session_shutdown")?.({
+          type: "session_shutdown",
+          reason: "new",
+          targetSessionFile: nextFile,
+        }, currentCtx);
+        // This is the host's teardown point. No render is allowed to observe
+        // the cleared map before session_start repaints the exact bound run.
+        host.teardown();
+        order.push("session_start");
+        events.get("session_start")?.({
+          type: "session_start",
+          reason: "new",
+          previousSessionFile: currentCtx.sessionManager.getSessionFile?.(),
+        }, nextCtx);
+        host.flush();
+        currentCtx = nextCtx;
+      }
+      assert.equal(visible.length, 11);
+      assert.ok(visible.every((text) => text !== undefined), `visible frames: ${visible.join(" | ")}`);
+      assert.ok(visible.every((text) => text?.includes("#70")), `wrong bound footer: ${visible.join(" | ")}`);
+      let cursor = order.indexOf("session_shutdown");
+      for (let transition = 0; transition < 10; transition += 1) {
+        const frame = order.indexOf("visible-frame", cursor);
+        assert.deepEqual(order.slice(cursor, frame + 1), [
+          "session_shutdown",
+          "host-ui-teardown",
+          "session_start",
+          "bound-footer-paint",
+          "visible-frame",
+        ]);
+        cursor = order.indexOf("session_shutdown", frame + 1);
+      }
+    } finally {
+      stop();
+    }
+  } finally {
+    clearLiveCtx();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("concurrent bound supervisors never paint one another's footer", async () => {
+  const cwd = await mkdtemp(join("/tmp", "pi-next-auto-status-isolation-"));
+  try {
+    const runs = [
+      ["agent-a-run", "agent-a-session", 70],
+      ["agent-b-run", "agent-b-session", 71],
+    ] as const;
+    for (const [runId, sessionId, issueNumber] of runs) {
+      const dir = join(cwd, ".pi", "runtime", "pi-next-loops", runId);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "state.json"), JSON.stringify(state(runId, "2026-01-01T00:00:00.000Z", {
+        activeIssueNumber: issueNumber,
+        sessionId,
+      })));
+    }
+    const statuses = new Map<string, Array<[string, string | undefined]>>();
+    const contexts = runs.map(([, sessionId]) => {
+      const paints: Array<[string, string | undefined]> = [];
+      statuses.set(sessionId, paints);
+      return context(cwd, paints, sessionId, `/tmp/${sessionId}.json`);
+    });
+    const stops = contexts.map((ctx, index) => startAutoStatusHeartbeat(ctx, () => runs[index][0]));
+    try {
+      assert.match(statuses.get("agent-a-session")?.at(-1)?.[1] || "", /#70/);
+      assert.doesNotMatch(statuses.get("agent-a-session")?.at(-1)?.[1] || "", /#71/);
+      assert.match(statuses.get("agent-b-session")?.at(-1)?.[1] || "", /#71/);
+      assert.doesNotMatch(statuses.get("agent-b-session")?.at(-1)?.[1] || "", /#70/);
+    } finally {
+      stops.forEach((stop) => stop());
+    }
+  } finally {
+    clearLiveCtx();
     await rm(cwd, { recursive: true, force: true });
   }
 });

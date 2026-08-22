@@ -16,6 +16,8 @@ export interface HostMemoryBoundaryContext {
   runId?: string;
   issueNumber?: number;
   step?: number;
+  workerBatchTransition?: number;
+  /** @deprecated Read-only compatibility for historical samples. */
   sessionTransition?: number;
 }
 

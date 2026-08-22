@@ -35,7 +35,7 @@ const PERIODIC_REVIEW_EVERY = 10;
 const EVALUATE_AFTER_ISSUES = 3;
 const MIN_RELATIVE_PEERS = 3;
 const SEVERE_PROMPTS = 12;
-const SEVERE_SESSIONS = 8;
+const SEVERE_WORKER_TURNS = 8;
 const SEVERE_FRESH_TOKENS = 750_000;
 const SEVERE_WALL_MS = 60 * 60_000;
 const MIN_RELATIVE_FRESH_TOKENS = 250_000;
@@ -356,8 +356,9 @@ export function maintenanceDecision(state: LoopState): MaintenanceDecision | nul
     if (metrics.prompts >= SEVERE_PROMPTS) {
       reasons.push(`severe transition count (${metrics.prompts} prompts)`);
     }
-    if (metrics.sessions >= SEVERE_SESSIONS) {
-      reasons.push(`severe session count (${metrics.sessions} sessions)`);
+    const workerTurns = metrics.workerTurns ?? metrics.prompts;
+    if (workerTurns >= SEVERE_WORKER_TURNS) {
+      reasons.push(`severe worker-turn count (${workerTurns} worker turns)`);
     }
     if (issueFreshTokens >= SEVERE_FRESH_TOKENS) {
       reasons.push(`severe fresh token use (${Math.round(issueFreshTokens)} input+output)`);
@@ -404,7 +405,7 @@ export function maintenanceDecision(state: LoopState): MaintenanceDecision | nul
   if (periodic) reasons.push(`periodic ${PERIODIC_REVIEW_EVERY}-issue regression review`);
   const shouldTune = reasons.length > 0;
   const summary = metrics
-    ? `issue=#${issueNumber} prompts=${metrics.prompts} sessions=${metrics.sessions} input=${metrics.input} output=${metrics.output} cacheRead=${metrics.cacheRead} total=${metrics.totalTokens} transitionWallMs=${metrics.modelDurationMs} cost=${metrics.cost}`
+    ? `issue=#${issueNumber} workerTurns=${metrics.workerTurns ?? metrics.prompts} controllerTransitions=${metrics.controllerTransitions ?? metrics.prompts} hostSessionReplacements=${metrics.hostSessionReplacements ?? 0} legacySessions=${metrics.sessions} prompts=${metrics.prompts} input=${metrics.input} output=${metrics.output} cacheRead=${metrics.cacheRead} total=${metrics.totalTokens} transitionWallMs=${metrics.modelDurationMs} cost=${metrics.cost}`
     : `issue=#${issueNumber} telemetry=missing`;
   return { issueNumber, completedCount, reasons, shouldTune, summary };
 }
@@ -673,8 +674,11 @@ export async function runIssueBoundaryMaintenance(
   const tuningUsage = {
     ...emptyLoopMetrics(),
     ...usageDelta(sessionUsage(ctx), before),
-    sessions: 1,
+    sessions: 0,
     prompts: 1,
+    workerTurns: 1,
+    controllerTransitions: 1,
+    hostSessionReplacements: 0,
     modelDurationMs: tuningDurationMs,
   };
 

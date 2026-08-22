@@ -36,7 +36,11 @@ import {
   type ProjectStatusAuthority,
   ProjectStatusSyncError,
 } from "./types.ts";
-import { readAuthorityWithTransientRetry } from "./authority-read-policy.ts";
+import {
+  authorityOperationTimeoutMs,
+  readAuthorityWithTransientRetry,
+  withAuthorityTimeout,
+} from "./authority-read-policy.ts";
 import { loadPiNextConfig } from "./config.ts";
 
 export type { IssueLease } from "./issue-authority.ts";
@@ -149,23 +153,37 @@ export class GitHubIssueLeaseAuthority implements IssueLeaseAuthority {
   constructor(private readonly cwd = process.cwd()) {}
 
   private async gh(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync("gh", ["api", ...args], {
-      cwd: this.cwd,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-    });
+    const timeoutMs = authorityOperationTimeoutMs();
+    const { stdout } = await withAuthorityTimeout(
+      `gh api ${args.join(" ")}`,
+      execFileAsync("gh", ["api", ...args], {
+        cwd: this.cwd,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout: timeoutMs,
+        killSignal: "SIGTERM",
+      }),
+      timeoutMs,
+    );
     return stdout.trim();
   }
 
   private async repo(): Promise<string> {
     if (!this.repository) {
-      const { stdout } = await execFileAsync(
-        "gh",
-        ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-        {
-          cwd: this.cwd,
-          encoding: "utf8",
-        },
+      const timeoutMs = authorityOperationTimeoutMs();
+      const { stdout } = await withAuthorityTimeout(
+        "gh repo view",
+        execFileAsync(
+          "gh",
+          ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+          {
+            cwd: this.cwd,
+            encoding: "utf8",
+            timeout: timeoutMs,
+            killSignal: "SIGTERM",
+          },
+        ),
+        timeoutMs,
       );
       this.repository = stdout.trim();
     }
@@ -709,10 +727,17 @@ export async function reconcileIssueLeaseForResume(
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-    cwd,
-    encoding: "utf8",
-  });
+  const timeoutMs = authorityOperationTimeoutMs();
+  const { stdout } = await withAuthorityTimeout(
+    `git ${args.join(" ")}`,
+    execFileAsync("git", ["-C", cwd, ...args], {
+      cwd,
+      encoding: "utf8",
+      timeout: timeoutMs,
+      killSignal: "SIGTERM",
+    }),
+    timeoutMs,
+  );
   return stdout.trim();
 }
 

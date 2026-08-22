@@ -11,6 +11,10 @@ import { promisify } from "node:util";
 
 import type { PiNextConfig } from "./config.ts";
 import type { SelfAssessmentFinding } from "./self-assessment.ts";
+import {
+  authorityOperationTimeoutMs,
+  withAuthorityTimeout,
+} from "./authority-read-policy.ts";
 
 const execFileAsync = promisify(execFile);
 const PENDING_VERIFICATION_MARKER = "<!-- pi-next-pending-verification -->";
@@ -266,34 +270,40 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
     atomicOwnership: false,
     projectStatus: false,
   });
-  private readonly cache = new Map<string, AuthorityWorkItem>();
 
   constructor(private readonly cwd = process.cwd()) {}
 
   private async gh(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync("gh", args, {
-      cwd: this.cwd,
-      encoding: "utf8",
-      maxBuffer: 2 * 1024 * 1024,
-    });
+    const timeoutMs = authorityOperationTimeoutMs();
+    const { stdout } = await withAuthorityTimeout(
+      `gh ${args.join(" ")}`,
+      execFileAsync("gh", args, {
+        cwd: this.cwd,
+        encoding: "utf8",
+        maxBuffer: 2 * 1024 * 1024,
+        timeout: timeoutMs,
+        killSignal: "SIGTERM",
+      }),
+      timeoutMs,
+    );
     return stdout;
   }
 
   async listCandidates(config: PiNextConfig): Promise<AuthorityWorkItem[]> {
+    // Each configured priority query is independently bounded by gh(); keeping
+    // the label filter preserves priority completeness even when GitHub's
+    // per-query limit is reached by a large lower-priority queue.
     const result: AuthorityWorkItem[] = [];
     for (const priority of config.selection.priorities) {
-      const { stdout } = await execFileAsync(
-        "gh",
-        ["issue", "list", "--state", "open", "--label", `priority: ${priority}`, "--limit", "100", "--json", "number,title,state,updatedAt,labels,comments"],
-        { cwd: this.cwd, maxBuffer: 2 * 1024 * 1024, encoding: "utf8" },
-      );
-      const issues = JSON.parse(stdout) as unknown;
+      const issues = JSON.parse(await this.gh([
+        "issue", "list", "--state", "open", "--label", `priority: ${priority}`,
+        "--limit", "100", "--json", "number,title,state,updatedAt,labels,comments",
+      ])) as unknown;
       if (!Array.isArray(issues)) throw new Error("Authority adapter returned a non-array candidate response");
       for (const raw of issues) {
         if (!raw || typeof raw !== "object") throw new Error("Authority adapter returned an invalid work item");
         const item = fromGitHub(raw as Record<string, unknown>);
         item.priority = item.priority || priority;
-        this.cache.set(item.id, item);
         result.push(item);
       }
     }
@@ -305,7 +315,6 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
     const value = JSON.parse(stdout);
     if (!value || typeof value !== "object") throw new Error("Authority adapter returned an invalid work item");
     const item = fromGitHub(value as Record<string, unknown>);
-    this.cache.set(item.id, item);
     return item;
   }
 
@@ -319,7 +328,6 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
 
   async close(id: string, comment: string): Promise<void> {
     await this.gh(["issue", "close", id, "--comment", comment]);
-    this.cache.delete(id);
   }
 
   async markPendingVerification(id: string, record: PendingVerificationRecord): Promise<void> {
@@ -327,7 +335,6 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
     const item = await this.get(id);
     if (item.comments.some((entry) => entry.body === comment)) return;
     await this.gh(["issue", "comment", id, "--body", comment]);
-    this.cache.delete(id);
   }
 
   async recordPendingVerificationResult(id: string, result: PendingVerificationResult): Promise<void> {
@@ -335,7 +342,6 @@ export class GitHubWorkAuthority implements WorkAuthorityAdapter {
     const item = await this.get(id);
     if (item.comments.some((entry) => entry.body === comment)) return;
     await this.gh(["issue", "comment", id, "--body", comment]);
-    this.cache.delete(id);
   }
 
   private async verifyFindingGovernance(

@@ -1,5 +1,117 @@
 # Changelog
 
+## 0.2.68 - prepared release
+
+Bound stable-host candidate discovery and scheduler liveness.
+
+### Material changes
+
+- Bound GitHub discovery, lease, and main-refresh operations with cancellation and explicit unavailable diagnostics.
+- Inspect candidate leases progressively with capped concurrency instead of fanning out across the entire open queue.
+- Surface refresh, query, lease-check, and timeout phases through the stable supervisor display.
+
+### Compatibility/configuration/schema
+
+- Existing lease/CAS, loop-state, and host-session telemetry contracts remain compatible.
+- `PI_NEXT_AUTHORITY_TIMEOUT_MS` optionally overrides the default authority operation timeout.
+
+### Breaking/behavior changes
+
+- Candidate selection now fails closed as unavailable when authority I/O exceeds its operation or scheduler deadline; it is never mistaken for an empty queue.
+
+### Security/safety
+
+- Foreign leases remain candidate-local skips and final claim ownership remains authoritative CAS.
+- Authority payloads are not retained indefinitely in the parent process.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
+## 0.2.67 - prepared release
+
+Stable parent-host auto lifecycle release.
+
+### Material changes
+
+- Keep normal auto progression on one interactive Pi host session while isolated child workers provide fresh planning, implementation, repair, review, verification, and maintenance context.
+- Remove routine host-session rotation and expose worker/controller/host-replacement telemetry separately.
+- Preserve genuine host lifecycle rebinding, memory-pressure fencing, and concurrent run isolation.
+
+### Compatibility/configuration/schema
+
+- Legacy session and transition fields remain readable with additive telemetry migration defaults.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Ordinary worker, scheduler, maintenance, and issue transitions no longer call `ctx.newSession()` or display worker batches as host sessions.
+
+### Security/safety
+
+- Child workers continue to reconstruct state from explicit durable artifacts, authority, configuration, and canonical worktree inputs.
+- Host memory pressure remains a restart-required safety fence.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
+## 0.2.66 - pending release
+
+Bound auto-footer host-lifecycle handoff release.
+
+### Material changes
+
+- Persist and repaint the exact bound auto-footer run when the host tears down and replaces a session.
+- Bind the presentation identity before the first transition and isolate heartbeat writes by cwd/session context.
+- Add host-lifecycle coverage for ten transitions, scheduler/recovery-compatible states, and concurrent bound supervisors.
+
+### Compatibility/configuration/schema
+
+- Existing loop state, lease, and footer status contracts remain compatible.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- A bound auto run no longer waits for the heartbeat to restore its footer after session replacement.
+
+### Security/safety
+
+- Presentation bindings never grant workflow authority and exact-run repaint does not weaken conservative generic selection.
+- Foreign session contexts are not used for concurrent footer writes; explicit footer clearing remains unchanged.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
+## 0.2.65 - pending release
+
+Bound auto-footer final repaint release.
+
+### Material changes
+
+- Repaint the exact recovered auto run during command finalization even after supervisor teardown clears the live-context bridge.
+- Keep the heartbeat free of strong stale-context fallbacks while allowing one final repaint through the valid command context.
+- Add regression coverage for neutral initial status, recovered binding, supervisor cleanup, and terminal final status.
+
+### Compatibility/configuration/schema
+
+- Existing footer binding and session lifecycle contracts remain compatible.
+- No new configuration is required.
+
+### Breaking/behavior changes
+
+- Completed auto commands retain the exact durable terminal status instead of leaving the initial neutral placeholder visible.
+
+### Security/safety
+
+- Final repaint uses only the command's still-valid context and an already-established run ID; it does not infer workflow authority or weaken ambiguous status selection.
+- Parallel session isolation and explicit footer clearing remain unchanged.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.64 - pending release
 
 Parent-host retention follow-up release.

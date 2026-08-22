@@ -14,8 +14,11 @@ import {
   ForegroundSupervisor,
 } from "./foreground-supervisor.ts";
 import {
+  bindLiveAutoRun,
   getLiveCtx,
+  getLiveCtxFor,
   liveAutoRunBinding,
+  onLiveAutoRunBound,
   sessionIdentity,
   setLiveCtx,
 } from "./live-ctx.ts";
@@ -60,6 +63,10 @@ type AutoStatusBinding = {
   ownerSessionId?: string;
   sessionFile?: string;
   targetSessionFile?: string;
+  /** Last exact-run paint used as a presentation-only handoff fallback. */
+  lastText?: string;
+  /** Immediate repaint hook for controller binding, never persisted. */
+  repaint?: () => void;
   active: boolean;
   heartbeatActive: boolean;
 };
@@ -100,6 +107,7 @@ function persistStatusBinding(binding: AutoStatusBinding): void {
       ownerSessionId: binding.ownerSessionId,
       sessionFile: binding.sessionFile,
       targetSessionFile: binding.targetSessionFile,
+      lastText: binding.lastText,
       active: binding.active,
     });
   } catch {
@@ -118,6 +126,7 @@ function readPersistedStatusBinding(cwd: string, runId: string): AutoStatusBindi
       ownerSessionId: value.ownerSessionId,
       sessionFile: value.sessionFile,
       targetSessionFile: value.targetSessionFile,
+      lastText: value.lastText,
       active: true,
       heartbeatActive: false,
     };
@@ -157,6 +166,26 @@ function findReplacementBinding(
   }
   return undefined;
 }
+
+// Bind presentation identity as soon as the controller creates the run, not
+// only on the next heartbeat or at session shutdown. Workflow authority stays
+// in the lease/controller state; this observer only makes the UI handoff
+// durable before the first host transition can occur.
+onLiveAutoRunBound((ctx, runId) => {
+  const ownerSessionId = sessionIdentity(ctx);
+  const binding = [...autoStatusBindings].find((candidate) =>
+    candidate.active &&
+    candidate.cwd === ctx.cwd &&
+    (!ownerSessionId || candidate.ownerSessionId === ownerSessionId) &&
+    (!candidate.runId || candidate.runId === runId),
+  );
+  if (!binding) return;
+  binding.runId = runId;
+  binding.ownerSessionId = ownerSessionId || binding.ownerSessionId;
+  binding.sessionFile = sessionFile(ctx) || binding.sessionFile;
+  persistStatusBinding(binding);
+  binding.repaint?.();
+});
 
 function processAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -306,7 +335,7 @@ export function startAutoStatusHeartbeat(
     // completion is not a request to clear the footer; the durable terminal
     // state is the useful handoff to the operator and to a replacement
     // session. Shutdown cancels first, so this never touches a disposed ctx.
-    update();
+    update(ctx);
     binding.active = false;
     persistStatusBinding(binding);
     autoStatusBindings.delete(binding);
@@ -314,11 +343,18 @@ export function startAutoStatusHeartbeat(
   };
   autoStatusHeartbeatCancellations.add(cancel);
 
-  const update = () => {
+  const update = (finalCtx?: ExtensionCommandContext) => {
     // session_shutdown cancels the timer before the replacement context is
     // disposed. This guard also handles an already queued timer callback.
     if (!active) return;
-    const liveCtx = getLiveCtx();
+    // The heartbeat intentionally has no strong fallback to the initial host
+    // context. Command finalization may, however, still have a valid direct
+    // context after the supervisor has cleared the live bridge, so stop()
+    // supplies it for one final exact-run repaint.
+    const boundSessionId = binding.ownerSessionId || ownerSessionId;
+    const liveCtx = getLiveCtxFor(cwd, boundSessionId) ??
+      (boundSessionId === ownerSessionId ? getLiveCtx() : undefined) ??
+      finalCtx;
     if (liveCtx) {
       // Bind once to this session's own durable run. Before that happens,
       // deliberately render a neutral state instead of borrowing the newest
@@ -334,20 +370,23 @@ export function startAutoStatusHeartbeat(
         binding.sessionFile = sessionFile(liveCtx);
         persistStatusBinding(binding);
       }
-      setAutoStatusSafely(
-        liveCtx,
-        autoStatusText(
-          cwd,
-          startedAt,
-          boundRunId,
-          ownerSessionId,
-          version,
-          Boolean(options.replaceExisting && firstUpdate),
-        ),
+      const text = autoStatusText(
+        cwd,
+        startedAt,
+        boundRunId,
+        ownerSessionId,
+        version,
+        Boolean(options.replaceExisting && firstUpdate),
       );
+      setAutoStatusSafely(liveCtx, text);
+      if (boundRunId && binding.runId === boundRunId) binding.lastText = text;
     }
     firstUpdate = false;
   };
+  // Controller binding can happen after the heartbeat's neutral first paint;
+  // expose the same exact-run update synchronously so recovery does not wait
+  // for AUTO_STATUS_INTERVAL_MS to repair the footer.
+  binding.repaint = update;
   const timer = setInterval(update, AUTO_STATUS_INTERVAL_MS);
   timer.unref?.();
   update();
@@ -515,7 +554,7 @@ export async function prepareAbandonedAutoResume(
       runId: state.runId,
       issueNumber,
       step: state.step,
-      sessionTransition: state.sessionTransition,
+      workerBatchTransition: state.workerBatchTransition ?? state.sessionTransition,
     },
     undefined,
     undefined,
@@ -607,23 +646,33 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
     setLiveCtx(ctx);
     const binding = findReplacementBinding(ctx, event);
     if (binding?.runId) {
+      // Rebind the supervisor run to the replacement context. This keeps
+      // concurrent runs from borrowing the process-global newest context.
+      bindLiveAutoRun(ctx, binding.runId);
       const ownerSessionId = sessionIdentity(ctx);
       const state = activeAutoStatusRun(ctx.cwd, binding.runId, ownerSessionId);
       // A missing exact state must not fall back to another historical run.
-      if (!state) return;
+      // The last exact-run paint is safe as a presentation-only handoff while
+      // an atomic durable-state write is becoming visible; it never grants
+      // authority or changes workflow selection.
+      if (!state && !binding.lastText) return;
       binding.ownerSessionId = ownerSessionId || binding.ownerSessionId;
       binding.sessionFile = sessionFile(ctx) || binding.targetSessionFile || binding.sessionFile;
       binding.targetSessionFile = undefined;
       persistStatusBinding(binding);
-      setAutoStatusSafely(ctx, autoStatusText(
-        ctx.cwd,
-        Date.now(),
-        binding.runId,
-        ownerSessionId,
-        piNextRuntimeIdentity().version,
-      ));
+      const text = state
+        ? autoStatusText(
+          ctx.cwd,
+          Date.now(),
+          binding.runId,
+          ownerSessionId,
+          piNextRuntimeIdentity().version,
+        )
+        : binding.lastText!;
+      setAutoStatusSafely(ctx, text);
+      binding.lastText = text;
       if (
-        state.status === "running" &&
+        state?.status === "running" &&
         controllerPid(ctx.cwd, state) === process.pid &&
         !binding.heartbeatActive
       ) {
