@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -42,6 +42,16 @@ function assertIssueNumber(issueNumber: number): void {
   }
 }
 
+function resolveInside(base: string, path: string, label: string): string {
+  const root = resolve(base);
+  const target = resolve(root, path);
+  const rel = relative(root, target);
+  if (rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel)) {
+    throw new Error(`${label} escapes fixture root: ${path}`);
+  }
+  return target;
+}
+
 export async function createDisposableGitFixture(
   options: DisposableGitFixtureOptions = {},
 ): Promise<DisposableGitFixture> {
@@ -61,8 +71,7 @@ export async function createDisposableGitFixture(
     const paths = Object.keys(initialFiles);
     if (paths.length === 0) throw new Error("disposable Git fixture requires at least one initial file");
     for (const [path, content] of Object.entries(initialFiles)) {
-      const target = resolve(repo, path);
-      if (target !== repo && !target.startsWith(`${repo}/`)) throw new Error(`fixture path escapes repository: ${path}`);
+      const target = resolveInside(repo, path, "fixture path");
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, content);
     }
@@ -80,9 +89,7 @@ export async function createDisposableGitFixture(
       origin,
       git: runGit,
       async write(cwd, path, content) {
-        const base = resolve(cwd);
-        const target = resolve(base, path);
-        if (target !== base && !target.startsWith(`${base}/`)) throw new Error(`fixture path escapes working tree: ${path}`);
+        const target = resolveInside(cwd, path, "fixture path");
         await mkdir(dirname(target), { recursive: true });
         await writeFile(target, content);
       },
