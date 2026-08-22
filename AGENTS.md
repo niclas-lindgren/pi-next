@@ -36,17 +36,33 @@ before selecting the next issue.
   verification transition, or terminal lifecycle transition impossible.
 - **Persisted-state semantics require migration discipline.** Any change that
   starts interpreting already-persisted runtime, worktree, PLAN, lease,
-  telemetry, or budget state differently must include upgrade compatibility.
-  New limits and counters must be baselined or migrated rather than applied
-  retroactively to historical measurements unless that behavior is explicitly
-  safe and tested.
-- **Host-session lifetime and worker-context freshness are separate.** Normal
-  `/pi-next auto` execution keeps one stable parent Pi host session. Fresh model
-  context is provided by isolated child worker processes and explicit durable
-  state/authority rehydration, not by routine `ctx.newSession()` calls. Reserve
-  Pi host-session replacement for genuine Pi/user lifecycle operations and use
-  the replacement context after such a transition. See
-  `docs/HOST_SESSION_LIFECYCLE.md`.
+  telemetry, journal, or budget state differently must include upgrade
+  compatibility. New limits and counters must be baselined or migrated rather
+  than applied retroactively to historical measurements unless that behavior is
+  explicitly safe and tested.
+- **The worker harness is not lifecycle authority.** Pi is the current/default
+  worker adapter, not the identity of the kernel. Worker adapters may execute a
+  bounded role in an already-authorized canonical workspace; they must not
+  discover/claim work, grant ownership, choose another workspace, weaken live
+  authority, promote/close work, or make model self-report authoritative. Keep
+  Pi-specific session/process behavior below the worker-adapter boundary. See
+  `docs/WORKER_ADAPTER.md` and `docs/WORKERS.md`.
+- **Host-session lifetime and worker-context freshness are separate.** For the
+  current Pi adapter, normal `/pi-next auto` execution keeps one stable parent
+  Pi host session while fresh model context comes from isolated child worker
+  processes and explicit durable state/authority rehydration. Do not generalize
+  that Pi-specific mechanism into the kernel worker contract. Reserve Pi
+  `ctx.newSession()` for genuine Pi/user lifecycle operations and use the
+  replacement context afterward. See `docs/HOST_SESSION_LIFECYCLE.md`.
+- **Reference-driven reliability before reinvention.** Before adding a
+  non-trivial lifecycle, persistence, context, execution, evaluation, or
+  recovery mechanism, inspect mature implementations of that narrow problem and
+  record an `adopt`, `adapter`, or `reject` decision in
+  `docs/EVALUATION_AND_RELIABILITY.md`. Reuse useful proven invariants without
+  importing an unnecessary orchestration platform.
+- **Independent grading.** Worker completion prose is never sufficient evidence
+  that a task is correct. Real-worker evaluation must separate candidate
+  generation from hidden/mechanical grading and lifecycle assertions.
 
 ## Required issue loop
 
@@ -89,18 +105,17 @@ before selecting the next issue.
    plan or verification artifact remains, and integration into `origin/main` is
    proven. Preserve the remote branch when it is useful for audit or recovery.
    Never delete dirty, unintegrated, foreign, or ambiguous workspaces.
-8. **Reset the issue worker context, not the parent Pi host session.** After
+8. **Reset the issue worker context, not the parent host lifecycle.** After
    every completed or explicitly deferred issue, release its lease and clean or
    preserve its workspace according to the cleanup rule above, then terminate
    the current isolated issue worker/context before selecting another issue.
-   Start the next issue in a fresh isolated child worker/model context and
-   re-read the live issue and repository policy from scratch. Do not carry the
-   prior issue's plan, transcript, assumptions, or authority snapshot into the
-   next worker. **Do not call `ctx.newSession()` merely to achieve this
-   freshness**; the `/pi-next auto` parent Pi host session should remain stable
-   during ordinary progression. `ctx.newSession()`/fork/switch/reload handling
-   is for genuine host lifecycle replacement and must use the replacement
-   context afterward. See `docs/HOST_SESSION_LIFECYCLE.md`.
+   Start the next issue in a fresh bounded worker context and re-read the live
+   issue and repository policy from scratch. Do not carry the prior issue's
+   plan, transcript, assumptions, or authority snapshot into the next worker.
+   For the Pi adapter, do not call `ctx.newSession()` merely to achieve this
+   freshness; the `/pi-next auto` parent Pi host session should remain stable
+   during ordinary progression. Another worker adapter may implement freshness
+   differently while preserving the same kernel contract.
 9. **Continue safely.** Re-query open GitHub issues after every completed,
    explicitly deferred, yielded, or safely contained issue and only after any
    required worker-context reset. Continue for issue-local failures that have
@@ -114,19 +129,26 @@ before selecting the next issue.
    state. At exhaustion, report what was completed, deferred, yielded, blocked,
    or skipped and leave `git status` clean.
 
-Prefer `/pi-next auto` for this loop. For manual operation, use the same
-sequence and the coordination/finalization tooling; do not replace its safety
+Prefer `/pi-next auto` for this loop while Pi remains the configured/default
+worker host. For manual operation or future worker adapters, use the same kernel
+sequence and coordination/finalization tooling; do not replace its safety
 checks with ad-hoc `git merge`, `git push --force`, issue closure, or workspace
 deletion commands.
 
 ## Controller and recovery regression testing
 
 Changes to scheduling, recovery, leases, PLAN handling, checkpoints,
-convergence, lifecycle, worker supervision, or command/session orchestration
-must include a regression through the **outermost production path that
-originally failed**. Helper or unit tests are necessary but are not sufficient
-when a higher-level preflight, supervisor, command wrapper, session boundary,
-or lifecycle guard can bypass or contradict the helper.
+convergence, lifecycle, worker supervision, adapter dispatch,
+command/session orchestration, or persisted event/replay state must include a
+regression through the **outermost production path that originally failed**.
+Helper or unit tests are necessary but are not sufficient when a higher-level
+preflight, supervisor, command wrapper, session boundary, adapter, or lifecycle
+guard can bypass or contradict the helper.
+
+Most protocol regressions should use a scripted worker rather than a real LLM.
+Real-worker tests belong in the independent canary/evaluation layer after
+protocol and Git integration tests pass. Use fault injection and historical
+incident replay where the failure involved a partial transition or restart.
 
 For a live reproducer, preserve the real ordering in at least one behavioral
 regression. Examples include:
@@ -139,11 +161,15 @@ regression. Examples include:
   worktree resume;
 - upgrade from prior persisted state -> new scheduler/budget semantics applied
   only after explicit baseline or migration;
-- 20+ ordinary worker/controller transitions -> fresh isolated child workers ->
-  unchanged parent Pi host-session identity -> zero Pi-next-initiated
+- 20+ ordinary Pi worker/controller transitions -> fresh isolated child workers
+  -> unchanged parent Pi host-session identity -> zero Pi-next-initiated
   `ctx.newSession()` calls;
-- genuine external host-session replacement -> old context rejected/stale ->
-  replacement context rebound safely.
+- genuine external Pi host-session replacement -> old context rejected/stale ->
+  replacement context rebound safely;
+- the same provider-neutral dispatch executed by a scripted/non-Pi adapter ->
+  identical kernel authority/workspace/finalization semantics;
+- injected crash after push -> restart -> reachability/finalization/cleanup
+  continues idempotently without duplicate unsafe side effects.
 
 A fix is not complete merely because the new helper behaves correctly in
 isolation while an earlier outer guard still rejects the same real execution
@@ -159,4 +185,5 @@ npm test
 ```
 
 Keep commits focused and update tests/documentation for behavior changes. Do
-not expose credentials, tokens, prompts, transcripts, or private issue data.
+not expose credentials, tokens, prompts, transcripts, hidden reasoning, or
+private issue data.
