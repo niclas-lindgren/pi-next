@@ -171,6 +171,17 @@ export class GitHubIssueLeaseAuthority implements IssueLeaseAuthority {
   private async repo(): Promise<string> {
     if (!this.repository) {
       const timeoutMs = authorityOperationTimeoutMs();
+      const { stdout: remotes } = await withAuthorityTimeout(
+        "git remote",
+        execFileAsync("git", ["-C", this.cwd, "remote"], {
+          cwd: this.cwd,
+          encoding: "utf8",
+          timeout: timeoutMs,
+          killSignal: "SIGTERM",
+        }),
+        timeoutMs,
+      );
+      if (!remotes.trim()) throw new Error("no git remotes found");
       const { stdout } = await withAuthorityTimeout(
         "gh repo view",
         execFileAsync(
