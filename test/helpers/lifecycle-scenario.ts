@@ -12,6 +12,11 @@ import {
 
 export const DEFAULT_SCENARIO_NOW = "2026-08-22T12:00:00.000Z";
 
+const DEFAULT_SCENARIO_FILES = {
+  "README.md": "fixture\n",
+  ".gitignore": ".worktrees/\n",
+} as const;
+
 function sameLease(left: IssueLease | undefined, right: IssueLease | undefined): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -144,7 +149,7 @@ export async function runLifecycleScenario<
   const git = await createDisposableGitFixture({
     prefix: "pi-next-lifecycle-scenario-",
     withOrigin: scenario.withOrigin ?? true,
-    initialFiles: scenario.initialFiles,
+    initialFiles: scenario.initialFiles ?? { ...DEFAULT_SCENARIO_FILES },
   });
   const leaseAuthority = new MemoryIssueLeaseAuthority(scenario.initialLeases);
   const clock = new ManualScenarioClock(scenario.now);
