@@ -6,8 +6,9 @@ import { spawnSync } from "node:child_process";
 const realGit = process.env.PI_NEXT_TEST_REAL_GIT;
 const sourceRoot = process.env.PI_NEXT_TEST_SOURCE_ROOT;
 const fixtureRoot = process.env.PI_NEXT_TEST_TMP_ROOT;
+const safeSsh = process.env.PI_NEXT_TEST_SAFE_SSH;
 
-if (!realGit || !sourceRoot || !fixtureRoot) {
+if (!realGit || !sourceRoot || !fixtureRoot || !safeSsh) {
   console.error("pi-next test Git safety: guard invoked without safety environment");
   process.exit(97);
 }
@@ -22,6 +23,7 @@ function canonical(path) {
 
 const canonicalSourceRoot = canonical(sourceRoot);
 const canonicalFixtureRoot = canonical(fixtureRoot);
+const canonicalSafeSsh = canonical(safeSsh);
 
 function inside(root, path) {
   const rel = relative(root, canonical(path));
@@ -111,6 +113,16 @@ function resolveRemoteUrls(cwd, remote) {
   return resolveRemoteUrls(cwd, names[0]);
 }
 
+function syntheticLoopbackFixtureRemote(remote) {
+  const match = remote.match(/^[^/\\]+@(127\.0\.0\.1|localhost):.+$/i);
+  if (!match) return false;
+  const fixtureRemote = process.env.PI_NEXT_TEST_REMOTE;
+  if (!fixtureRemote) reject(`loopback remote ${remote} without PI_NEXT_TEST_REMOTE fixture binding`);
+  assertFixturePath(fixtureRemote, "loopback fixture remote");
+  assertFixturePath(canonicalSafeSsh, "safe SSH bridge");
+  return true;
+}
+
 function localRemotePath(cwd, remote) {
   if (remote.startsWith("file://")) {
     try {
@@ -129,6 +141,7 @@ function assertFixtureRemote(cwd, remote, operation) {
   const urls = resolveRemoteUrls(cwd, remote);
   if (urls.length === 0) reject(`${operation} with no resolvable remote`);
   for (const url of urls) {
+    if (syntheticLoopbackFixtureRemote(url)) continue;
     const path = localRemotePath(cwd, url);
     if (!path || /github\.com|gitlab\.com|bitbucket\.org/i.test(url)) {
       reject(`${operation} to non-fixture remote ${url}`);
@@ -166,13 +179,13 @@ function isTagRead(args) {
 
 function validate(args) {
   const { cwd, command, commandArgs } = parseInvocation(args);
-  if (!command) return;
+  if (!command) return { syntheticSsh: false };
 
   if (command === "init") {
     const targets = positional(commandArgs);
     const target = targets.at(-1) ?? cwd;
     assertFixturePath(resolve(cwd, target), "git init target");
-    return;
+    return { syntheticSsh: false };
   }
 
   if (command === "clone") {
@@ -182,7 +195,7 @@ function validate(args) {
     const destination = targets[1] ?? resolve(cwd, source.replace(/\/$/, "").split(/[\\/]/).at(-1)?.replace(/\.git$/, "") || "clone");
     assertFixturePath(resolve(cwd, destination), "clone destination");
     assertFixtureRemote(cwd, source, "clone");
-    return;
+    return { syntheticSsh: syntheticLoopbackFixtureRemote(source) };
   }
 
   const alwaysMutating = new Set([
@@ -209,14 +222,21 @@ function validate(args) {
     if (url) assertFixtureRemote(cwd, url, `remote ${commandArgs[0]}`);
   }
 
+  let syntheticSsh = false;
   if (["push", "fetch", "pull", "ls-remote"].includes(command)) {
     assertFixtureRepo(cwd, command);
-    assertFixtureRemote(cwd, firstRepositoryArgument(commandArgs), command);
+    const remote = firstRepositoryArgument(commandArgs);
+    assertFixtureRemote(cwd, remote, command);
+    syntheticSsh = Boolean(remote && syntheticLoopbackFixtureRemote(remote));
   }
+  return { syntheticSsh };
 }
 
-validate(process.argv.slice(2));
-const result = spawnSync(realGit, process.argv.slice(2), { stdio: "inherit", env: process.env });
+const validation = validate(process.argv.slice(2));
+const childEnv = validation.syntheticSsh
+  ? { ...process.env, GIT_SSH_COMMAND: canonicalSafeSsh }
+  : process.env;
+const result = spawnSync(realGit, process.argv.slice(2), { stdio: "inherit", env: childEnv });
 if (result.error) {
   console.error(result.error.message);
   process.exit(95);
