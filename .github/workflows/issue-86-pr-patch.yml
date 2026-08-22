@@ -1,0 +1,39 @@
+name: issue-86-pr-patch
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: ${{ github.head_ref == 'agent/issue-86-remote' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/issue-86-remote
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Apply issue 86 patch
+        run: python scripts/issue-86-remote-patch.py
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Run bootstrap regressions
+        run: npx tsx --test --test-concurrency=1 test/bootstrap-self-host.test.ts
+      - name: Run full suite
+        run: npm test
+      - name: Commit verified patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/issue-86-pr-patch.yml scripts/issue-86-remote-patch.py
+          git add scripts/bootstrap-self-host.ts test/bootstrap-self-host.test.ts docs/BOOTSTRAP_SELF_HOST.md
+          git commit -m "fix(bootstrap): stream bounded progress and heartbeats (#86)"
+          git push origin HEAD:agent/issue-86-remote
