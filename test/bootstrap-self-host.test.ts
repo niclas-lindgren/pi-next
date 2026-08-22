@@ -9,12 +9,15 @@ import { test } from "node:test";
 import {
   BootstrapSetupError,
   main,
+  resolveNextIssue,
   runBootstrap,
+  runBootstrapCli,
   runCommand,
   type BootstrapDependencies,
   type BootstrapProgressEvent,
   type CommandResult,
   type Issue,
+  type RoadmapIssue,
   type WorkerFactory,
   type WorkerSession,
 } from "../scripts/bootstrap-self-host.ts";
@@ -447,6 +450,143 @@ test("marks nonzero cost with zero SDK tokens as suspicious telemetry", async ()
   } finally {
     await fixtureState.cleanup();
   }
+});
+
+function roadmap(items: Array<Partial<RoadmapIssue> & { number: number }>): RoadmapIssue[] {
+  return items.map((item) => ({
+    number: item.number,
+    title: item.title ?? `issue ${item.number}`,
+    body: item.body ?? "",
+    comments: item.comments ?? [],
+    state: item.state ?? "OPEN",
+    labels: item.labels ?? [],
+  }));
+}
+
+test("automatic selection skips closed predecessors and chooses the first dependency-ready open roadmap issue", async () => {
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 75, state: "CLOSED" },
+      { number: 76, state: "CLOSED" },
+      { number: 79, body: "Dependencies: #75, #76" },
+      { number: 80, body: "Depends on #79" },
+    ]),
+  });
+  assert.equal(selection.selectedIssueNumber, 79);
+  assert.deepEqual(selection.skips.map((skip) => [skip.issueNumber, skip.status]), [[75, "closed"], [76, "closed"]]);
+});
+
+test("open dependencies block dependents until the dependency closes", async () => {
+  const blocked = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 79, labels: ["blocked"] },
+      { number: 80, body: "Depends on #79" },
+    ]),
+  });
+  assert.equal(blocked.selectedIssueNumber, undefined);
+  assert.equal(blocked.skips[1]?.reason, "blocked by #79");
+
+  const ready = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 79, state: "CLOSED" },
+      { number: 80, body: "Depends on #79" },
+    ]),
+  });
+  assert.equal(ready.selectedIssueNumber, 80);
+});
+
+test("roadmap order wins when multiple items are dependency-ready", async () => {
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([{ number: 90 }, { number: 81 }, { number: 82 }]),
+  });
+  assert.equal(selection.selectedIssueNumber, 90);
+});
+
+test("no eligible item is a bounded no-work result", async () => {
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([{ number: 75, state: "CLOSED" }, { number: 76, labels: ["on-hold"] }]),
+  });
+  assert.equal(selection.selectedIssueNumber, undefined);
+  assert.equal(selection.skips.length, 2);
+});
+
+test("ambiguous dependency metadata fails closed", async () => {
+  await assert.rejects(
+    resolveNextIssue(process.cwd(), {
+      fetchRoadmapIssues: async () => roadmap([{ number: 79, body: "Depends on the previous bootstrap issue" }]),
+    }),
+    /ambiguous dependency metadata/,
+  );
+});
+
+test("explicit --issue bypasses automatic selection and remains unchanged", async () => {
+  const calls: number[] = [];
+  const code = await runBootstrapCli(["--issue", "85"], {
+    fetchRoadmapIssues: async () => { throw new Error("selection should not run"); },
+  }, async (options) => {
+    calls.push(options.issueNumber);
+    return {
+      issueNumber: options.issueNumber,
+      attempts: 0,
+      start: "2026-01-01T00:00:00.000Z",
+      end: "2026-01-01T00:00:00.000Z",
+      disposition: "pass",
+      branch: "agent/issue-85",
+      worktree: ".worktrees/issue-85",
+      revision: "r",
+      baselineRevision: "b",
+      candidate: {} as never,
+      dependencySetup: { action: "not-required" },
+      workerAttempts: [],
+      checks: [],
+      mechanicalPass: true,
+      candidateReadyForReview: true,
+      finalizationReady: true,
+    };
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [85]);
+});
+
+test("--next-only launches zero workers or bootstrap executions", async () => {
+  let executions = 0;
+  const code = await runBootstrapCli(["--next-only"], {
+    fetchRoadmapIssues: async () => roadmap([{ number: 79 }]),
+  }, async () => {
+    executions += 1;
+    throw new Error("no worker/model should launch");
+  });
+  assert.equal(code, 0);
+  assert.equal(executions, 0);
+});
+
+test("automatic selection invokes the existing single-issue bootstrap path exactly once and does not queue progress", async () => {
+  const calls: number[] = [];
+  const code = await runBootstrapCli([], {
+    fetchRoadmapIssues: async () => roadmap([{ number: 79 }, { number: 80 }]),
+  }, async (options) => {
+    calls.push(options.issueNumber);
+    return {
+      issueNumber: options.issueNumber,
+      attempts: 1,
+      start: "2026-01-01T00:00:00.000Z",
+      end: "2026-01-01T00:00:00.000Z",
+      disposition: "pass",
+      branch: "agent/issue-79",
+      worktree: ".worktrees/issue-79",
+      revision: "r",
+      baselineRevision: "b",
+      candidate: {} as never,
+      dependencySetup: { action: "not-required" },
+      workerAttempts: [],
+      checks: [],
+      mechanicalPass: true,
+      candidateReadyForReview: true,
+      finalizationReady: true,
+    };
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [79]);
 });
 
 test("rejects implicit multi-issue progression", async () => {

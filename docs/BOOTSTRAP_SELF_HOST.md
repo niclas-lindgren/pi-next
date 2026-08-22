@@ -2,13 +2,17 @@
 
 The bootstrap supervisor is a developer utility used while pi-next's worker-neutral evaluation/reliability program is being implemented.
 
-Run one issue at a time from a clean `main` checkout:
+Run one issue at a time from a clean `main` checkout. Omitting `--issue` mechanically selects one dependency-ready item from the configured self-host roadmap using live GitHub issue state; no worker/model is asked to choose work.
 
 ```sh
+npm run bootstrap:self-host
 npm run bootstrap:self-host -- --issue N
+npm run bootstrap:self-host -- --next-only
 ```
 
-The supervisor creates/reuses the canonical `.worktrees/issue-N` worktree and launches a fresh plain-Pi implementation worker. It then runs deterministic checks outside the worker. Optional bounded repair/review modes may be enabled explicitly.
+`--issue N` remains an explicit operator override. `--next-only` performs roadmap discovery and reports the selected issue plus bounded skip/block reasons without launching a worker/model or mutating GitHub.
+
+After an issue number is resolved, the supervisor creates/reuses the canonical `.worktrees/issue-N` worktree and launches a fresh plain-Pi implementation worker. It then runs deterministic checks outside the worker. Optional bounded repair/review modes may be enabled explicitly. One invocation still executes at most one issue; automatic selection is not queue progression.
 
 ## Operator feedback contract
 
