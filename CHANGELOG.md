@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.70 - prepared release
+
+Add the temporary plain-Pi bootstrap supervisor for one explicit implementation issue.
+
+### Material changes
+
+- Add `npm run bootstrap:self-host -- --issue N` for a fresh SDK worker in the canonical issue worktree.
+- Run bounded deterministic verification outside the worker, with optional one-shot repair and independent review contexts.
+
+### Compatibility/configuration/schema
+
+- No persisted pi-next authority, lease, workflow, or worker-adapter schema changes.
+- The utility is a developer-only single-issue command and rejects queue progression.
+
+### Breaking/behavior changes
+
+- None for normal Pi-next commands; bootstrap finalization remains outside the utility.
+
+### Security/safety
+
+- Plain worker sessions are in-memory and do not load the pi-next extension; worker shell access refuses authority, main-branch, and destructive worktree commands.
+- Prompts, transcripts, and hidden reasoning are not included in bounded telemetry.
+
+### Upgrade guidance
+
+- No consumer action is required. Developers can run the documented bootstrap command from a clean coordination checkout.
+
 ## 0.2.69 - pending release
 
 Bound stable-host parent memory diagnostics and release superseded context bridges.
