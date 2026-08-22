@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ForegroundSupervisor } from "../extensions/pi-next/foreground-supervisor.ts";
-import { __resetLiveCtxForTests, bindLiveAutoRun, clearLiveAutoRunBinding, liveAutoRunBinding } from "../extensions/pi-next/live-ctx.ts";
+import {
+  __resetLiveCtxForTests,
+  bindLiveAutoRun,
+  clearLiveAutoRunBinding,
+  getLiveCtxFor,
+  liveAutoRunBinding,
+  setLiveCtx,
+} from "../extensions/pi-next/live-ctx.ts";
 
 test("foreground supervisor does not retain the initial host context", () => {
   const ctx = { cwd: "/tmp/pi-next-retention-fixture" } as never;
@@ -10,6 +17,21 @@ test("foreground supervisor does not retain the initial host context", () => {
 
   assert.equal("ctx" in supervisor, false);
   assert.equal((supervisor as unknown as { cwd: string }).cwd, "/tmp/pi-next-retention-fixture");
+});
+
+test("host replacement retires the superseded run-context bridge", () => {
+  const cwd = "/tmp/pi-next-retention-rebind";
+  const oldCtx = { cwd, sessionManager: { getSessionId: () => "old-session" } } as never;
+  const newCtx = { cwd, sessionManager: { getSessionId: () => "new-session" } } as never;
+
+  setLiveCtx(oldCtx);
+  bindLiveAutoRun(oldCtx, "replacement-run");
+  setLiveCtx(newCtx);
+  bindLiveAutoRun(newCtx, "replacement-run");
+
+  assert.equal(getLiveCtxFor(cwd, "old-session"), undefined);
+  assert.equal(getLiveCtxFor(cwd, "new-session"), newCtx);
+  __resetLiveCtxForTests();
 });
 
 test("settled run bindings are released instead of accumulating session identity graphs", () => {

@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 
 import {
+  analyzeHostMemoryEnvelope,
   classifyHostMemoryPressure,
   hostMemoryNeedsRestart,
   hostMemoryFile,
@@ -40,6 +41,44 @@ test("host memory pressure classification is conservative and deterministic", ()
   assert.equal(classifyHostMemoryPressure(950, 1_000, policy), "critical");
   assert.equal(hostMemoryNeedsRestart("critical", 1, policy), false);
   assert.equal(hostMemoryNeedsRestart("critical", 2, policy), true);
+});
+
+test("forced-GC diagnostics are opt-in and expose retained settled growth", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-host-memory-gc-"));
+  const runtime = globalThis as unknown as { gc?: () => void };
+  const previousGc = runtime.gc;
+  let gcCalls = 0;
+  runtime.gc = () => { gcCalls += 1; };
+  try {
+    const samples = [];
+    for (let index = 0; index < 51; index += 1) {
+      const heapUsed = index === 25 ? 400 : 100 + Math.min(index, 50);
+      samples.push(observeHostMemory(
+        cwd,
+        { boundary: "worker_end", runId: "gc-run", step: index },
+        usage(heapUsed),
+        1_000,
+        {},
+        { forceGc: true },
+      ).sample);
+    }
+    const envelope = analyzeHostMemoryEnvelope(samples, 60);
+    assert.equal(gcCalls, 51);
+    assert.equal(envelope.retainedSampleCount, 51);
+    assert.equal(envelope.settledGrowthBytes, 50);
+    assert.equal(envelope.transientPeakBytes, 250);
+    assert.equal(envelope.bounded, true);
+
+    const leaking = samples.map((sample, index) => ({
+      ...sample,
+      retainedHeapUsed: 100 + index * 3,
+    }));
+    assert.equal(analyzeHostMemoryEnvelope(leaking, 60).bounded, false);
+  } finally {
+    if (previousGc === undefined) delete runtime.gc;
+    else runtime.gc = previousGc;
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("repeated critical boundaries produce bounded, payload-free restart evidence", async () => {

@@ -19,6 +19,11 @@ import { primeIssueFreshness } from "../extensions/pi-next/issue-freshness.ts";
 import type { IssueWorkerRunner } from "../extensions/pi-next/util-core.ts";
 import { ensureIssueWorktree } from "../src/coordination/index.ts";
 import { IssueBoundaryFailure } from "../extensions/pi-next/failure-scope.ts";
+import {
+  analyzeHostMemoryEnvelope,
+  hostMemoryFile,
+  type HostMemorySample,
+} from "../extensions/pi-next/host-memory.ts";
 
 const exec = promisify(execFile);
 
@@ -234,19 +239,19 @@ test("the outer runLoopSteps preflight reaches planning repair before bounded co
   }
 });
 
-test("stable-host auto progression keeps 20+ worker batches off ctx.newSession", async () => {
+test("stable-host auto progression keeps 50+ worker batches off ctx.newSession and records bounded diagnostics", async () => {
   const fixture = await setupRepairFixture();
   try {
     const initial = {
       ...state(fixture.repo, fixture.workspace),
       runId: "stable-host-controller",
-      maxSteps: 30,
+      maxSteps: 70,
       planRepair: undefined,
     };
     let calls = 0;
     const worker: IssueWorkerRunner = async (_cwd, _prompt, options = {}) => {
       calls += 1;
-      if (calls < 21) {
+      if (calls < 51) {
         await writeFile(join(fixture.workspace, "stable-host-marker"), String(calls));
         await exec("git", ["-C", fixture.workspace, "add", "stable-host-marker"]);
         await exec("git", ["-C", fixture.workspace, "commit", "-m", `stable host worker ${calls}`]);
@@ -254,13 +259,18 @@ test("stable-host auto progression keeps 20+ worker batches off ctx.newSession",
       writeLoopResult(fixture.repo, {
         runId: options.runId || initial.runId,
         step: calls,
-        outcome: calls >= 21 ? "blocked" : "continue",
-        reason: calls >= 21 ? "stable-host regression finished" : undefined,
+        outcome: calls >= 51 ? "blocked" : "continue",
+        reason: calls >= 51 ? "stable-host regression finished" : undefined,
         writtenAt: new Date().toISOString(),
       });
       return { ok: true, output: "", code: 0, signal: null, telemetry: { status: "unavailable" } };
     };
     let replacements = 0;
+    const runtime = globalThis as unknown as { gc?: () => void };
+    const previousGc = runtime.gc;
+    const previousDiagnosticGc = process.env.PI_NEXT_HOST_MEMORY_FORCE_GC;
+    runtime.gc = () => {};
+    process.env.PI_NEXT_HOST_MEMORY_FORCE_GC = "1";
     const context = {
       cwd: fixture.workspace,
       hasUI: false,
@@ -269,13 +279,27 @@ test("stable-host auto progression keeps 20+ worker batches off ctx.newSession",
         throw new Error("routine host replacement is forbidden");
       },
     } as unknown as ExtensionCommandContext;
-    await runLoopSteps(context, initial, worker, createSupervisorRuntime());
-    assert.equal(calls, 21);
+    try {
+      await runLoopSteps(context, initial, worker, createSupervisorRuntime());
+    } finally {
+      if (previousGc === undefined) delete runtime.gc;
+      else runtime.gc = previousGc;
+      if (previousDiagnosticGc === undefined) delete process.env.PI_NEXT_HOST_MEMORY_FORCE_GC;
+      else process.env.PI_NEXT_HOST_MEMORY_FORCE_GC = previousDiagnosticGc;
+    }
+    assert.equal(calls, 51);
     assert.equal(replacements, 0);
     const durable = readLoopState(fixture.repo, initial.runId);
     assert.equal(durable?.status, "blocked");
     assert.equal(durable?.metrics.hostSessionReplacements, 0);
-    assert.equal(durable?.metrics.workerTurns, 21);
+    assert.equal(durable?.metrics.workerTurns, 51);
+    const memory = JSON.parse(await readFile(hostMemoryFile(fixture.repo), "utf8")) as {
+      samples?: HostMemorySample[];
+    };
+    const envelope = analyzeHostMemoryEnvelope(memory.samples || [], 512 * 1024 * 1024);
+    assert.equal(envelope.sampleCount >= 51, true);
+    assert.equal(envelope.retainedSampleCount >= 51, true);
+    assert.equal(envelope.bounded, true);
   } finally {
     await teardownRepairFixture(fixture);
   }

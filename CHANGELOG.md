@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.69 - pending release
+
+Bound stable-host parent memory diagnostics and release superseded context bridges.
+
+### Material changes
+
+- Keep historical live-context session keys and status heartbeat fallbacks weak so genuine host replacement cannot retain disposed Pi session graphs.
+- Add opt-in forced-GC retained-heap diagnostics with payload-free bounded-envelope analysis for long stable-host runs.
+- Extend the outer stable-host regression to 50+ isolated worker/controller transitions with zero Pi-next host-session replacements.
+
+### Compatibility/configuration/schema
+
+- Existing memory samples and loop state remain compatible; retained-heap fields are optional additive diagnostics.
+- `PI_NEXT_HOST_MEMORY_FORCE_GC=1` enables forced-GC sampling only when Node exposes `global.gc`.
+
+### Breaking/behavior changes
+
+- None for normal execution; forced GC is never requested unless explicitly enabled.
+
+### Security/safety
+
+- Superseded host contexts are not retained as strong references by Pi-next lifecycle bridges.
+- The memory-pressure `restart_required` fence remains unchanged and still settles before V8 OOM.
+
+### Upgrade guidance
+
+- No consumer action is required.
+
 ## 0.2.68 - prepared release
 
 Bound stable-host candidate discovery and scheduler liveness.
