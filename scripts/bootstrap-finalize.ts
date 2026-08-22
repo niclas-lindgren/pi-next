@@ -24,7 +24,7 @@ export interface BootstrapFinalizeAuthority {
 }
 
 export interface BootstrapFinalizeOptions { cwd?: string; issueNumber?: number; authority?: BootstrapFinalizeAuthority; runCommand?: CommandRunner; candidatePaths?: string[]; reporter?: (line: string) => void; }
-export interface BootstrapFinalizeReport { ok: boolean; issueNumber: number; branch: string; candidateSha: string; pr?: number; merged: boolean; reachable: boolean; issueClosed: boolean; worktreeRemoved: boolean; localBranchRemoved: boolean; }
+export interface BootstrapFinalizeReport { ok: boolean; issueNumber: number; branch: string; candidateSha: string; pr?: number; merged: boolean; reachable: boolean; issueClosed: boolean; worktreeRemoved: boolean; localBranchRemoved: boolean; outcome: "finalized" | "already-satisfied"; }
 
 export class BootstrapFinalizeError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "BootstrapFinalizeError"; } }
 
@@ -107,7 +107,7 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
     await git(root, ["fetch", "origin", "main", "--quiet"], runner);
     const reachable = (await tryGit(root, ["merge-base", "--is-ancestor", merged.mergeCommitSha!, "origin/main"], runner)) !== undefined;
     if (!reachable) throw new BootstrapFinalizeError("REACHABILITY_FAILED", "merged PR is not reachable from origin/main");
-    return { ok: true, issueNumber, branch, candidateSha: merged.headSha, pr: merged.number, merged: true, reachable: true, issueClosed: issue.state === "CLOSED", worktreeRemoved: true, localBranchRemoved: true };
+    return { ok: true, issueNumber, branch, candidateSha: merged.headSha, pr: merged.number, merged: true, reachable: true, issueClosed: issue.state === "CLOSED", worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
   }
   if (!worktree) throw new BootstrapFinalizeError("MISSING_WORKTREE", `canonical worktree for ${branch} is missing before integration`);
   const coordStatus = await git(root, ["status", "--porcelain"], runner);
@@ -120,7 +120,17 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
   if (dirty.length) { await git(worktree, ["add", "--", ...intended], runner); const staged = await git(worktree, ["diff", "--cached", "--name-only"], runner); if (staged.split("\n").filter(Boolean).some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "staging would capture unintended paths"); await git(worktree, ["commit", "-m", commitMessage(issue)], runner); say(`bootstrap finalize #${issueNumber} · committed ${await git(worktree, ["rev-parse", "--short", "HEAD"], runner)}`); }
   const candidateSha = await git(worktree, ["rev-parse", "HEAD"], runner);
   if ((await git(worktree, ["status", "--porcelain"], runner)) !== "") throw new BootstrapFinalizeError("DIRTY_AFTER_COMMIT", "candidate worktree remains dirty");
-  if ((await committedPaths(worktree, runner)).length === 0) throw new BootstrapFinalizeError("EMPTY_CANDIDATE", "candidate has no changes relative to origin/main");
+  if ((await committedPaths(worktree, runner)).length === 0) {
+    if (issue.state !== "CLOSED") throw new BootstrapFinalizeError("NO_CHANGE_CANDIDATE", "candidate has no changes relative to origin/main and no authoritative already-satisfied proof");
+    const candidateSha = await git(worktree, ["rev-parse", "HEAD"], runner);
+    say(`bootstrap finalize #${issueNumber} · no candidate changes; issue already closed by authority`);
+    await git(root, ["worktree", "remove", worktree], runner);
+    let branchRemoved = false;
+    if ((await tryGit(root, ["merge-base", "--is-ancestor", branch, "origin/main"], runner)) !== undefined) { await git(root, ["branch", "-d", branch], runner); branchRemoved = true; }
+    else throw new BootstrapFinalizeError("UNINTEGRATED_BRANCH", "local branch contains work not reachable from origin/main");
+    try { if (existsSync(worktree)) await rm(worktree, { recursive: true, force: true }); } catch {}
+    return { ok: true, issueNumber, branch, candidateSha, merged: false, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: branchRemoved, outcome: "already-satisfied" };
+  }
   for (const check of REQUIRED_CHECKS) await sh(worktree, check, runner);
   say(`bootstrap finalize #${issueNumber} · candidate verified`);
   if (process.env.PI_NEXT_BOOTSTRAP_FINALIZE_CRASH_AFTER === "commit") process.exit(99);
@@ -160,7 +170,7 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
   else throw new BootstrapFinalizeError("UNINTEGRATED_BRANCH", "local branch contains work not reachable from origin/main");
   try { if (existsSync(worktree)) await rm(worktree, { recursive: true, force: true }); } catch {}
   say(`bootstrap finalize #${issueNumber} · PASS`);
-  return { ok: true, issueNumber, branch, candidateSha, pr: pr.number, merged: true, reachable, issueClosed, worktreeRemoved: true, localBranchRemoved: branchRemoved };
+  return { ok: true, issueNumber, branch, candidateSha, pr: pr.number, merged: true, reachable, issueClosed, worktreeRemoved: true, localBranchRemoved: branchRemoved, outcome: "finalized" };
 }
 
 function usage(): string { return `Usage: npm run bootstrap:finalize -- [--issue N]\n\nFinalize one mechanically-passing bootstrap candidate.\n\nOptions:\n  --issue N   finalize the explicit canonical agent/issue-N candidate\n  -h, --help  show this help\n`; }

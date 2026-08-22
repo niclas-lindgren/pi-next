@@ -700,6 +700,8 @@ test("explicit --issue bypasses automatic selection and remains unchanged", asyn
       mechanicalPass: true,
       candidateReadyForReview: true,
       finalizationReady: true,
+      implementationOutcome: "implemented",
+      candidateHasDelta: true,
     };
   });
   assert.equal(code, 0);
@@ -770,6 +772,8 @@ test("automatic selection invokes the existing single-issue bootstrap path exact
       mechanicalPass: true,
       candidateReadyForReview: true,
       finalizationReady: true,
+      implementationOutcome: "implemented",
+      candidateHasDelta: true,
     };
   });
   assert.equal(code, 0);

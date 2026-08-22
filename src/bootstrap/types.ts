@@ -6,7 +6,7 @@ export const DEFAULT_PROGRESS_HEARTBEAT_MS = 20_000;
 export const MAX_CHANGED_FILES = 200;
 export const CHECKS = ["npm run typecheck", "npm test"] as const;
 
-export type Disposition = "pass" | "repairable-failure" | "blocked";
+export type Disposition = "pass" | "already-satisfied" | "no-change" | "repairable-failure" | "blocked";
 export type WorkerRole = "implementation" | "repair" | "review";
 
 export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "terminal";
@@ -39,6 +39,8 @@ export interface Issue {
   title: string;
   body: string;
   comments: IssueComment[];
+  state?: IssueState;
+  labels?: string[];
 }
 
 export type IssueState = "OPEN" | "CLOSED";
@@ -226,6 +228,9 @@ export interface BootstrapReport {
   reviewPass?: boolean;
   candidateReadyForReview: boolean;
   finalizationReady: boolean;
+  implementationOutcome: "implemented" | "already-satisfied" | "unproven-no-change" | "failed";
+  candidateHasDelta: boolean;
+  noChangeReason?: string;
   failureReason?: string;
 }
 

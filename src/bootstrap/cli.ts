@@ -30,7 +30,7 @@ function parseArgs(args: string[]): BootstrapCliOptions {
 }
 
 export function exitCodeForDisposition(disposition: Disposition): number {
-  return disposition === "pass" ? 0 : disposition === "repairable-failure" ? 1 : 2;
+  return disposition === "pass" || disposition === "already-satisfied" ? 0 : disposition === "repairable-failure" ? 1 : 2;
 }
 
 function printSelection(selection: NextIssueSelection): void {
