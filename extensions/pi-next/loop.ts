@@ -67,7 +67,12 @@ import {
   relativeWorkflowPaths,
 } from "./plan-write.ts";
 import { workflowArtifacts } from "./plan-read.ts";
-import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
+import type { IssueWorkerRunner } from "./util-core.ts";
+import {
+  PiWorkerAdapter,
+  issueWorkerRunnerFromAdapter,
+  type PiWorkerCompatibleAdapter,
+} from "./pi-worker-adapter.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
@@ -740,6 +745,8 @@ export async function runOwnedIssueCycle(
   authorityOverride?: import("./issue-leases.ts").IssueLeaseAuthority,
   /** Stable display supplied by the foreground supervisor across issue cycles. */
   displayOverride?: WorkerDisplayController,
+  /** Harness-neutral worker execution seam; Pi remains the default adapter. */
+  workerAdapter: PiWorkerCompatibleAdapter = new PiWorkerAdapter(),
 ): Promise<LoopState> {
   const coordinationCwd = initial.coordinationCwd || ctx.cwd;
   const issueAuthority = authorityOverride ?? new GitHubIssueLeaseAuthority(coordinationCwd);
@@ -838,6 +845,7 @@ export async function runOwnedIssueCycle(
         // run authority via PI_NEXT_COORDINATION_CWD instead of depending on
         // a worktree-relative `.pi/runtime` path or symlink.
         let replacementWorkerPending = false;
+        const adapterWorker = issueWorkerRunnerFromAdapter(workerAdapter);
         const visibleWorker: IssueWorkerRunner = (
           workerCwd,
           prompt,
@@ -851,7 +859,7 @@ export async function runOwnedIssueCycle(
               "replacement worker started",
             );
           }
-          return runIssueWorker(workerCwd, prompt, {
+          return adapterWorker(workerCwd, prompt, {
             ...options,
             coordinationCwd: options.coordinationCwd ?? coordinationCwd,
             onActivity:
@@ -1102,8 +1110,9 @@ export async function runOwnedLoopSteps(
 /**
  * The loop controller keeps coordination state in the parent process/session
  * (durable loop-state, lease, and worktree bookkeeping); each bounded auto
- * step still runs in an isolated issue worker — a dedicated child process
- * spawned by `runIssueWorker` (util-core.ts) — never inline in the parent.
+ * step still runs in an isolated issue worker through the harness-neutral
+ * WorkerAdapter boundary. PiWorkerAdapter is the current default and delegates
+ * to the proven isolated child-process runner — never inline in the parent.
  * `/pi-next auto`/`resume` drive this through `ForegroundSupervisor.launch`
  * (#612), which owns that isolated-worker cycle end to end.
  */
