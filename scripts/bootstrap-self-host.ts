@@ -47,6 +47,24 @@ export interface Issue {
   comments: IssueComment[];
 }
 
+export type IssueState = "OPEN" | "CLOSED";
+
+export interface RoadmapIssue extends Issue {
+  state: IssueState;
+  labels?: string[];
+}
+
+export interface NextIssueSkipReason {
+  issueNumber: number;
+  status: "closed" | "blocked" | "not-eligible";
+  reason: string;
+}
+
+export interface NextIssueSelection {
+  selectedIssueNumber?: number;
+  skips: NextIssueSkipReason[];
+}
+
 export interface CommandResult {
   command: string;
   args: string[];
@@ -146,6 +164,7 @@ export type WorkerFactory = (input: WorkerFactoryInput) => Promise<WorkerSession
 export interface BootstrapDependencies {
   runCommand?: CommandRunner;
   fetchIssue?: (issueNumber: number, cwd: string) => Promise<Issue>;
+  fetchRoadmapIssues?: (cwd: string) => Promise<RoadmapIssue[]>;
   createWorker?: WorkerFactory;
   now?: () => Date;
   reporter?: BootstrapReporter;
@@ -160,6 +179,16 @@ export interface BootstrapOptions {
   timeoutMs?: number;
   verifyOnly?: boolean;
   signal?: AbortSignal;
+}
+
+export interface BootstrapCliOptions {
+  issueNumber?: number;
+  cwd?: string;
+  allowRepair: boolean;
+  review: boolean;
+  timeoutMs?: number;
+  verifyOnly?: boolean;
+  nextOnly: boolean;
 }
 
 export interface CheckReport {
@@ -584,6 +613,113 @@ function issueFromJson(value: unknown): Issue {
 export async function fetchIssue(issueNumber: number, cwd: string, runner: CommandRunner = runCommand): Promise<Issue> {
   const result = await runner("gh", ["issue", "view", String(issueNumber), "--json", "number,title,body,comments"], { cwd });
   return issueFromJson(JSON.parse(assertCommand(result, `fetch issue #${issueNumber}`)));
+}
+
+const DEFAULT_ROADMAP_ISSUE = 73;
+const NOT_ELIGIBLE_LABELS = new Set(["blocked", "not-ready", "not ready", "on-hold", "on hold", "do-not-run", "do not run"]);
+
+function roadmapIssueFromJson(value: unknown): RoadmapIssue {
+  const issue = issueFromJson(value);
+  const item = value as { state?: unknown; labels?: unknown };
+  const state = item.state === "CLOSED" ? "CLOSED" : item.state === "OPEN" ? "OPEN" : undefined;
+  if (!state) throw new BootstrapError("GitHub issue payload is missing state");
+  const labels = Array.isArray(item.labels)
+    ? item.labels.map((label) => typeof label === "string" ? label : typeof label?.name === "string" ? label.name : "").filter(Boolean)
+    : [];
+  return { ...issue, state, labels };
+}
+
+function orderedIssueNumbersFromRoadmap(body: string): number[] {
+  const numbers: number[] = [];
+  const seen = new Set<number>();
+  for (const line of body.split("\n")) {
+    if (!/^\s*(?:[-*]\s*)?(?:\[[ xX]\]\s*)?(?:#\d+|.*\bissue\b.*#\d+)/i.test(line)) continue;
+    for (const match of line.matchAll(/#(\d+)/g)) {
+      const number = Number(match[1]);
+      if (number === DEFAULT_ROADMAP_ISSUE || seen.has(number)) continue;
+      seen.add(number);
+      numbers.push(number);
+    }
+  }
+  if (numbers.length === 0) throw new BootstrapError(`roadmap #${DEFAULT_ROADMAP_ISSUE} contains no ordered issue references`);
+  return numbers;
+}
+
+export async function fetchRoadmapIssues(cwd: string, runner: CommandRunner = runCommand): Promise<RoadmapIssue[]> {
+  const roadmap = await runner("gh", ["issue", "view", String(DEFAULT_ROADMAP_ISSUE), "--json", "number,title,body,comments,state,labels"], { cwd });
+  const roadmapIssue = roadmapIssueFromJson(JSON.parse(assertCommand(roadmap, `fetch roadmap #${DEFAULT_ROADMAP_ISSUE}`)));
+  const numbers = orderedIssueNumbersFromRoadmap(roadmapIssue.body);
+  const issues: RoadmapIssue[] = [];
+  for (const number of numbers) {
+    const result = await runner("gh", ["issue", "view", String(number), "--json", "number,title,body,comments,state,labels"], { cwd });
+    issues.push(roadmapIssueFromJson(JSON.parse(assertCommand(result, `fetch roadmap issue #${number}`))));
+  }
+  return issues;
+}
+
+function dependencyMetadataText(issue: RoadmapIssue): string {
+  return [issue.title, issue.body, ...issue.comments.map((comment) => comment.body ?? "")].join("\n");
+}
+
+function declaredDependencies(issue: RoadmapIssue): number[] {
+  const dependencies = new Set<number>();
+  for (const line of dependencyMetadataText(issue).split("\n")) {
+    const normalized = line.toLowerCase();
+    const hasKeyword = /\b(depends on|dependencies?|blocked by|requires?)\b/.test(normalized);
+    if (!hasKeyword) continue;
+    const noDeps = /(?:\b(no|none|n\/a)\b.*\b(dependencies?|depends|blocked|required|requires?)\b)|(?:\b(dependencies?|depends|blocked by|required|requires?)\b\s*:?\s*\b(none|no|n\/a)\b)/.test(normalized);
+    const matches = [...line.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+    if (matches.length === 0) {
+      if (!noDeps) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+      continue;
+    }
+    if (noDeps) throw new BootstrapError(`ambiguous dependency metadata on #${issue.number}: ${line.trim().slice(0, 120)}`);
+    for (const dependency of matches) dependencies.add(dependency);
+  }
+  dependencies.delete(issue.number);
+  return [...dependencies].sort((a, b) => a - b);
+}
+
+function notEligibleReason(issue: RoadmapIssue): string | undefined {
+  for (const label of issue.labels ?? []) {
+    const normalized = label.trim().toLowerCase();
+    if (NOT_ELIGIBLE_LABELS.has(normalized)) return `label ${label}`;
+  }
+  return undefined;
+}
+
+export async function resolveNextIssue(cwd: string, dependencies: BootstrapDependencies = {}): Promise<NextIssueSelection> {
+  const provider = dependencies.fetchRoadmapIssues ?? ((root: string) => fetchRoadmapIssues(root, dependencies.runCommand ?? runCommand));
+  const roadmap = await provider(cwd);
+  if (roadmap.length === 0) throw new BootstrapError("roadmap contains no issue candidates");
+  const byNumber = new Map<number, RoadmapIssue>();
+  for (const item of roadmap) {
+    if (byNumber.has(item.number)) throw new BootstrapError(`roadmap contains duplicate issue #${item.number}`);
+    byNumber.set(item.number, item);
+  }
+  const skips: NextIssueSkipReason[] = [];
+  for (const item of roadmap) {
+    if (item.state === "CLOSED") {
+      skips.push({ issueNumber: item.number, status: "closed", reason: "closed" });
+      continue;
+    }
+    const ineligible = notEligibleReason(item);
+    if (ineligible) {
+      skips.push({ issueNumber: item.number, status: "not-eligible", reason: ineligible });
+      continue;
+    }
+    const openDependencies = declaredDependencies(item).filter((dependency) => {
+      const dependencyIssue = byNumber.get(dependency);
+      if (!dependencyIssue) throw new BootstrapError(`dependency #${dependency} for #${item.number} is outside the configured roadmap`);
+      return dependencyIssue.state !== "CLOSED";
+    });
+    if (openDependencies.length > 0) {
+      skips.push({ issueNumber: item.number, status: "blocked", reason: `blocked by ${openDependencies.map((number) => `#${number}`).join("/")}` });
+      continue;
+    }
+    return { selectedIssueNumber: item.number, skips };
+  }
+  return { skips };
 }
 
 function commentText(comment: IssueComment): string {
@@ -1159,11 +1295,12 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   return report;
 }
 
-function parseArgs(args: string[]): BootstrapOptions {
+function parseArgs(args: string[]): BootstrapCliOptions {
   let issueNumber: number | undefined;
   let allowRepair = false;
   let review = false;
   let verifyOnly = false;
+  let nextOnly = false;
   let timeoutMs: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -1171,30 +1308,67 @@ function parseArgs(args: string[]): BootstrapOptions {
     else if (arg === "--repair") allowRepair = true;
     else if (arg === "--review") review = true;
     else if (arg === "--verify-only" || arg === "--resume") verifyOnly = true;
+    else if (arg === "--next-only") nextOnly = true;
     else if (arg === "--timeout-ms") timeoutMs = Number(args[++index]);
     else if (arg === "--queue") throw new BootstrapError("multi-issue --queue mode is intentionally not implemented");
     else throw new BootstrapError(`unknown option: ${arg}`);
   }
-  const parsedIssueNumber = issueNumber;
-  if (typeof parsedIssueNumber !== "number" || !Number.isInteger(parsedIssueNumber) || parsedIssueNumber <= 0) throw new BootstrapError("--issue N is required");
+  if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber <= 0)) throw new BootstrapError("--issue must be a positive integer");
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) throw new BootstrapError("--timeout-ms must be positive");
-  return { issueNumber: parsedIssueNumber, allowRepair, review, verifyOnly, timeoutMs };
+  return { issueNumber, allowRepair, review, verifyOnly, timeoutMs, nextOnly };
 }
 
 export function exitCodeForDisposition(disposition: Disposition): number {
   return disposition === "pass" ? 0 : disposition === "repairable-failure" ? 1 : 2;
 }
 
-export async function main(args = process.argv.slice(2)): Promise<number> {
-  const reporter = createCliProgressReporter();
-  let options: BootstrapOptions | undefined;
+function printSelection(selection: NextIssueSelection): void {
+  for (const skip of selection.skips) {
+    console.error(`#${skip.issueNumber} ${skip.reason}`);
+  }
+  if (selection.selectedIssueNumber !== undefined) console.error(`selected #${selection.selectedIssueNumber}`);
+}
+
+export async function runBootstrapCli(
+  args = process.argv.slice(2),
+  dependencies: BootstrapDependencies = {},
+  execute: (options: BootstrapOptions, dependencies?: BootstrapDependencies) => Promise<BootstrapReport> = runBootstrap,
+): Promise<number> {
+  const reporter = dependencies.reporter ?? createCliProgressReporter();
+  let selectedIssueNumber: number | undefined;
   try {
-    options = parseArgs(args);
-    const report = await runBootstrap(options, { reporter });
+    const cli = parseArgs(args);
+    selectedIssueNumber = cli.issueNumber;
+    if (selectedIssueNumber === undefined) {
+      console.error("bootstrap · discovering next work");
+      const selection = await resolveNextIssue(resolve(cli.cwd ?? process.cwd()), dependencies);
+      printSelection(selection);
+      if (selection.selectedIssueNumber === undefined) {
+        console.error(JSON.stringify({ disposition: "blocked", code: "NO_ELIGIBLE_ISSUE", reason: "no dependency-ready roadmap issue exists", selection }, null, 2));
+        return 2;
+      }
+      selectedIssueNumber = selection.selectedIssueNumber;
+      if (cli.nextOnly) {
+        console.log(JSON.stringify({ disposition: "pass", selectedIssueNumber, selection }, null, 2));
+        return 0;
+      }
+    } else if (cli.nextOnly) {
+      console.error("--next-only inspects automatic selection; omit --issue");
+      return 2;
+    }
+    const options: BootstrapOptions = {
+      issueNumber: selectedIssueNumber,
+      cwd: cli.cwd,
+      allowRepair: cli.allowRepair,
+      review: cli.review,
+      verifyOnly: cli.verifyOnly,
+      timeoutMs: cli.timeoutMs,
+    };
+    const report = await execute(options, { ...dependencies, reporter });
     console.log(JSON.stringify(report, null, 2));
     return exitCodeForDisposition(report.disposition);
   } catch (error) {
-    if (options) emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "blocked" });
+    if (selectedIssueNumber !== undefined) emitProgress(reporter, { issueNumber: selectedIssueNumber, phase: "terminal", state: "fail", detail: "blocked" });
     console.error(JSON.stringify({
       disposition: "blocked",
       code: error instanceof BootstrapError ? error.code : "BOOTSTRAP_FAILED",
@@ -1202,6 +1376,10 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     }));
     return 2;
   }
+}
+
+export async function main(args = process.argv.slice(2)): Promise<number> {
+  return runBootstrapCli(args);
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname);
