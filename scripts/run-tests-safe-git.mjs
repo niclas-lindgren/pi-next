@@ -40,13 +40,17 @@ const realGit = findGit();
 const wrapperDir = mkdtempSync(join(tmpdir(), "pi-next-safe-git-"));
 const wrapperName = process.platform === "win32" ? "git.cmd" : "git";
 const wrapperPath = join(wrapperDir, wrapperName);
+const sshBridge = join(wrapperDir, process.platform === "win32" ? "fixture-ssh.cmd" : "fixture-ssh");
 
 try {
   if (process.platform === "win32") {
     writeFileSync(wrapperPath, `@echo off\r\n"${process.execPath}" "${guardPath}" %*\r\n`);
+    writeFileSync(sshBridge, `@echo off\r\n"%PI_NEXT_TEST_REAL_GIT%" upload-pack "%PI_NEXT_TEST_REMOTE%"\r\n`);
   } else {
     writeFileSync(wrapperPath, `#!/bin/sh\nexec "${process.execPath}" "${guardPath}" "$@"\n`);
+    writeFileSync(sshBridge, '#!/bin/sh\nexec "$PI_NEXT_TEST_REAL_GIT" upload-pack "$PI_NEXT_TEST_REMOTE"\n');
     chmodSync(wrapperPath, 0o755);
+    chmodSync(sshBridge, 0o755);
   }
 
   const child = spawnSync(
@@ -61,6 +65,7 @@ try {
         PI_NEXT_TEST_REAL_GIT: realGit,
         PI_NEXT_TEST_SOURCE_ROOT: sourceRoot,
         PI_NEXT_TEST_TMP_ROOT: realpathSync(tmpdir()),
+        PI_NEXT_TEST_SAFE_SSH: sshBridge,
       },
     },
   );
