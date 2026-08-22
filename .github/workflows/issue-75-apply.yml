@@ -1,21 +1,23 @@
 name: issue-75-apply
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/issue-75-remote
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply-and-verify:
+    if: github.head_ref == 'agent/issue-75-remote'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: agent/issue-75-remote
 
       - uses: actions/setup-node@v4
         with:
