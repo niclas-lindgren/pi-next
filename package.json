@@ -52,6 +52,7 @@
     "lint": "tsc --noEmit",
     "coordination-cli": "tsx src/coordination/bin.ts",
     "bootstrap:self-host": "tsx scripts/bootstrap-self-host.ts",
+    "eval:replay": "tsx scripts/eval-replay.ts",
     "skills:sync": "tsx src/skills/bin.ts sync",
     "skills:check": "tsx src/skills/bin.ts check",
     "release": "node scripts/release.mjs",

@@ -10,6 +10,7 @@ import {
   type IssueWorkerResult,
   type IssueWorkerRunner,
 } from "./util-core.ts";
+import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
 
 /** Pi-specific execution options stay below the harness-neutral adapter seam. */
 export interface PiWorkerTask extends WorkerTask {
@@ -107,26 +108,90 @@ export class PiWorkerAdapter implements PiWorkerCompatibleAdapter {
  * runner. It is intentionally tiny so the controller can migrate to the
  * explicit adapter seam without changing lifecycle semantics in the same
  * refactor.
+ *
+ * The bridge is also the kernel-side durable worker boundary: it records a
+ * bounded `worker_started` fact before process launch and `worker_finished`
+ * (or a typed failure) after settlement. No prompt/output/transcript is ever
+ * journaled.
  */
 export function issueWorkerRunnerFromAdapter(
   adapter: PiWorkerCompatibleAdapter,
 ): IssueWorkerRunner {
-  return (cwd, prompt, options = {}) => {
+  return async (cwd, prompt, options = {}) => {
     const fallbackController = options.signal ? undefined : new AbortController();
     const signal = options.signal ?? fallbackController!.signal;
-    return adapter.run(
-      {
-        cwd,
-        prompt,
-        issueNumber: options.issueNumber,
-        runId: options.runId,
-        phase: options.phase,
-        dispatch: options.dispatch,
-        coordinationCwd: options.coordinationCwd,
-        readOnly: options.readOnly,
-        options,
-      },
-      signal,
-    );
+    const coordinationCwd = options.coordinationCwd ?? cwd;
+    const runId = options.runId;
+    const issueNumber = options.issueNumber;
+    if (runId) {
+      recordPiLifecycleJournal(coordinationCwd, {
+        runId,
+        ...(issueNumber ? { issueNumber } : {}),
+        event: "worker_started",
+        payload: {
+          adapterId: adapter.id,
+          adapterVersion: adapter.version,
+          ...(options.phase ? { phase: options.phase } : {}),
+        },
+      });
+    }
+    try {
+      const result = await adapter.run(
+        {
+          cwd,
+          prompt,
+          issueNumber: options.issueNumber,
+          runId: options.runId,
+          phase: options.phase,
+          dispatch: options.dispatch,
+          coordinationCwd: options.coordinationCwd,
+          readOnly: options.readOnly,
+          options,
+        },
+        signal,
+      );
+      if (runId) {
+        recordPiLifecycleJournal(coordinationCwd, {
+          runId,
+          ...(issueNumber ? { issueNumber } : {}),
+          event: "worker_finished",
+          payload: {
+            adapterId: adapter.id,
+            adapterVersion: adapter.version,
+            ...(options.phase ? { phase: options.phase } : {}),
+            ok: result.ok,
+            code: result.code,
+            signal: result.signal,
+            telemetryStatus: result.telemetry.status,
+          },
+        });
+        if (!result.ok) {
+          recordPiLifecycleJournal(coordinationCwd, {
+            runId,
+            ...(issueNumber ? { issueNumber } : {}),
+            event: "failure_recorded",
+            payload: {
+              stage: options.phase ?? "worker",
+              reasonCode: result.failure?.code ?? "worker_failed",
+            },
+          });
+        }
+      }
+      return result;
+    } catch (error) {
+      if (runId) {
+        recordPiLifecycleJournal(coordinationCwd, {
+          runId,
+          ...(issueNumber ? { issueNumber } : {}),
+          event: "failure_recorded",
+          payload: {
+            stage: options.phase ?? "worker",
+            reasonCode: "worker_exception",
+            summary: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
+          },
+        });
+      }
+      throw error;
+    }
   };
 }

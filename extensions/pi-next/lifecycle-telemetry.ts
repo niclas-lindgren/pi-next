@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { runtimeDir, writeJsonAtomic } from "./util.ts";
+import { journalLegacyLifecycleObservation } from "./lifecycle-journal.ts";
 
 const MAX_EVENTS = 200;
 
@@ -144,6 +145,11 @@ export function recordLifecycleEvent(
     version: 1,
     events: [...state.events, safe].slice(-MAX_EVENTS),
   });
+  // Keep the existing bounded telemetry file for UI/diagnostics, but mirror
+  // only recovery-relevant coordination facts into the durable append-only
+  // per-run journal. Journal validation failures intentionally fail clearly
+  // rather than silently discarding recovery history.
+  journalLegacyLifecycleObservation(cwd, safe);
 }
 
 export function failureReasonCode(message: string): string {
