@@ -100,7 +100,7 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   const closedByAuthority = issue.state === "CLOSED";
   const noChangeReason = !candidateHasDelta && mechanicalPass ? closedByAuthority ? "authoritative issue state is CLOSED; no candidate changes were produced" : "no candidate changes were produced and satisfaction was not mechanically proven" : undefined;
   const implementationOutcome: BootstrapReport["implementationOutcome"] = !implementationCompleted || !mechanicalPass ? "failed" : candidateHasDelta ? "implemented" : closedByAuthority ? "already-satisfied" : "unproven-no-change";
-  const finalizationReady = implementationOutcome === "implemented" && mechanicalPass && !candidate.dirty && !candidate.behindOriginMain && (options.review ? reviewPass === true : true);
+  const finalizationReady = implementationOutcome === "implemented" && mechanicalPass && !candidate.behindOriginMain && (options.review ? reviewPass === true : true);
   const disposition: Disposition = !implementationCompleted ? "blocked" : !mechanicalPass ? "repairable-failure" : !candidateHasDelta ? closedByAuthority ? "already-satisfied" : "no-change" : options.review && reviewPass !== true ? "blocked" : "pass";
   const reason = disposition === "pass" || disposition === "already-satisfied" ? undefined : noChangeReason ?? (reviewer && reviewPass !== true ? "independent review did not return a passing structured verdict" : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification"));
   const report: BootstrapReport = {

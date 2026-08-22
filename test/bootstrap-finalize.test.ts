@@ -29,9 +29,14 @@ async function fixture() {
   return { root, remote, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(remote, { recursive: true, force: true }); } };
 }
 
-async function dirtyCandidate(root: string, issue: number, file = "feature.txt") {
+async function cleanCandidate(root: string, issue: number) {
   const path = join(root, ".worktrees", `issue-${issue}`);
   await git(root, "worktree", "add", "-q", "-b", `agent/issue-${issue}`, path, "origin/main");
+  return path;
+}
+
+async function dirtyCandidate(root: string, issue: number, file = "feature.txt") {
+  const path = await cleanCandidate(root, issue);
   await writeFile(join(path, file), "candidate\n");
   return path;
 }
@@ -76,6 +81,34 @@ test("bootstrap finalizer commits, pushes, creates PR, merges, proves reachabili
     await assert.rejects(git(f.root, "rev-parse", "--verify", "agent/issue-101"));
     assert.match(await git(f.remote, "log", "--oneline", "-1", "main"), /feat\(finalize\): add helper \(#101\)/);
     assert.ok(lines.some((line) => line.endsWith("PASS")));
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer refuses open zero-delta candidate without creating empty commit or PR", async () => {
+  const f = await fixture();
+  try {
+    await cleanCandidate(f.root, 101);
+    const authority = new FakeAuthority(f.root, 101);
+    const before = await git(f.root, "rev-parse", "agent/issue-101");
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 101, authority }), "NO_CHANGE_CANDIDATE");
+    assert.equal(await git(f.root, "rev-parse", "agent/issue-101"), before);
+    assert.equal(authority.prs.length, 0);
+    assert.equal(authority.closed, false);
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer treats closed zero-delta candidate as harmless already-satisfied cleanup without PR", async () => {
+  const f = await fixture();
+  try {
+    await cleanCandidate(f.root, 101);
+    const authority = new FakeAuthority(f.root, 101);
+    authority.issue.state = "CLOSED";
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 101, authority });
+    assert.equal(result.outcome, "already-satisfied");
+    assert.equal(result.merged, false);
+    assert.equal(result.issueClosed, true);
+    assert.equal(authority.prs.length, 0);
+    await assert.rejects(git(f.root, "rev-parse", "--verify", "agent/issue-101"));
   } finally { await f.cleanup(); }
 });
 
