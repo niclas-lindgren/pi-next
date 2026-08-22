@@ -1,0 +1,31 @@
+name: issue-14-inventory
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    if: ${{ github.head_ref == 'agent/issue-14-remote' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/issue-14-remote
+      - name: Inventory test Git mutation sites
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          patterns = re.compile(r'\b(commit|push|worktree|update-ref|merge|rebase|reset|clean|remote|branch|tag)\b')
+          for path in sorted(Path('test').rglob('*.ts')):
+              lines = path.read_text(errors='replace').splitlines()
+              hits = [(i+1, line.strip()) for i,line in enumerate(lines) if ('git' in line.lower() and patterns.search(line))]
+              if hits:
+                  print(f'## {path}')
+                  for n,line in hits:
+                      print(f'{n}: {line}')
+          PY
