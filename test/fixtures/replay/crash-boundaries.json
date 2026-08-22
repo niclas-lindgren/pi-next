@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "version": 1,
+      "name": "crash after lease claim before worker start",
+      "runId": "replay-lease-claim",
+      "issueNumber": 701,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next", "branch": "agent/issue-701", "worktree": ".worktrees/issue-701" } },
+        { "event": "workspace_prepared", "payload": { "branch": "agent/issue-701", "worktree": ".worktrees/issue-701" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true },
+      "expect": { "nextAction": "start_worker", "mustNotRepeat": ["claim_lease", "prepare_workspace"] }
+    },
+    {
+      "version": 1,
+      "name": "crash after worker completion before verification",
+      "runId": "replay-worker-complete",
+      "issueNumber": 702,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-702" } },
+        { "event": "worker_started", "payload": { "adapterId": "scripted", "adapterVersion": "1", "phase": "implementation" } },
+        { "event": "worker_finished", "payload": { "adapterId": "scripted", "adapterVersion": "1", "phase": "implementation", "ok": true, "code": 0, "signal": null, "telemetryStatus": "complete" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true },
+      "expect": { "nextAction": "verify_candidate", "mustNotRepeat": ["start_worker", "run_worker"] }
+    },
+    {
+      "version": 1,
+      "name": "crash after candidate commit",
+      "runId": "replay-candidate-commit",
+      "issueNumber": 703,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-703" } },
+        { "event": "worker_started", "payload": { "adapterId": "scripted", "adapterVersion": "1" } },
+        { "event": "worker_finished", "payload": { "adapterId": "scripted", "adapterVersion": "1", "ok": true } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "event": "candidate_committed", "payload": { "candidateSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": false, "authorityOpen": true },
+      "expect": { "nextAction": "promote_candidate", "mustNotRepeat": ["run_worker", "verify_candidate"] }
+    },
+    {
+      "version": 1,
+      "name": "crash after push before reachability proof",
+      "runId": "replay-after-push",
+      "issueNumber": 704,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-704" } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
+        { "event": "candidate_committed", "payload": { "candidateSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
+        { "event": "promotion_started", "payload": { "candidateSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
+        { "event": "promotion_succeeded", "payload": { "candidateSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "mergeSha": "cccccccccccccccccccccccccccccccccccccccc" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true },
+      "expect": { "nextAction": "reconcile_reachability", "mustNotRepeat": ["promote_candidate"] }
+    },
+    {
+      "version": 1,
+      "name": "crash after reachability proof before close",
+      "runId": "replay-after-reachability",
+      "issueNumber": 705,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-705" } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "dddddddddddddddddddddddddddddddddddddddd" } },
+        { "event": "candidate_committed", "payload": { "candidateSha": "dddddddddddddddddddddddddddddddddddddddd" } },
+        { "event": "promotion_succeeded", "payload": { "mergeSha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" } },
+        { "event": "reachability_proven", "payload": { "candidateSha": "dddddddddddddddddddddddddddddddddddddddd", "mainSha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true },
+      "expect": { "nextAction": "reconcile_authority", "mustNotRepeat": ["promote_candidate", "prove_reachability"] }
+    },
+    {
+      "version": 1,
+      "name": "crash after pending verification record before cleanup",
+      "runId": "replay-pending-before-cleanup",
+      "issueNumber": 706,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-706" } },
+        { "event": "reachability_proven", "payload": { "candidateSha": "ffffffffffffffffffffffffffffffffffffffff", "mainSha": "1111111111111111111111111111111111111111" } },
+        { "event": "authority_reconciled", "payload": { "authorityFingerprint": "authority-706", "changed": false } },
+        { "event": "pending_verification_recorded", "payload": { "mainSha": "1111111111111111111111111111111111111111", "criteriaIds": ["production-smoke"] } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true, "pendingVerificationRecorded": true },
+      "expect": { "nextAction": "cleanup_workspace", "mustNotRepeat": ["record_pending_or_close", "promote_candidate"] }
+    },
+    {
+      "version": 1,
+      "name": "typed contained failure does not repeat unsafe mutation",
+      "runId": "replay-contained",
+      "issueNumber": 707,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-707" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "workspace-validation", "reasonCode": "ambiguous_workspace" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained", "mustNotRepeat": ["claim_lease", "prepare_workspace"] }
+    }
+  ]
+}
