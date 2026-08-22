@@ -12,6 +12,7 @@ import {
   runBootstrap,
   runCommand,
   type BootstrapDependencies,
+  type BootstrapProgressEvent,
   type CommandResult,
   type Issue,
   type WorkerFactory,
@@ -450,6 +451,54 @@ test("marks nonzero cost with zero SDK tokens as suspicious telemetry", async ()
 
 test("rejects implicit multi-issue progression", async () => {
   assert.equal(await main(["--queue", "75,76"]), 2);
+});
+
+
+test("reports bounded progress, activity, heartbeats and checks without leaking task content", async () => {
+  const fixtureState = await fixture();
+  try {
+    const events: BootstrapProgressEvent[] = [];
+    const factory: WorkerFactory = async () => {
+      let listener: ((event: unknown) => void) | undefined;
+      return {
+        model: { provider: "fake", id: "progress" },
+        subscribe: (next) => {
+          listener = next;
+          return () => { if (listener === next) listener = undefined; };
+        },
+        prompt: async () => {
+          listener?.({ type: "tool_execution_end", toolName: "read", args: { secret: "ghp_PROGRESS_SECRET" } });
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        },
+        dispose: () => undefined,
+      };
+    };
+    const dependencies = dependenciesFor(fixtureState.root, factory, () => 0, []);
+    dependencies.reporter = (event) => events.push(event);
+    dependencies.heartbeatMs = 5;
+    dependencies.fetchIssue = async () => ({ ...issue(), body: "SECRET_TASK_BODY ghp_PROGRESS_SECRET" });
+
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependencies,
+    );
+
+    assert.equal(report.disposition, "pass");
+    assert.equal(events[0]?.phase, "preflight");
+    assert.equal(events[0]?.state, "start");
+    assert.ok(events.some((event) => event.phase === "worktree" && event.state === "ready"));
+    assert.ok(events.some((event) => event.phase === "issue" && event.state === "ready"));
+    assert.ok(events.some((event) => event.phase === "worker" && event.state === "activity" && event.tool === "read"));
+    assert.ok(events.some((event) => event.phase === "worker" && event.state === "heartbeat"));
+    assert.ok(events.some((event) => event.phase === "check" && event.state === "start" && event.command === "npm run typecheck"));
+    assert.ok(events.some((event) => event.phase === "check" && event.state === "pass" && event.command === "npm test"));
+    assert.equal(events.at(-1)?.phase, "terminal");
+    assert.equal(events.at(-1)?.state, "pass");
+    const rendered = JSON.stringify(events);
+    assert.doesNotMatch(rendered, /SECRET_TASK_BODY|PROGRESS_SECRET/);
+  } finally {
+    await fixtureState.cleanup();
+  }
 });
 
 test("review evidence includes untracked file contents instead of only git diff names", async () => {
