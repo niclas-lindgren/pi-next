@@ -7,6 +7,10 @@ import {
   type LifecycleJournalAppendInput,
   type LifecycleJournalEventName,
 } from "../../src/coordination/lifecycle-journal.ts";
+import {
+  emitLifecycleCheckpoint,
+  isRecoveryLifecycleCheckpoint,
+} from "../../src/coordination/lifecycle-checkpoints.ts";
 import { runtimeDir } from "./util.ts";
 
 interface LegacyLifecycleObservation {
@@ -66,7 +70,10 @@ export function recordPiLifecycleJournal(
   input: LifecycleJournalAppendInput,
 ): void {
   ensureLegacyBaseline(cwd, input.runId);
+  const checkpoint = isRecoveryLifecycleCheckpoint(input.event) ? input.event : undefined;
+  if (checkpoint) emitLifecycleCheckpoint(checkpoint, "before");
   appendLifecycleJournal(piLifecycleJournalFile(cwd, input.runId), input);
+  if (checkpoint) emitLifecycleCheckpoint(checkpoint, "after");
 }
 
 function mappedEvent(observation: LegacyLifecycleObservation): LifecycleJournalEventName | undefined {

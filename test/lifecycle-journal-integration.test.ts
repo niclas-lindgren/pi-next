@@ -4,9 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import {
+  LifecycleCheckpointFault,
+  withLifecycleFaultInjection,
+} from "../src/coordination/lifecycle-checkpoints.ts";
 import { readLifecycleJournal } from "../src/coordination/lifecycle-journal.ts";
 import { recordLifecycleEvent } from "../extensions/pi-next/lifecycle-telemetry.ts";
-import { piLifecycleJournalFile } from "../extensions/pi-next/lifecycle-journal.ts";
+import {
+  piLifecycleJournalFile,
+  recordPiLifecycleJournal,
+} from "../extensions/pi-next/lifecycle-journal.ts";
 import {
   issueWorkerRunnerFromAdapter,
   PiWorkerAdapter,
@@ -66,6 +73,46 @@ test("worker adapter bridge journals boundaries without prompt or raw output", a
     const raw = await readFile(file, "utf8");
     assert.equal(raw.includes("PROMPT_DO_NOT_PERSIST"), false);
     assert.equal(raw.includes("RAW_OUTPUT_DO_NOT_PERSIST"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi journal bridge exposes deterministic before/after lifecycle faults", async () => {
+  const root = await tempRoot();
+  try {
+    await assert.rejects(
+      withLifecycleFaultInjection({ checkpoint: "lease_claimed", position: "after" }, () => {
+        recordPiLifecycleJournal(root, {
+          runId: "journal-fault-bridge",
+          issueNumber: 713,
+          event: "lease_claimed",
+          payload: { branch: "agent/issue-713", worktree: ".worktrees/issue-713" },
+        });
+      }),
+      (error: unknown) => error instanceof LifecycleCheckpointFault
+        && error.checkpoint === "lease_claimed"
+        && error.position === "after",
+    );
+    assert.deepEqual(
+      readLifecycleJournal(piLifecycleJournalFile(root, "journal-fault-bridge")).map((record) => record.event),
+      ["lease_claimed"],
+    );
+
+    await assert.rejects(
+      withLifecycleFaultInjection({ checkpoint: "workspace_prepared", position: "before" }, () => {
+        recordPiLifecycleJournal(root, {
+          runId: "journal-fault-before",
+          issueNumber: 714,
+          event: "workspace_prepared",
+          payload: { worktree: ".worktrees/issue-714" },
+        });
+      }),
+      (error: unknown) => error instanceof LifecycleCheckpointFault
+        && error.checkpoint === "workspace_prepared"
+        && error.position === "before",
+    );
+    assert.deepEqual(readLifecycleJournal(piLifecycleJournalFile(root, "journal-fault-before")), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -21,6 +21,8 @@ export const LIFECYCLE_JOURNAL_EVENTS = [
   "lease_taken_over",
   "lease_released",
   "workspace_prepared",
+  "authority_loaded",
+  "plan_ready",
   "worker_started",
   "worker_finished",
   "verification_finished",
