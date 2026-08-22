@@ -259,7 +259,7 @@ test("scenario 5: missing terminal loop result deterministically resumes the sam
       async run({ git, leaseAuthority, invariant }) {
         const workspace = join(git.repo, ".worktrees", "issue-105");
         const lease = await leaseAuthority.read(105);
-        invariant(lease, "owned lease must exist");
+        if (!lease) throw new Error("owned lease must exist");
         const initial = loopState(git.repo, workspace, lease, {
           status: "interrupted",
           step: 2,
