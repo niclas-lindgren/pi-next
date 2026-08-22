@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 
-import { BootstrapFinalizeError, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr } from "../scripts/bootstrap-finalize.ts";
+import { BootstrapFinalizeError, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr } from "../scripts/bootstrap-finalize.ts";
 
 const exec = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> { return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim(); }
@@ -33,6 +33,13 @@ async function dirtyCandidate(root: string, issue: number, file = "feature.txt")
   const path = join(root, ".worktrees", `issue-${issue}`);
   await git(root, "worktree", "add", "-q", "-b", `agent/issue-${issue}`, path, "origin/main");
   await writeFile(join(path, file), "candidate\n");
+  return path;
+}
+
+async function dirtyTrackedCandidate(root: string, issue: number, file = "README.md") {
+  const path = join(root, ".worktrees", `issue-${issue}`);
+  await git(root, "worktree", "add", "-q", "-b", `agent/issue-${issue}`, path, "origin/main");
+  await writeFile(join(path, file), "candidate tracked change\n");
   return path;
 }
 
@@ -105,4 +112,42 @@ test("failed CI preserves worktree and prevents merge, closure, and cleanup", as
     assert.equal(await git(f.remote, "rev-parse", "main"), await git(f.root, "rev-parse", "origin/main"));
     assert.ok(await git(worktree, "status", "--porcelain") === "");
   } finally { await f.cleanup(); }
+});
+
+test("first unstaged tracked candidate path preserves porcelain status columns", async () => {
+  const f = await fixture();
+  try {
+    await dirtyTrackedCandidate(f.root, 101);
+    const authority = new FakeAuthority(f.root, 101);
+    const result = await runBootstrapFinalize({ cwd: f.root, authority });
+    assert.equal(result.ok, true);
+    assert.equal(await git(f.remote, "show", "main:README.md"), "candidate tracked change");
+  } finally { await f.cleanup(); }
+});
+
+test("automatic candidate discovery ignores stale already-integrated issue branches and worktrees", async () => {
+  const f = await fixture();
+  try {
+    const stale = await dirtyCandidate(f.root, 100, "stale.txt");
+    await git(stale, "add", "stale.txt");
+    await git(stale, "commit", "-qm", "stale integrated");
+    await git(f.root, "switch", "main");
+    await git(f.root, "merge", "--ff-only", "agent/issue-100");
+    await git(f.root, "push", "-q", "origin", "main");
+    await dirtyCandidate(f.root, 101, "live.txt");
+    const authority = new FakeAuthority(f.root, 101);
+    const result = await runBootstrapFinalize({ cwd: f.root, authority });
+    assert.equal(result.issueNumber, 101);
+  } finally { await f.cleanup(); }
+});
+
+test("bootstrap finalizer --help reports usage without touching repository state", async () => {
+  const logs: string[] = [];
+  const originalLog = console.log;
+  try {
+    console.log = (line?: unknown) => { logs.push(String(line ?? "")); };
+    await bootstrapFinalizeMain(["--help"]);
+  } finally { console.log = originalLog; }
+  assert.match(logs.join("\n"), /Usage: npm run bootstrap:finalize/);
+  assert.match(logs.join("\n"), /--issue N/);
 });
