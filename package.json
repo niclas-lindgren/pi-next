@@ -47,8 +47,8 @@
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
-    "package-smoke": "tsx --test --test-concurrency=1 test/package.test.ts",
+    "test": "node scripts/run-tests-safe-git.mjs --all",
+    "package-smoke": "node scripts/run-tests-safe-git.mjs test/package.test.ts",
     "lint": "tsc --noEmit",
     "coordination-cli": "tsx src/coordination/bin.ts",
     "bootstrap:self-host": "tsx scripts/bootstrap-self-host.ts",
