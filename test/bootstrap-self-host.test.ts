@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 import {
   BootstrapSetupError,
+  fetchRoadmapIssues,
   main,
   resolveNextIssue,
   runBootstrap,
@@ -462,6 +463,23 @@ function roadmap(items: Array<Partial<RoadmapIssue> & { number: number }>): Road
     labels: item.labels ?? [],
   }));
 }
+
+test("roadmap discovery preserves row order without treating dependency references as candidates", async () => {
+  const viewed: number[] = [];
+  const result = await fetchRoadmapIssues(process.cwd(), async (command, args, options) => {
+    assert.equal(command, "gh");
+    assert.deepEqual(args.slice(0, 3), ["issue", "view", args[2]]);
+    const number = Number(args[2]);
+    viewed.push(number);
+    const payload = number === 73
+      ? { number: 73, title: "roadmap", body: "- #79 ready\n- #80 blocked by #78/#79\n", comments: [], state: "OPEN", labels: [] }
+      : { number, title: `issue ${number}`, body: "", comments: [], state: "OPEN", labels: [] };
+    return { command, args, cwd: options.cwd, exitCode: 0, stdout: JSON.stringify(payload), stderr: "", durationMs: 1 };
+  });
+
+  assert.deepEqual(viewed, [73, 79, 80]);
+  assert.deepEqual(result.map((item) => item.number), [79, 80]);
+});
 
 test("automatic selection skips closed predecessors and chooses the first dependency-ready open roadmap issue", async () => {
   const selection = await resolveNextIssue(process.cwd(), {

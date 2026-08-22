@@ -634,12 +634,12 @@ function orderedIssueNumbersFromRoadmap(body: string): number[] {
   const seen = new Set<number>();
   for (const line of body.split("\n")) {
     if (!/^\s*(?:[-*]\s*)?(?:\[[ xX]\]\s*)?(?:#\d+|.*\bissue\b.*#\d+)/i.test(line)) continue;
-    for (const match of line.matchAll(/#(\d+)/g)) {
-      const number = Number(match[1]);
-      if (number === DEFAULT_ROADMAP_ISSUE || seen.has(number)) continue;
-      seen.add(number);
-      numbers.push(number);
-    }
+    const match = line.match(/#(\d+)/);
+    if (!match) continue;
+    const number = Number(match[1]);
+    if (number === DEFAULT_ROADMAP_ISSUE || seen.has(number)) continue;
+    seen.add(number);
+    numbers.push(number);
   }
   if (numbers.length === 0) throw new BootstrapError(`roadmap #${DEFAULT_ROADMAP_ISSUE} contains no ordered issue references`);
   return numbers;
