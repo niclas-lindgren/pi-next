@@ -47,9 +47,10 @@
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/run-tests-safe-git.mjs --all",
+    "test": "node scripts/check-file-size.mjs && node scripts/run-tests-safe-git.mjs --all",
     "package-smoke": "node scripts/run-tests-safe-git.mjs test/package.test.ts",
     "lint": "tsc --noEmit",
+    "check:file-size": "node scripts/check-file-size.mjs",
     "coordination-cli": "tsx src/coordination/bin.ts",
     "bootstrap:self-host": "tsx scripts/bootstrap-self-host.ts",
     "bootstrap:finalize": "tsx scripts/bootstrap-finalize.ts",
