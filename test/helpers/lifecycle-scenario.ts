@@ -110,7 +110,7 @@ export interface LifecycleScenarioContext<
   readonly leaseAuthority: MemoryIssueLeaseAuthority;
   readonly clock: ManualScenarioClock;
   readonly worker: ScriptedWorkerAdapter<TResult>;
-  invariant(condition: unknown, message: string): asserts condition;
+  invariant(condition: unknown, message: string): void;
 }
 
 export interface LifecycleScenarioStep<
@@ -155,7 +155,7 @@ export async function runLifecycleScenario<
     leaseAuthority,
     clock,
     worker,
-    invariant(condition: unknown, message: string): asserts condition {
+    invariant(condition: unknown, message: string): void {
       if (!condition) throw new Error(`invariant violated: ${message}`);
     },
   };
