@@ -167,13 +167,19 @@ The planned next reliability work is described in [`docs/IMPLEMENTATION_PLAN.md`
 
 ### Bootstrap one implementation issue
 
-Issue #74 provides a temporary developer utility for bootstrapping the next issue in #73 with one fresh plain-Pi worker. Run it from a clean coordination checkout on `main`:
+The bootstrap utility runs one bounded issue worker from a clean coordination checkout on `main`:
 
 ```sh
 npm run bootstrap:self-host -- --issue 75
 ```
 
-It prepares the canonical `.worktrees/issue-75` / `agent/issue-75` workspace, fetches the complete issue, runs deterministic checks outside the worker, and leaves merge and issue closure to the operator. A bounded fresh repair or read-only review can be enabled with `--repair` or `--review`; `--queue` is intentionally not supported.
+It prepares the canonical `.worktrees/issue-75` / `agent/issue-75` workspace, installs or validates worktree-local dependencies from the committed lockfile before launching Pi, fetches the complete issue, runs deterministic checks outside the worker, and reports bounded candidate state (including dirty uncommitted work). It leaves merge and issue closure to the operator. To re-grade an existing candidate without another implementation turn, use:
+
+```sh
+npm run bootstrap:self-host -- --issue 75 --verify-only
+```
+
+`--resume` is an alias for `--verify-only`; `--repair` may add one bounded repair only after verification fails. A read-only review can be enabled with `--review`; `--queue` is intentionally not supported.
 
 ### Release automation
 

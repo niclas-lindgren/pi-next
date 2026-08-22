@@ -1,12 +1,14 @@
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
 
 const MAX_OUTPUT = 32_000;
 const MAX_FAILURE_EVIDENCE = 8_000;
 const MAX_PACKET_BYTES = 256_000;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
+const MAX_CHANGED_FILES = 200;
 const CHECKS = ["npm run typecheck", "npm test"] as const;
 
 export type Disposition = "pass" | "repairable-failure" | "blocked";
@@ -59,13 +61,37 @@ export interface WorkerStats {
   cost: number;
 }
 
+export interface CandidateState {
+  headRevision: string;
+  baselineRevision: string;
+  dirty: boolean;
+  changedFiles: string[];
+  committedChanges: boolean;
+  uncommittedChanges: boolean;
+}
+
+export type DependencyManager = "npm" | "pnpm" | "yarn";
+
+export interface DependencySetupReport {
+  manager?: DependencyManager;
+  lockfile?: string;
+  action: "not-required" | "reused" | "installed";
+}
+
+export interface DependencySetupFailure {
+  code: "DEPENDENCY_SETUP_FAILED";
+}
+
 export interface WorkerSession {
   prompt(text: string): Promise<void>;
   subscribe(listener: (event: unknown) => void): () => void;
   dispose(): void;
   abort?(): Promise<void>;
   readonly model?: WorkerModel;
-  getSessionStats?: () => Partial<WorkerStats> & { toolCalls?: number };
+  getSessionStats?: () => (Partial<WorkerStats> & {
+    tokens?: Partial<WorkerStats>;
+    toolCalls?: number;
+  });
 }
 
 export interface WorkerFactoryInput {
@@ -89,6 +115,7 @@ export interface BootstrapOptions {
   allowRepair: boolean;
   review: boolean;
   timeoutMs?: number;
+  verifyOnly?: boolean;
   signal?: AbortSignal;
 }
 
@@ -109,6 +136,7 @@ export interface WorkerReport {
   toolCalls: number;
   usage?: WorkerStats;
   reason?: string;
+  telemetryWarning?: string;
 }
 
 export interface BootstrapReport {
@@ -121,6 +149,8 @@ export interface BootstrapReport {
   worktree: string;
   revision: string;
   baselineRevision: string;
+  candidate: CandidateState;
+  dependencySetup: DependencySetupReport;
   workerAttempts: WorkerReport[];
   checks: CheckReport[];
   reviewer?: WorkerReport;
@@ -138,9 +168,21 @@ interface WorktreeEntry {
 }
 
 class BootstrapError extends Error {
-  constructor(message: string) {
+  readonly code: string;
+
+  constructor(message: string, code = "BOOTSTRAP_FAILED") {
     super(message);
     this.name = "BootstrapError";
+    this.code = code;
+  }
+}
+
+export class BootstrapSetupError extends BootstrapError implements DependencySetupFailure {
+  readonly code = "DEPENDENCY_SETUP_FAILED" as const;
+
+  constructor(message: string) {
+    super(message, "DEPENDENCY_SETUP_FAILED");
+    this.name = "BootstrapSetupError";
   }
 }
 
@@ -262,6 +304,121 @@ async function isDirectory(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function isSymlink(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+interface DependencySpec {
+  manager: DependencyManager;
+  lockfile: string;
+  validateArgs: string[];
+  installArgs: string[];
+}
+
+const DEPENDENCY_STATE_FILE = ".pi-next-dependency-state.json";
+
+async function dependencyFingerprint(cwd: string, lockfile: string): Promise<string> {
+  const packageJson = await readFile(resolve(cwd, "package.json"));
+  const lock = await readFile(resolve(cwd, lockfile));
+  return createHash("sha256").update(packageJson).update("\0").update(lock).digest("hex");
+}
+
+async function dependencyState(cwd: string): Promise<{ manager: DependencyManager; lockfile: string; fingerprint: string } | undefined> {
+  try {
+    const value = JSON.parse(await readFile(resolve(cwd, "node_modules", DEPENDENCY_STATE_FILE), "utf8")) as Partial<{
+      manager: DependencyManager;
+      lockfile: string;
+      fingerprint: string;
+    }>;
+    if (typeof value.manager !== "string" || typeof value.lockfile !== "string" || typeof value.fingerprint !== "string") return undefined;
+    return value as { manager: DependencyManager; lockfile: string; fingerprint: string };
+  } catch {
+    return undefined;
+  }
+}
+
+async function recordDependencyState(cwd: string, spec: DependencySpec, fingerprint: string): Promise<void> {
+  await writeFile(resolve(cwd, "node_modules", DEPENDENCY_STATE_FILE), JSON.stringify({
+    version: 1,
+    manager: spec.manager,
+    lockfile: spec.lockfile,
+    fingerprint,
+  }) + "\n");
+}
+
+async function dependencySpec(cwd: string): Promise<DependencySpec | undefined> {
+  let packageManager: string | undefined;
+  try {
+    const packageJson = JSON.parse(await readFile(resolve(cwd, "package.json"), "utf8")) as { packageManager?: unknown };
+    if (typeof packageJson.packageManager === "string") packageManager = packageJson.packageManager.split("@")[0];
+  } catch {
+    // A lockfile below is still enough to select a deterministic installer.
+  }
+  const candidates: Array<[DependencyManager, string, string[], string[]]> = [
+    ["npm", "package-lock.json", ["ls", "--all", "--json", "--silent"], ["ci"]],
+    ["pnpm", "pnpm-lock.yaml", ["list", "--recursive", "--depth", "Infinity", "--json"], ["install", "--frozen-lockfile"]],
+    ["yarn", "yarn.lock", ["check", "--integrity"], ["install", "--frozen-lockfile"]],
+  ];
+  const ordered = packageManager
+    ? [...candidates].sort(([manager]) => manager === packageManager ? -1 : 1)
+    : candidates;
+  for (const [manager, lockfile, validateArgs, installArgs] of ordered) {
+    if (await stat(resolve(cwd, lockfile)).then((entry) => entry.isFile()).catch(() => false)) {
+      return { manager, lockfile, validateArgs, installArgs };
+    }
+  }
+  return undefined;
+}
+
+async function prepareDependencies(
+  cwd: string,
+  runner: CommandRunner,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<DependencySetupReport> {
+  const spec = await dependencySpec(cwd);
+  if (!spec) return { action: "not-required" };
+
+  const nodeModules = resolve(cwd, "node_modules");
+  const fingerprint = await dependencyFingerprint(cwd, spec.lockfile);
+  const recorded = await dependencyState(cwd);
+  const reusable = await isDirectory(nodeModules) && !(await isSymlink(nodeModules));
+  const sameInputs = recorded?.manager === spec.manager && recorded.lockfile === spec.lockfile && recorded.fingerprint === fingerprint;
+  // A legacy installation without our stamp is still reusable only after the
+  // package manager mechanically validates the installed tree. Once stamped,
+  // a package/lockfile change deterministically bypasses validation and forces
+  // an install in this worktree rather than borrowing a parent installation.
+  if (reusable && (recorded === undefined || sameInputs)) {
+    const validation = await runner(spec.manager, spec.validateArgs, { cwd, timeoutMs, signal });
+    if (validation.exitCode === 0) {
+      try {
+        await recordDependencyState(cwd, spec, fingerprint);
+      } catch {
+        // The validated installation is still usable; a later run will
+        // validate it again if the bounded stamp cannot be written.
+      }
+      return { manager: spec.manager, lockfile: spec.lockfile, action: "reused" };
+    }
+  }
+
+  const installed = await runner(spec.manager, spec.installArgs, { cwd, timeoutMs, signal });
+  if (installed.exitCode !== 0) {
+    const evidence = redact(installed.stderr || installed.stdout || `exit ${installed.exitCode}`);
+    throw new BootstrapSetupError(`${spec.manager} dependency setup failed for ${spec.lockfile}: ${evidence}`);
+  }
+  try {
+    await recordDependencyState(cwd, spec, fingerprint);
+  } catch {
+    // State is an optimization. The successful deterministic install remains
+    // authoritative for this run; a later run will validate again.
+  }
+  return { manager: spec.manager, lockfile: spec.lockfile, action: "installed" };
 }
 
 function parseWorktrees(text: string): WorktreeEntry[] {
@@ -456,18 +613,25 @@ export async function createDefaultWorkerFactory(): Promise<WorkerFactory> {
   };
 }
 
-function workerStats(session: WorkerSession): { toolCalls: number; usage?: WorkerStats } {
+function workerStats(session: WorkerSession): { toolCalls: number; usage?: WorkerStats; warning?: string } {
   const stats = session.getSessionStats?.();
   if (!stats) return { toolCalls: 0 };
+  // Pi >= 0.84 nests token counters under stats.tokens. Keep the flat
+  // fallback for older supported SDKs, but prefer the authoritative shape.
+  const tokens = stats.tokens ?? stats;
   const usage: WorkerStats = {
-    input: stats.input ?? 0,
-    output: stats.output ?? 0,
-    cacheRead: stats.cacheRead ?? 0,
-    cacheWrite: stats.cacheWrite ?? 0,
-    total: stats.total ?? 0,
+    input: tokens.input ?? 0,
+    output: tokens.output ?? 0,
+    cacheRead: tokens.cacheRead ?? 0,
+    cacheWrite: tokens.cacheWrite ?? 0,
+    total: tokens.total ?? 0,
     cost: stats.cost ?? 0,
   };
-  return { toolCalls: stats.toolCalls ?? 0, usage };
+  const hasTokenStats = stats.tokens !== undefined;
+  const warning = hasTokenStats && usage.cost > 0 && usage.total === 0
+    ? "SDK reported nonzero cost with zero token usage"
+    : undefined;
+  return { toolCalls: stats.toolCalls ?? 0, usage, warning };
 }
 
 async function runWorker(
@@ -514,6 +678,7 @@ async function runWorker(
       durationMs: Date.now() - started,
       toolCalls: Math.max(toolCalls, stats.toolCalls),
       usage: stats.usage,
+      telemetryWarning: stats.warning,
     };
     reports.push(report);
     return report;
@@ -529,6 +694,7 @@ async function runWorker(
       durationMs: Date.now() - started,
       toolCalls: Math.max(toolCalls, stats.toolCalls),
       usage: stats.usage,
+      telemetryWarning: stats.warning,
       reason: redact(error instanceof Error ? error.message : String(error)),
     };
     reports.push(report);
@@ -559,6 +725,43 @@ async function runChecks(cwd: string, runner: CommandRunner, timeoutMs: number, 
   return checks;
 }
 
+function statusFileNames(status: string): string[] {
+  return status.split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      // git() trims the complete output, so the first porcelain line may
+      // lose its leading index-column space. Handle both the normal two-byte
+      // status prefix and that trimmed form.
+      const path = /^[ MADRCU?!][ MADRCU?!] /.test(line)
+        ? line.slice(3)
+        : /^[MADRCU?!] /.test(line)
+          ? line.slice(2)
+          : line;
+      return path.split(" -> ").at(-1) ?? path;
+    })
+    .filter(Boolean);
+}
+
+async function readCandidateState(cwd: string, baselineRevision: string, runner: CommandRunner): Promise<CandidateState> {
+  const headRevision = await git(cwd, ["rev-parse", "HEAD"], runner);
+  const [status, committedFiles] = await Promise.all([
+    git(cwd, ["status", "--short", "--untracked-files=all"], runner),
+    git(cwd, ["diff", "--name-only", `${baselineRevision}...${headRevision}`], runner),
+  ]);
+  const changedFiles = [...new Set([
+    ...committedFiles.split("\n").filter(Boolean),
+    ...statusFileNames(status),
+  ])].slice(0, MAX_CHANGED_FILES);
+  return {
+    headRevision,
+    baselineRevision,
+    dirty: status.length > 0,
+    changedFiles,
+    committedChanges: headRevision !== baselineRevision,
+    uncommittedChanges: status.length > 0,
+  };
+}
+
 async function candidateEvidence(cwd: string, baselineRevision: string, revision: string, runner: CommandRunner): Promise<string> {
   const [status, committed, unstaged] = await Promise.all([
     git(cwd, ["status", "--short"], runner),
@@ -579,40 +782,50 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   const started = now();
   const runner = dependencies.runCommand ?? runCommand;
   const cwd = resolve(options.cwd ?? process.cwd());
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const repository = await prepareRepository(cwd, runner);
   const worktree = await prepareWorktree(repository, options.issueNumber, runner);
+  // This is deliberately before creating or launching a worker. A fresh
+  // worktree must be verifiable on its own, and setup failures must cost zero
+  // model tokens while leaving the candidate files untouched.
+  const dependencySetup = await prepareDependencies(worktree.path, runner, timeoutMs, options.signal);
   const issue = dependencies.fetchIssue ? await dependencies.fetchIssue(options.issueNumber, repository.root) : await fetchIssue(options.issueNumber, repository.root, runner);
   const contextFiles = await loadContextFiles(worktree.path, issue);
-  const factory = dependencies.createWorker ?? await createDefaultWorkerFactory();
   const workerAttempts: WorkerReport[] = [];
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const initialPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "implementation");
-  const initialWorker = await runWorker(factory, "implementation", initialPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
+  let factory: WorkerFactory | undefined;
+  const getFactory = async (): Promise<WorkerFactory> => {
+    factory ??= dependencies.createWorker ?? await createDefaultWorkerFactory();
+    return factory;
+  };
+  let initialWorker: WorkerReport | undefined;
+  if (!options.verifyOnly) {
+    const initialPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "implementation");
+    initialWorker = await runWorker(await getFactory(), "implementation", initialPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
+  }
   let checks = await runChecks(worktree.path, runner, timeoutMs, options.signal);
   let repairWorker: WorkerReport | undefined;
-  if (!checks.every((check) => check.passed) && options.allowRepair && initialWorker.disposition === "completed") {
+  const implementationCompleted = options.verifyOnly || initialWorker?.disposition === "completed";
+  if (!checks.every((check) => check.passed) && options.allowRepair && implementationCompleted) {
     const repairPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "repair", failureEvidence(checks));
-    repairWorker = await runWorker(factory, "repair", repairPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
+    repairWorker = await runWorker(await getFactory(), "repair", repairPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
     checks = await runChecks(worktree.path, runner, timeoutMs, options.signal);
   }
-  const revision = await git(worktree.path, ["rev-parse", "HEAD"], runner);
+  const candidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
   let reviewer: WorkerReport | undefined;
-  if (options.review && initialWorker.disposition === "completed" && checks.every((check) => check.passed)) {
-    const candidate = await candidateEvidence(worktree.path, repository.baselineRevision, revision, runner);
-    const reviewPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "review", undefined, candidate);
-    reviewer = await runWorker(factory, "review", reviewPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
+  if (options.review && implementationCompleted && checks.every((check) => check.passed)) {
+    const reviewEvidence = await candidateEvidence(worktree.path, repository.baselineRevision, candidate.headRevision, runner);
+    const reviewPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "review", undefined, reviewEvidence);
+    reviewer = await runWorker(await getFactory(), "review", reviewPrompt, worktree.path, timeoutMs, workerAttempts, options.signal);
   }
   const mechanicalPass = checks.length === CHECKS.length && checks.every((check) => check.passed);
-  const disposition: Disposition = initialWorker.disposition !== "completed"
+  const disposition: Disposition = !implementationCompleted
     ? "blocked"
     : mechanicalPass
       ? "pass"
-      : repairWorker
-        ? "repairable-failure"
-        : "repairable-failure";
+      : "repairable-failure";
   const reason = disposition === "pass"
     ? undefined
-    : initialWorker.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification");
+    : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification");
   return {
     issueNumber: options.issueNumber,
     attempts: workerAttempts.length,
@@ -621,8 +834,10 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     disposition,
     branch: worktree.branch,
     worktree: relative(repository.root, worktree.path) || ".",
-    revision,
+    revision: candidate.headRevision,
     baselineRevision: repository.baselineRevision,
+    candidate,
+    dependencySetup,
     workerAttempts,
     checks,
     reviewer,
@@ -634,12 +849,14 @@ function parseArgs(args: string[]): BootstrapOptions {
   let issueNumber: number | undefined;
   let allowRepair = false;
   let review = false;
+  let verifyOnly = false;
   let timeoutMs: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--issue") issueNumber = Number(args[++index]);
     else if (arg === "--repair") allowRepair = true;
     else if (arg === "--review") review = true;
+    else if (arg === "--verify-only" || arg === "--resume") verifyOnly = true;
     else if (arg === "--timeout-ms") timeoutMs = Number(args[++index]);
     else if (arg === "--queue") throw new BootstrapError("multi-issue --queue mode is intentionally not implemented");
     else throw new BootstrapError(`unknown option: ${arg}`);
@@ -647,7 +864,7 @@ function parseArgs(args: string[]): BootstrapOptions {
   const parsedIssueNumber = issueNumber;
   if (typeof parsedIssueNumber !== "number" || !Number.isInteger(parsedIssueNumber) || parsedIssueNumber <= 0) throw new BootstrapError("--issue N is required");
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) throw new BootstrapError("--timeout-ms must be positive");
-  return { issueNumber: parsedIssueNumber, allowRepair, review, timeoutMs };
+  return { issueNumber: parsedIssueNumber, allowRepair, review, verifyOnly, timeoutMs };
 }
 
 export function exitCodeForDisposition(disposition: Disposition): number {
@@ -660,7 +877,11 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     console.log(JSON.stringify(report, null, 2));
     return exitCodeForDisposition(report.disposition);
   } catch (error) {
-    console.error(JSON.stringify({ disposition: "blocked", reason: redact(error instanceof Error ? error.message : String(error)) }));
+    console.error(JSON.stringify({
+      disposition: "blocked",
+      code: error instanceof BootstrapError ? error.code : "BOOTSTRAP_FAILED",
+      reason: redact(error instanceof Error ? error.message : String(error)),
+    }));
     return 2;
   }
 }
