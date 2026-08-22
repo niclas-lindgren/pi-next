@@ -130,12 +130,31 @@ function fakeFactory(
   return async ({ cwd, role }) => {
     const record = { role, prompt: "", disposed: false, aborted: false };
     sessions.push(record);
+    let listener: ((event: unknown) => void) | undefined;
     const session: WorkerSession = {
       model: { provider: "fake", id: "scripted" },
-      subscribe: () => () => undefined,
+      subscribe: (next) => {
+        listener = next;
+        return () => {
+          if (listener === next) listener = undefined;
+        };
+      },
       prompt: async (prompt) => {
         record.prompt = prompt;
         await action(role, cwd, prompt);
+        const result = structured?.(role);
+        if (result !== undefined && listener) {
+          const text = JSON.stringify(result);
+          const split = Math.max(1, Math.floor(text.length / 2));
+          for (const delta of [text.slice(0, split), text.slice(split)]) {
+            if (!delta) continue;
+            listener({
+              type: "message_update",
+              message: { role: "assistant", content: [] },
+              assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta, partial: {} },
+            });
+          }
+        }
       },
       abort: async () => {
         record.aborted = true;
@@ -144,7 +163,6 @@ function fakeFactory(
         record.disposed = true;
       },
       getSessionStats: stats,
-      getStructuredResult: () => structured?.(role),
     };
     return session;
   };

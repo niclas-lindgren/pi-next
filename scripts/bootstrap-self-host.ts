@@ -114,7 +114,6 @@ export interface WorkerSession {
     tokens?: Partial<WorkerStats>;
     toolCalls?: number;
   });
-  getStructuredResult?: () => unknown;
 }
 
 export interface WorkerFactoryInput {
@@ -644,18 +643,12 @@ export async function createDefaultWorkerFactory(): Promise<WorkerFactory> {
   };
 }
 
-function extractEventText(event: unknown): string | undefined {
+function extractAssistantTextDelta(event: unknown): string | undefined {
   if (!event || typeof event !== "object") return undefined;
-  const item = event as Record<string, unknown>;
-  for (const key of ["text", "content", "message", "response", "output"]) {
-    const value = item[key];
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      const joined = value.map((part) => typeof part === "string" ? part : part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "").join("");
-      if (joined) return joined;
-    }
-  }
-  return undefined;
+  const item = event as { type?: unknown; assistantMessageEvent?: unknown };
+  if (item.type !== "message_update" || !item.assistantMessageEvent || typeof item.assistantMessageEvent !== "object") return undefined;
+  const assistantEvent = item.assistantMessageEvent as { type?: unknown; delta?: unknown };
+  return assistantEvent.type === "text_delta" && typeof assistantEvent.delta === "string" ? assistantEvent.delta : undefined;
 }
 
 function parseReviewResultText(text: string | undefined): ReviewerResult | undefined {
@@ -727,14 +720,14 @@ async function runWorker(
   let session: WorkerSession | undefined;
   let unsubscribe: (() => void) | undefined;
   let toolCalls = 0;
-  const eventTexts: string[] = [];
+  let assistantText = "";
   let cancelParent: (() => void) | undefined;
   try {
     session = await factory({ cwd, role, signal: controller.signal });
     unsubscribe = session.subscribe((event) => {
       if (typeof event === "object" && event !== null && (event as { type?: string }).type === "tool_execution_end") toolCalls += 1;
-      const text = extractEventText(event);
-      if (text) eventTexts.push(text.slice(-4_000));
+      const delta = extractAssistantTextDelta(event);
+      if (delta) assistantText = `${assistantText}${delta}`.slice(-16_000);
     });
     const cancellation = new Promise<never>((_, reject) => {
       cancelParent = () => {
@@ -760,7 +753,7 @@ async function runWorker(
       toolCalls: Math.max(toolCalls, stats.toolCalls),
       usage: stats.usage,
       telemetryWarning: stats.warning,
-      reviewResult: role === "review" ? (sanitizeReviewResult(session.getStructuredResult?.()) ?? parseReviewResultText(eventTexts.at(-1))) : undefined,
+      reviewResult: role === "review" ? parseReviewResultText(assistantText) : undefined,
     };
     reports.push(report);
     return report;
