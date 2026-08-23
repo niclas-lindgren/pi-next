@@ -17,6 +17,7 @@ function parseArgs(args: string[]): BootstrapCliOptions {
   let verifyOnly = false;
   let nextOnly = false;
   let finalize = true;
+  let cwd: string | undefined;
   let timeoutMs: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -28,12 +29,17 @@ function parseArgs(args: string[]): BootstrapCliOptions {
     else if (arg === "--next-only") nextOnly = true;
     else if (arg === "--no-finalize") finalize = false;
     else if (arg === "--timeout-ms") timeoutMs = Number(args[++index]);
+    else if (arg === "--cwd") {
+      const value = args[++index];
+      if (!value) throw new BootstrapError("--cwd requires a path");
+      cwd = value;
+    }
     else if (arg === "--queue") throw new BootstrapError("multi-issue --queue mode is intentionally not implemented");
     else throw new BootstrapError(`unknown option: ${arg}`);
   }
   if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber <= 0)) throw new BootstrapError("--issue must be a positive integer");
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) throw new BootstrapError("--timeout-ms must be positive");
-  return { issueNumber, allowRepair, review, verifyOnly, timeoutMs, nextOnly, finalize };
+  return { issueNumber, cwd, allowRepair, review, verifyOnly, timeoutMs, nextOnly, finalize };
 }
 
 export function exitCodeForDisposition(disposition: Disposition | "finalization-blocked"): number {

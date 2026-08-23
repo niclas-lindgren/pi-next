@@ -824,75 +824,85 @@ test("malformed anchored dependency metadata fails closed", async () => {
 });
 
 test("explicit --issue bypasses automatic selection and remains unchanged", async () => {
-  const calls: number[] = [];
-  const finalizations: number[] = [];
-  const code = await runBootstrapCli(["--issue", "85"], {
-    fetchRoadmapIssues: async () => { throw new Error("selection should not run"); },
-    runFinalizer: async (options) => {
-      finalizations.push(options.issueNumber ?? 0);
-      return { ok: true, issueNumber: options.issueNumber ?? 0, branch: "agent/issue-85", candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
-    },
-  }, async (options) => {
-    calls.push(options.issueNumber);
-    return {
+  const fixtureState = await fixture();
+  try {
+    const calls: number[] = [];
+    const finalizations: number[] = [];
+    const code = await runBootstrapCli(["--cwd", fixtureState.root, "--issue", "85"], {
+      fetchRoadmapIssues: async () => { throw new Error("selection should not run"); },
+      runFinalizer: async (options) => {
+        finalizations.push(options.issueNumber ?? 0);
+        return { ok: true, issueNumber: options.issueNumber ?? 0, branch: "agent/issue-85", candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+      },
+    }, async (options) => {
+      calls.push(options.issueNumber);
+      return {
+        issueNumber: options.issueNumber,
+        attempts: 0,
+        start: "2026-01-01T00:00:00.000Z",
+        end: "2026-01-01T00:00:00.000Z",
+        disposition: "pass",
+        branch: "agent/issue-85",
+        worktree: ".worktrees/issue-85",
+        revision: "r",
+        baselineRevision: "b",
+        candidate: {} as never,
+        dependencySetup: { action: "not-required" },
+        workerAttempts: [],
+        checks: [],
+        mechanicalPass: true,
+        candidateReadyForReview: true,
+        finalizationReady: true,
+        implementationOutcome: "implemented",
+        candidateHasDelta: true,
+      };
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(calls, [85]);
+    assert.deepEqual(finalizations, [85]);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("CLI enables one automatic repair by default and --no-repair opts out", async () => {
+  const fixtureState = await fixture();
+  try {
+    const observed: boolean[] = [];
+    const baseReport = (options: { issueNumber: number }) => ({
       issueNumber: options.issueNumber,
-      attempts: 0,
+      attempts: 1,
       start: "2026-01-01T00:00:00.000Z",
       end: "2026-01-01T00:00:00.000Z",
-      disposition: "pass",
+      disposition: "pass" as const,
       branch: "agent/issue-85",
       worktree: ".worktrees/issue-85",
       revision: "r",
       baselineRevision: "b",
-      candidate: {} as never,
-      dependencySetup: { action: "not-required" },
+      candidate: { changedFiles: ["candidate.txt"] } as never,
+      dependencySetup: { action: "not-required" as const },
       workerAttempts: [],
       checks: [],
       mechanicalPass: true,
       candidateReadyForReview: true,
-      finalizationReady: true,
-      implementationOutcome: "implemented",
+      finalizationReady: false,
+      implementationOutcome: "implemented" as const,
       candidateHasDelta: true,
-    };
-  });
-  assert.equal(code, 0);
-  assert.deepEqual(calls, [85]);
-  assert.deepEqual(finalizations, [85]);
-});
+    });
 
-test("CLI enables one automatic repair by default and --no-repair opts out", async () => {
-  const observed: boolean[] = [];
-  const baseReport = (options: { issueNumber: number }) => ({
-    issueNumber: options.issueNumber,
-    attempts: 1,
-    start: "2026-01-01T00:00:00.000Z",
-    end: "2026-01-01T00:00:00.000Z",
-    disposition: "pass" as const,
-    branch: "agent/issue-85",
-    worktree: ".worktrees/issue-85",
-    revision: "r",
-    baselineRevision: "b",
-    candidate: { changedFiles: ["candidate.txt"] } as never,
-    dependencySetup: { action: "not-required" as const },
-    workerAttempts: [],
-    checks: [],
-    mechanicalPass: true,
-    candidateReadyForReview: true,
-    finalizationReady: false,
-    implementationOutcome: "implemented" as const,
-    candidateHasDelta: true,
-  });
+    assert.equal(await runBootstrapCli(["--cwd", fixtureState.root, "--issue", "85", "--no-finalize"], {}, async (options) => {
+      observed.push(options.allowRepair);
+      return baseReport(options);
+    }), 0);
+    assert.equal(await runBootstrapCli(["--cwd", fixtureState.root, "--issue", "85", "--no-repair", "--no-finalize"], {}, async (options) => {
+      observed.push(options.allowRepair);
+      return baseReport(options);
+    }), 0);
 
-  assert.equal(await runBootstrapCli(["--issue", "85", "--no-finalize"], {}, async (options) => {
-    observed.push(options.allowRepair);
-    return baseReport(options);
-  }), 0);
-  assert.equal(await runBootstrapCli(["--issue", "85", "--no-repair", "--no-finalize"], {}, async (options) => {
-    observed.push(options.allowRepair);
-    return baseReport(options);
-  }), 0);
-
-  assert.deepEqual(observed, [true, false]);
+    assert.deepEqual(observed, [true, false]);
+  } finally {
+    await fixtureState.cleanup();
+  }
 });
 
 test("--next-only launches zero workers or bootstrap executions", async () => {
@@ -937,28 +947,68 @@ test("--next-only evaluates the real #73/#107 fenced dependency shape without am
 });
 
 test("automatic selection invokes the existing single-issue bootstrap path exactly once and does not queue progress", async () => {
-  const calls: number[] = [];
-  const finalizations: number[] = [];
-  const selectedFixtureIssue = 85;
-  const code = await runBootstrapCli([], {
-    fetchRoadmapIssues: async () => roadmap([{ number: selectedFixtureIssue }, { number: 82 }]),
-    runFinalizer: async (options) => {
-      finalizations.push(options.issueNumber ?? 0);
-      return { ok: true, issueNumber: options.issueNumber ?? 0, branch: `agent/issue-${selectedFixtureIssue}`, candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
-    },
-  }, async (options) => {
-    calls.push(options.issueNumber);
-    return {
+  const fixtureState = await fixture();
+  try {
+    const calls: number[] = [];
+    const finalizations: number[] = [];
+    const selectedFixtureIssue = 85;
+    const code = await runBootstrapCli(["--cwd", fixtureState.root], {
+      fetchRoadmapIssues: async () => roadmap([{ number: selectedFixtureIssue }, { number: 82 }]),
+      runFinalizer: async (options) => {
+        finalizations.push(options.issueNumber ?? 0);
+        return { ok: true, issueNumber: options.issueNumber ?? 0, branch: `agent/issue-${selectedFixtureIssue}`, candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+      },
+    }, async (options) => {
+      calls.push(options.issueNumber);
+      return {
+        issueNumber: options.issueNumber,
+        attempts: 1,
+        start: "2026-01-01T00:00:00.000Z",
+        end: "2026-01-01T00:00:00.000Z",
+        disposition: "pass",
+        branch: `agent/issue-${selectedFixtureIssue}`,
+        worktree: `.worktrees/issue-${selectedFixtureIssue}`,
+        revision: "r",
+        baselineRevision: "b",
+        candidate: {} as never,
+        dependencySetup: { action: "not-required" },
+        workerAttempts: [],
+        checks: [],
+        mechanicalPass: true,
+        candidateReadyForReview: true,
+        finalizationReady: true,
+        implementationOutcome: "implemented",
+        candidateHasDelta: true,
+      };
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(calls, [selectedFixtureIssue]);
+    assert.deepEqual(finalizations, [selectedFixtureIssue]);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("--no-finalize preserves verified candidate stop-before-finalization behavior", async () => {
+  const fixtureState = await fixture();
+  try {
+    let finalizations = 0;
+    const code = await runBootstrapCli(["--cwd", fixtureState.root, "--issue", "85", "--no-finalize"], {
+      runFinalizer: async () => {
+        finalizations += 1;
+        throw new Error("finalizer must not run");
+      },
+    }, async (options) => ({
       issueNumber: options.issueNumber,
       attempts: 1,
       start: "2026-01-01T00:00:00.000Z",
       end: "2026-01-01T00:00:00.000Z",
       disposition: "pass",
-      branch: `agent/issue-${selectedFixtureIssue}`,
-      worktree: `.worktrees/issue-${selectedFixtureIssue}`,
+      branch: "agent/issue-85",
+      worktree: ".worktrees/issue-85",
       revision: "r",
       baselineRevision: "b",
-      candidate: {} as never,
+      candidate: { changedFiles: ["candidate.txt"] } as never,
       dependencySetup: { action: "not-required" },
       workerAttempts: [],
       checks: [],
@@ -967,42 +1017,12 @@ test("automatic selection invokes the existing single-issue bootstrap path exact
       finalizationReady: true,
       implementationOutcome: "implemented",
       candidateHasDelta: true,
-    };
-  });
-  assert.equal(code, 0);
-  assert.deepEqual(calls, [selectedFixtureIssue]);
-  assert.deepEqual(finalizations, [selectedFixtureIssue]);
-});
-
-test("--no-finalize preserves verified candidate stop-before-finalization behavior", async () => {
-  let finalizations = 0;
-  const code = await runBootstrapCli(["--issue", "85", "--no-finalize"], {
-    runFinalizer: async () => {
-      finalizations += 1;
-      throw new Error("finalizer must not run");
-    },
-  }, async (options) => ({
-    issueNumber: options.issueNumber,
-    attempts: 1,
-    start: "2026-01-01T00:00:00.000Z",
-    end: "2026-01-01T00:00:00.000Z",
-    disposition: "pass",
-    branch: "agent/issue-85",
-    worktree: ".worktrees/issue-85",
-    revision: "r",
-    baselineRevision: "b",
-    candidate: { changedFiles: ["candidate.txt"] } as never,
-    dependencySetup: { action: "not-required" },
-    workerAttempts: [],
-    checks: [],
-    mechanicalPass: true,
-    candidateReadyForReview: true,
-    finalizationReady: true,
-    implementationOutcome: "implemented",
-    candidateHasDelta: true,
-  }));
-  assert.equal(code, 0);
-  assert.equal(finalizations, 0);
+    }));
+    assert.equal(code, 0);
+    assert.equal(finalizations, 0);
+  } finally {
+    await fixtureState.cleanup();
+  }
 });
 
 test("finalization block reports implementation and verification PASS while preserving candidate", async () => {
