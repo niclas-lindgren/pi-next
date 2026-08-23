@@ -42,6 +42,7 @@ import {
   withAuthorityTimeout,
 } from "./authority-read-policy.ts";
 import { loadPiNextConfig } from "./config.ts";
+import { emitLifecycleCheckpoint } from "./lifecycle-checkpoints.ts";
 
 export type { IssueLease } from "./issue-authority.ts";
 export type {
@@ -650,7 +651,9 @@ export async function releaseIssueLease(
   if (!issueLeaseMatchesOwner(current, lease)) {
     throw new LeaseConflictError(lease.issueNumber);
   }
+  emitLifecycleCheckpoint("lease_released", "before");
   await authority.remove(lease.issueNumber, current);
+  emitLifecycleCheckpoint("lease_released", "after");
   if (options.cwd)
     options.recordEvent?.(options.cwd, {
       event: "claim_released",

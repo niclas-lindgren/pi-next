@@ -52,6 +52,7 @@ import {
   type PendingVerificationRecord,
   type WorkAuthorityAdapter,
 } from "./work-authority.ts";
+import { emitLifecycleCheckpoint } from "./lifecycle-checkpoints.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -403,6 +404,7 @@ export async function finalizeIssue(
         "Pushed main does not contain the verified candidate commit; refusing to close",
       );
     }
+    emitLifecycleCheckpoint("reachability_proven", "after");
 
     // #20: when there was nothing new to integrate this call (the candidate
     // was already reachable from origin/main before we started), candidate
@@ -455,10 +457,11 @@ export async function finalizeIssue(
   }
 
   let item: AuthorityWorkItem;
+  // This is deliberately a fresh adapter read immediately before close. Do
+  // not use a cached freshness record: comments, labels, body, and state
+  // all belong to this irreversible-transition fence.
+  emitLifecycleCheckpoint("authority_reconciled", "before");
   try {
-    // This is deliberately a fresh adapter read immediately before close. Do
-    // not use a cached freshness record: comments, labels, body, and state
-    // all belong to this irreversible-transition fence.
     item = await workAuthority.get(String(input.issueNumber));
   } catch (error) {
     throw new FinalizeError(
@@ -483,12 +486,14 @@ export async function finalizeIssue(
       requiresReverification: false,
     };
   }
+  emitLifecycleCheckpoint("authority_reconciled", "after");
 
   if (pendingTemplate) {
     const pendingVerification: PendingVerificationRecord = {
       ...pendingTemplate,
       integratedMainSha: mergeSha,
     };
+    emitLifecycleCheckpoint("pending_verification_recorded", "before");
     try {
       await workAuthority.markPendingVerification!(String(input.issueNumber), pendingVerification);
     } catch (error) {
@@ -497,6 +502,7 @@ export async function finalizeIssue(
         `Integrated issue #${input.issueNumber}, but could not durably record pending verification: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    emitLifecycleCheckpoint("pending_verification_recorded", "after");
     return {
       ok: true,
       issueNumber: input.issueNumber,
@@ -510,7 +516,9 @@ export async function finalizeIssue(
     };
   }
 
+  emitLifecycleCheckpoint("issue_closed", "before");
   await workAuthority.close(String(input.issueNumber), input.closeComment ?? "Completed via pi-next automated workflow.");
+  emitLifecycleCheckpoint("issue_closed", "after");
 
   return {
     ok: true,
