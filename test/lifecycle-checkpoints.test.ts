@@ -37,7 +37,9 @@ test("recovery lifecycle checkpoints are stable, typed, and journal-covered wher
     "worker_finished",
     "verification_finished",
     "candidate_committed",
+    "candidate_pushed",
     "promotion_started",
+    "promotion_pushed",
     "promotion_succeeded",
     "reachability_proven",
     "authority_reconciled",
@@ -142,8 +144,10 @@ const transitionEffects: Record<RecoveryLifecycleCheckpoint, readonly EffectName
   worker_finished: [],
   verification_finished: ["verificationRuns"],
   candidate_committed: ["commits"],
+  candidate_pushed: ["pushes"],
   promotion_started: ["promotions"],
-  promotion_succeeded: ["pushes"],
+  promotion_pushed: ["pushes"],
+  promotion_succeeded: [],
   reachability_proven: ["reachabilityProofs"],
   authority_reconciled: ["authorityReconciliations"],
   pending_verification_recorded: [],
@@ -158,6 +162,8 @@ function payloadFor(checkpoint: RecoveryLifecycleCheckpoint) {
     case "lease_claimed": return { agent: "pi-next", branch: "agent/issue-78", worktree: ".worktrees/issue-78" };
     case "verification_finished": return { verification: "pass" as const, candidateSha: "a".repeat(40) };
     case "candidate_committed": return { candidateSha: "a".repeat(40) };
+    case "candidate_pushed": return { branch: "agent/issue-78", candidateSha: "a".repeat(40) };
+    case "promotion_pushed": return { candidateSha: "a".repeat(40), mainSha: "b".repeat(40) };
     case "promotion_succeeded": return { mergeSha: "b".repeat(40) };
     case "reachability_proven": return { candidateSha: "a".repeat(40), mainSha: "b".repeat(40) };
     default: return {};
@@ -205,7 +211,7 @@ test("crash/restart matrix is idempotent across every recovery checkpoint", asyn
         assert.ok(effects.implementationWorkers <= 1, `${checkpoint}/${position}: no duplicate implementation worker`);
         assert.ok(effects.commits <= 1, `${checkpoint}/${position}: no duplicate candidate commit`);
         assert.ok(effects.promotions <= 1, `${checkpoint}/${position}: no duplicate promotion start`);
-        assert.ok(effects.pushes <= 1, `${checkpoint}/${position}: no duplicate push`);
+        assert.ok(effects.pushes <= 2, `${checkpoint}/${position}: no duplicate candidate or promotion push`);
         assert.ok(effects.closes === 0 || state.authorityReconciled, `${checkpoint}/${position}: no close before authority proof`);
         assert.ok(effects.cleanups === 0 || state.reachabilityProven, `${checkpoint}/${position}: cleanup waits for reachability`);
         assert.equal(state.pendingVerification, true, `${checkpoint}/${position}: pending verification remains durable`);

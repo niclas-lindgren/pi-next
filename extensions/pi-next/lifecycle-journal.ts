@@ -68,9 +68,11 @@ function ensureLegacyBaseline(cwd: string, runId: string): void {
 export function recordPiLifecycleJournal(
   cwd: string,
   input: LifecycleJournalAppendInput,
+  options: { emitCheckpoint?: boolean } = {},
 ): void {
   ensureLegacyBaseline(cwd, input.runId);
-  const checkpoint = isRecoveryLifecycleCheckpoint(input.event) ? input.event : undefined;
+  const emitCheckpoint = options.emitCheckpoint ?? true;
+  const checkpoint = emitCheckpoint && isRecoveryLifecycleCheckpoint(input.event) ? input.event : undefined;
   if (checkpoint) emitLifecycleCheckpoint(checkpoint, "before");
   appendLifecycleJournal(piLifecycleJournalFile(cwd, input.runId), input);
   if (checkpoint) emitLifecycleCheckpoint(checkpoint, "after");
