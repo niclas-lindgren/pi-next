@@ -8,6 +8,7 @@ import { runBootstrap } from "./supervisor.js";
 import { runCommand } from "./command-runner.js";
 import { runBootstrapFinalize } from "../../scripts/bootstrap-finalize.ts";
 import { acquireBootstrapLifecycleLock, BootstrapLifecycleLockError } from "./lifecycle-lock.js";
+import { hasExactVerifiedFinalizationCandidate } from "./finalization-proof.js";
 
 function parseArgs(args: string[]): BootstrapCliOptions {
   let issueNumber: number | undefined;
@@ -47,19 +48,6 @@ function verificationPhase(report: BootstrapReport): "PASS" | "FAIL" {
   return report.mechanicalPass ? "PASS" : "FAIL";
 }
 
-async function hasLocalFinalizationCandidate(options: BootstrapLifecycleOptions, dependencies: BootstrapDependencies): Promise<boolean> {
-  const runner = dependencies.runCommand ?? runCommand;
-  const cwd = resolve(options.cwd ?? process.cwd());
-  const root = await runner("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { cwd });
-  if (root.exitCode !== 0) return false;
-  const repositoryRoot = root.stdout.trim();
-  const branch = `agent/issue-${options.issueNumber}`;
-  const ref = await runner("git", ["-C", repositoryRoot, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repositoryRoot });
-  if (ref.exitCode === 0) return true;
-  const worktrees = await runner("git", ["-C", repositoryRoot, "worktree", "list", "--porcelain"], { cwd: repositoryRoot });
-  return worktrees.exitCode === 0 && worktrees.stdout.includes(`/.worktrees/issue-${options.issueNumber}\n`);
-}
-
 export async function runBootstrapLifecycle(
   options: BootstrapLifecycleOptions,
   dependencies: BootstrapDependencies = {},
@@ -74,7 +62,7 @@ export async function runBootstrapLifecycle(
   if (commonDirResult.exitCode !== 0) throw new BootstrapError(`could not resolve repository git directory: ${(commonDirResult.stderr || commonDirResult.stdout).trim()}`);
   const lifecycleLock = await acquireBootstrapLifecycleLock({ root: rootResult.stdout.trim(), gitCommonDir: commonDirResult.stdout.trim(), issueNumber: options.issueNumber, operation: "self-host", phase: "preflight", heartbeatMs: dependencies.heartbeatMs });
   try {
-    const resumeFinalizationOnly = options.finalize && !options.verifyOnly && await hasLocalFinalizationCandidate(options, dependencies);
+    const resumeFinalizationOnly = options.finalize && !options.verifyOnly && await hasExactVerifiedFinalizationCandidate({ root: rootResult.stdout.trim(), gitCommonDir: commonDirResult.stdout.trim(), issueNumber: options.issueNumber, runCommand: runner });
     await lifecycleLock.update(resumeFinalizationOnly ? "finalization" : "worker");
     const implementationReport = await execute(resumeFinalizationOnly ? { ...options, verifyOnly: true } : options, dependencies);
     const base: Omit<BootstrapLifecycleReport, "finalization"> = {

@@ -956,6 +956,70 @@ test("worker completes with passing checks and dirty candidate keeps normal impl
   }
 });
 
+test("existing empty canonical branch/worktree does not make an open no-op finalizable", async () => {
+  const fixtureState = await fixture();
+  try {
+    await git(fixtureState.root, "branch", "agent/issue-75", "main");
+    await mkdir(join(fixtureState.root, ".worktrees"), { recursive: true });
+    await git(fixtureState.root, "worktree", "add", join(fixtureState.root, ".worktrees", "issue-75"), "agent/issue-75");
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    let finalizations = 0;
+    const report = await runBootstrapLifecycle(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000, finalize: true },
+      {
+        ...dependenciesFor(fixtureState.root, fakeFactory(sessions, async () => undefined), () => 0, []),
+        runFinalizer: async () => {
+          finalizations += 1;
+          throw new Error("empty branch must not finalize");
+        },
+      },
+    );
+    assert.equal(report.disposition, "no-change");
+    assert.equal(report.implementationReport.finalizationReady, false);
+    assert.equal(report.finalization, "SKIPPED");
+    assert.equal(finalizations, 0);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("exact verified candidate proof resumes finalization without relaunching implementation", async () => {
+  const fixtureState = await fixture();
+  try {
+    await git(fixtureState.root, "branch", "agent/issue-75", "main");
+    await mkdir(join(fixtureState.root, ".worktrees"), { recursive: true });
+    await git(fixtureState.root, "worktree", "add", join(fixtureState.root, ".worktrees", "issue-75"), "agent/issue-75");
+    const candidateSha = await git(fixtureState.root, "rev-parse", "agent/issue-75");
+    const commonDir = await git(fixtureState.root, "rev-parse", "--path-format=absolute", "--git-common-dir");
+    await mkdir(join(commonDir, "pi-next", "bootstrap-lifecycle"), { recursive: true });
+    await writeFile(join(commonDir, "pi-next", "bootstrap-lifecycle", "issue-75.verified-candidate.json"), JSON.stringify({
+      version: 1,
+      issueNumber: 75,
+      branch: "agent/issue-75",
+      candidateSha,
+      candidatePaths: ["previously-verified.txt"],
+      verifiedAt: "2026-01-01T00:00:00.000Z",
+      checks: ["npm run typecheck", "npm test"],
+    }, null, 2) + "\n");
+    let finalizations = 0;
+    const report = await runBootstrapLifecycle(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000, finalize: true },
+      {
+        ...dependenciesFor(fixtureState.root, async () => { throw new Error("implementation worker must not relaunch"); }, () => 0, []),
+        runFinalizer: async () => {
+          finalizations += 1;
+          return { ok: true, issueNumber: 75, branch: "agent/issue-75", candidateSha, merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+        },
+      },
+    );
+    assert.equal(report.finalization, "PASS");
+    assert.equal(report.implementationReport.attempts, 0);
+    assert.equal(finalizations, 1);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
 test("worker no-op with passing checks is explicit unproven no-change and non-finalizable without extra model calls", async () => {
   const fixtureState = await fixture();
   try {

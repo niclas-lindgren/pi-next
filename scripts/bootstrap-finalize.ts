@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { acquireBootstrapLifecycleLock, type BootstrapLifecycleLock } from "../src/bootstrap/lifecycle-lock.js";
+import { writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.js";
 
 const execFileAsync = promisify(execFile);
 const REQUIRED_CHECKS = ["npm run typecheck", "npm test"] as const;
@@ -252,6 +253,13 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     return { ok: true, issueNumber, branch, candidateSha, merged: false, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: branchRemoved, outcome: "already-satisfied" };
   }
   for (const check of REQUIRED_CHECKS) await sh(worktree, check, runner);
+  await writeVerifiedFinalizationCandidateProof({
+    gitCommonDir: await git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"], runner),
+    issueNumber,
+    candidateSha,
+    candidatePaths: await committedPaths(worktree, runner),
+    checks: REQUIRED_CHECKS,
+  });
   say(`bootstrap finalize #${issueNumber} · candidate verified`);
   if (process.env.PI_NEXT_BOOTSTRAP_FINALIZE_CRASH_AFTER === "commit") process.exit(99);
   await git(worktree, ["push", "-u", "origin", branch], runner);
