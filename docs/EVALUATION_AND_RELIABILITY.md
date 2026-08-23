@@ -41,6 +41,14 @@ This is not a feature-parity exercise. Pi-next should harvest proven mechanisms 
 | Codex | structured worker events/results; sandbox/security ideas; native model/harness optimization | evaluate behind adapter |
 | Claude Agent SDK | structured headless worker execution and cancellation; native Claude optimization | evaluate behind adapter |
 
+### Worker canary harness decisions (issue #81)
+
+- **adopt** — SWE-bench's generator/grader separation: each canary builds a disposable fixture repository and task packet, invokes a `WorkerAdapter`, then runs hidden mechanical grader assertions. Worker terminal success or prose is recorded only as evidence and cannot mark PASS.
+- **adopt-pattern** — mini-SWE-agent's small harness seam: the benchmark uses the existing provider-neutral `WorkerAdapter` contract so Pi, scripted tests, and later Codex/Claude/mini-SWE adapters can run the same fixtures unchanged.
+- **adapter** — Pi SDK telemetry is normalized when exposed (`input`, `output`, cache tokens, total tokens, cost, model, tool calls). Unknown SDK surfaces remain optional rather than blocking grading.
+- **adapter** — Codex/Claude SDK event metrics are reserved for later adapters behind the same result schema; their native token/cost/turn streams should be mapped to the common aggregate fields without moving lifecycle authority into those SDKs.
+- **reject** — running real-worker canaries as part of ordinary `npm test`. The command is explicit and credential-gated (`PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi`), with conservative smoke mode available via `--smoke`.
+
 The table is intentionally revisitable. New useful features discovered in mature frameworks should be added here before implementation so they are consciously adopted or rejected rather than rediscovered ad hoc.
 
 ### Bootstrap auto-finalization recovery proof (issue #108)
@@ -141,6 +149,13 @@ Initial worker matrix:
 - mini-SWE-agent: first independent experimental adapter;
 - Codex: later challenger if a small SDK adapter preserves the kernel contract;
 - Claude: later challenger under the same condition.
+
+The initial canary corpus lives in the worker-evaluation fixture format (`WORKER_CANARY_FIXTURE_FORMAT_VERSION = 1`) and currently covers localized bug fix, behavior change with tests, small multi-file refactor, repository inspection with targeted change, failure diagnosis/repair, and repository-contract adherence for generated files. Run it only when credentials/quota are explicitly available:
+
+```sh
+PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi
+PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi --smoke
+```
 
 Primary metrics are verified acceptance pass rate, tokens/cost per verified completion, wall time per verified completion, retries/escalations, turn/command count, regressions introduced, context growth/cache efficiency, and pi-next intervention/recovery required.
 
