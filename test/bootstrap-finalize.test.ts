@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 
 import { BootstrapFinalizeError, classifyCiEvidence, classifyExternalVerificationAuthority, evaluateGhPrChecks, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation, type CommandRunner } from "../scripts/bootstrap-finalize.ts";
+import { readCandidateState } from "../src/bootstrap/candidate.ts";
+import { runCommand as bootstrapRunCommand } from "../src/bootstrap/command-runner.ts";
 import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
 
 const exec = promisify(execFile);
@@ -123,6 +125,156 @@ test("bootstrap finalizer commits, pushes, creates PR, merges, proves reachabili
     await assert.rejects(git(f.root, "rev-parse", "--verify", "agent/issue-101"));
     assert.match(await git(f.remote, "log", "--oneline", "-1", "main"), /feat\(finalize\): add helper \(#101\)/);
     assert.ok(lines.some((line) => line.endsWith("PASS")));
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer accepts a verified file inside a newly untracked directory", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1411);
+    await mkdir(join(worktree, "docs", "evaluation"), { recursive: true });
+    await writeFile(join(worktree, "docs", "evaluation", "one.json"), "{}\n");
+    const authority = new FakeAuthority(f.root, 1411);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 1411, authority, candidatePaths: ["docs/evaluation/one.json"] });
+    assert.equal(result.issueClosed, true);
+    assert.equal(await git(f.remote, "show", "main:docs/evaluation/one.json"), "{}");
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer keeps multiple files under one new untracked directory at file granularity", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1412);
+    await mkdir(join(worktree, "test", "fixtures", "worker-canaries"), { recursive: true });
+    await writeFile(join(worktree, "test", "fixtures", "worker-canaries", "README.md"), "readme\n");
+    await writeFile(join(worktree, "test", "fixtures", "worker-canaries", "case.json"), "{}\n");
+    const authority = new FakeAuthority(f.root, 1412);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 1412, authority, candidatePaths: ["test/fixtures/worker-canaries/README.md", "test/fixtures/worker-canaries/case.json"] });
+    assert.equal(await git(f.remote, "show", "main:test/fixtures/worker-canaries/README.md"), "readme");
+    assert.equal(await git(f.remote, "show", "main:test/fixtures/worker-canaries/case.json"), "{}");
+  } finally { await f.cleanup(); }
+});
+
+test("candidate inspection and finalization share deterministic file-level paths across independent untracked directories", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1413);
+    await mkdir(join(worktree, "z-dir"), { recursive: true });
+    await mkdir(join(worktree, "a-dir"), { recursive: true });
+    await writeFile(join(worktree, "z-dir", "z.txt"), "z\n");
+    await writeFile(join(worktree, "a-dir", "a.txt"), "a\n");
+    const baseline = await git(worktree, "rev-parse", "origin/main");
+    const candidate = await readCandidateState(worktree, baseline, bootstrapRunCommand);
+    assert.deepEqual(candidate.changedFiles, ["a-dir/a.txt", "z-dir/z.txt"]);
+    const authority = new FakeAuthority(f.root, 1413);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 1413, authority, candidatePaths: candidate.changedFiles });
+    assert.equal(await git(f.remote, "show", "main:a-dir/a.txt"), "a");
+    assert.equal(await git(f.remote, "show", "main:z-dir/z.txt"), "z");
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer rejects an unrelated untracked file outside verified candidate paths", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1414);
+    await writeFile(join(worktree, "candidate.txt"), "candidate\n");
+    await writeFile(join(worktree, "scratch.txt"), "scratch\n");
+    const authority = new FakeAuthority(f.root, 1414);
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 1414, authority, candidatePaths: ["candidate.txt"] }), "UNKNOWN_CHANGES");
+    assert.equal(authority.prs.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer rejects an unrelated tracked modification outside verified candidate paths", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1415);
+    await writeFile(join(worktree, "candidate.txt"), "candidate\n");
+    await writeFile(join(worktree, "README.md"), "unrelated tracked\n");
+    const authority = new FakeAuthority(f.root, 1415);
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 1415, authority, candidatePaths: ["candidate.txt"] }), "UNKNOWN_CHANGES");
+    assert.equal(authority.prs.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("staged, unstaged and untracked candidate paths normalize consistently from inspection to finalization", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1416);
+    await writeFile(join(worktree, "package.json"), JSON.stringify({ scripts: { typecheck: "true", test: "true" }, changed: true }));
+    await git(worktree, "add", "package.json");
+    await writeFile(join(worktree, "README.md"), "unstaged tracked\n");
+    await mkdir(join(worktree, "nested"), { recursive: true });
+    await writeFile(join(worktree, "nested", "new.txt"), "new\n");
+    const baseline = await git(worktree, "rev-parse", "origin/main");
+    const candidate = await readCandidateState(worktree, baseline, bootstrapRunCommand);
+    assert.deepEqual(candidate.changedFiles, ["README.md", "nested/new.txt", "package.json"]);
+    const authority = new FakeAuthority(f.root, 1416);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 1416, authority, candidatePaths: candidate.changedFiles });
+    assert.equal(await git(f.remote, "show", "main:nested/new.txt"), "new");
+  } finally { await f.cleanup(); }
+});
+
+test("rename candidate path handling remains the destination path", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1417);
+    await mkdir(join(worktree, "docs"), { recursive: true });
+    await git(worktree, "mv", "README.md", "docs/RENAMED.md");
+    const authority = new FakeAuthority(f.root, 1417);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 1417, authority, candidatePaths: ["docs/RENAMED.md"] });
+    assert.equal(await git(f.remote, "show", "main:docs/RENAMED.md"), "base");
+  } finally { await f.cleanup(); }
+});
+
+test("explicit staging refuses to stage paths beyond the verified set", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1418);
+    await writeFile(join(worktree, "intended.txt"), "intended\n");
+    await mkdir(join(worktree, "extra"), { recursive: true });
+    await writeFile(join(worktree, "extra", "unknown.txt"), "unknown\n");
+    const authority = new FakeAuthority(f.root, 1418);
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 1418, authority, candidatePaths: ["intended.txt"] }), "UNKNOWN_CHANGES");
+    assert.equal(await git(worktree, "status", "--porcelain", "intended.txt"), "?? intended.txt");
+    assert.equal(authority.createdPrs, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("#81 bootstrap path shape finalizes without untracked directory placeholders", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await cleanCandidate(f.root, 1419);
+    await mkdir(join(worktree, "docs", "evaluation"), { recursive: true });
+    await mkdir(join(worktree, "scripts"), { recursive: true });
+    await mkdir(join(worktree, "src", "evaluation"), { recursive: true });
+    await mkdir(join(worktree, "test", "fixtures", "worker-canaries"), { recursive: true });
+    await writeFile(join(worktree, "docs", "EVALUATION_AND_RELIABILITY.md"), "eval\n");
+    await writeFile(join(worktree, "package.json"), JSON.stringify({ scripts: { typecheck: "true", test: "true" }, dependencies: {} }));
+    await writeFile(join(worktree, "src", "evaluation", "index.ts"), "export {};\n");
+    await writeFile(join(worktree, "test", "bootstrap-self-host.test.ts"), "test\n");
+    await writeFile(join(worktree, "docs", "evaluation", "pi-worker-baseline.initial.json"), "{}\n");
+    await writeFile(join(worktree, "scripts", "eval-worker.ts"), "export {};\n");
+    await writeFile(join(worktree, "src", "evaluation", "pi-worker-adapter.ts"), "export {};\n");
+    await writeFile(join(worktree, "src", "evaluation", "worker-canaries.ts"), "export {};\n");
+    await writeFile(join(worktree, "test", "fixtures", "worker-canaries", "README.md"), "canary\n");
+    await writeFile(join(worktree, "test", "worker-canaries.test.ts"), "test\n");
+    const paths = [
+      "docs/EVALUATION_AND_RELIABILITY.md",
+      "package.json",
+      "src/evaluation/index.ts",
+      "test/bootstrap-self-host.test.ts",
+      "docs/evaluation/pi-worker-baseline.initial.json",
+      "scripts/eval-worker.ts",
+      "src/evaluation/pi-worker-adapter.ts",
+      "src/evaluation/worker-canaries.ts",
+      "test/fixtures/worker-canaries/README.md",
+      "test/worker-canaries.test.ts",
+    ];
+    const authority = new FakeAuthority(f.root, 1419);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 1419, authority, candidatePaths: paths });
+    assert.equal(await git(f.remote, "show", "main:docs/evaluation/pi-worker-baseline.initial.json"), "{}");
+    assert.equal(await git(f.remote, "show", "main:test/fixtures/worker-canaries/README.md"), "canary");
   } finally { await f.cleanup(); }
 });
 

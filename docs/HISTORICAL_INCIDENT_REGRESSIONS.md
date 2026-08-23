@@ -33,6 +33,7 @@ Fixture file: [`test/fixtures/replay/historical-incidents.json`](../test/fixture
 | 12 | Invalid consumer integration discovered after expensive worker launch | `historical: invalid consumer integration fails before worker launch`; also workflow-state preflight tests | Static preflight failures launch no expensive worker. |
 | 13 | Crash after push before cleanup/final disposition | `historical: crash after push before cleanup and final disposition`; also `test/fixtures/replay/crash-boundaries.json` | Restart proves reachability and must not push/merge again. |
 | 14 | Stale worker tries to close after authority/ownership changed | `historical: stale worker cannot close after authority owner changed`; also finalizer/authority tests | Stale worker output cannot close or mutate after ownership/current-authority mismatch. |
+| 15 | Bootstrap finalizer collapsed nested untracked candidate directories to unknown paths (#141/#81) | `test/bootstrap-finalize.test.ts` (`#81 bootstrap path shape finalizes without untracked directory placeholders`) | Verification handoff and finalization use the same file-level candidate path identity; unrelated paths still fail closed. |
 
 ## Fixture policy
 
