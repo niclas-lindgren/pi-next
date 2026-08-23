@@ -48,6 +48,10 @@ export interface CanaryAggregateReport {
   passed: number;
   passRate: number;
   totalWallTimeMs: number;
+  totalTurns?: number;
+  totalToolCalls?: number;
+  totalRetries: number;
+  humanInterventionRequired: boolean;
   totalTokens?: number;
   totalCost?: number;
   tokensPerVerifiedCompletion?: number;
@@ -212,6 +216,8 @@ export async function runWorkerCanaryCorpus(adapter: WorkerAdapter, fixtures: re
   const passed = results.filter((result) => result.passed).length;
   const totalTokens = results.some((r) => r.usage) ? results.reduce((sum, r) => sum + (r.usage?.totalTokens ?? 0), 0) : undefined;
   const totalCost = results.some((r) => r.usage) ? results.reduce((sum, r) => sum + (r.usage?.cost ?? 0), 0) : undefined;
+  const totalTurns = results.some((r) => r.turns !== undefined) ? results.reduce((sum, r) => sum + (r.turns ?? 0), 0) : undefined;
+  const totalToolCalls = results.some((r) => r.toolCalls !== undefined) ? results.reduce((sum, r) => sum + (r.toolCalls ?? 0), 0) : undefined;
   return {
     generatedAt: new Date().toISOString(),
     adapter: { id: adapter.id, version: adapter.version },
@@ -220,6 +226,10 @@ export async function runWorkerCanaryCorpus(adapter: WorkerAdapter, fixtures: re
     passed,
     passRate: results.length === 0 ? 0 : passed / results.length,
     totalWallTimeMs: results.reduce((sum, result) => sum + result.wallTimeMs, 0),
+    totalTurns,
+    totalToolCalls,
+    totalRetries: results.reduce((sum, result) => sum + result.retries, 0),
+    humanInterventionRequired: results.some((result) => result.humanInterventionRequired),
     totalTokens,
     totalCost,
     tokensPerVerifiedCompletion: totalTokens !== undefined && passed > 0 ? totalTokens / passed : undefined,

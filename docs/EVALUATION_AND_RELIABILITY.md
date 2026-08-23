@@ -167,6 +167,8 @@ PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi --smoke
 
 Primary metrics are verified acceptance pass rate, tokens/cost per verified completion, wall time per verified completion, retries/escalations, turn/command count, regressions introduced, context growth/cache efficiency, and pi-next intervention/recovery required.
 
+The initial credentialed Pi baseline is recorded in [`evaluation/pi-worker-baseline.initial.json`](evaluation/pi-worker-baseline.initial.json). It is a sanitized grader-derived report for the full six-fixture corpus and includes adapter/model/harness identity, verified pass rate, wall time, token/cache/cost fields exposed by the Pi SDK, turns/tool calls, retries, and intervention status. Re-run it only with the explicit credential gate when intentionally refreshing the baseline.
+
 ## Release qualification
 
 A candidate release should progress through:

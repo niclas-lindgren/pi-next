@@ -1,12 +1,206 @@
 {
-  "baselineId": "pi-worker-canaries-initial",
-  "status": "credential-gated-not-run-in-repository-tests",
-  "adapter": { "id": "pi", "version": "1" },
-  "harness": { "name": "pi-next-worker-eval", "fixtureFormatVersion": 1 },
-  "command": "PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi --output docs/evaluation/pi-worker-baseline.local.json",
+  "generatedAt": "2026-08-23T14:55:07.070Z",
+  "adapter": {
+    "id": "pi",
+    "version": "1"
+  },
+  "harness": {
+    "name": "pi-next-worker-eval",
+    "version": "0.2.71",
+    "fixtureFormatVersion": 1
+  },
   "fixtureCount": 6,
-  "notes": [
-    "Normal npm test is zero-LLM; this checked-in baseline marker records the versioned corpus and command, not an acceptance grade.",
-    "Authoritative Pi pass-rate/token/cost numbers are produced by the explicit eval command in credentialed environments."
+  "passed": 6,
+  "passRate": 1,
+  "totalWallTimeMs": 96176,
+  "totalTurns": 6,
+  "totalToolCalls": 41,
+  "totalRetries": 0,
+  "humanInterventionRequired": false,
+  "totalTokens": 48062,
+  "totalCost": 0.274461,
+  "tokensPerVerifiedCompletion": 8010.333333333333,
+  "costPerVerifiedCompletion": 0.0457435,
+  "results": [
+    {
+      "fixtureId": "localized-bug-fix",
+      "category": "localized bug fix",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 15477,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.2.71",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 7104,
+        "output": 239,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 7343,
+        "cost": 0.042690000000000006
+      },
+      "turns": 1,
+      "toolCalls": 7,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "behavior-change-with-tests",
+      "category": "behavior change with tests",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 15174,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.2.71",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 8680,
+        "output": 326,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 9006,
+        "cost": 0.053180000000000005
+      },
+      "turns": 1,
+      "toolCalls": 7,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "small-multi-file-refactor",
+      "category": "small multi-file refactor",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 24896,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.2.71",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 8350,
+        "output": 529,
+        "cacheRead": 3072,
+        "cacheWrite": 0,
+        "totalTokens": 11951,
+        "cost": 0.05915600000000001
+      },
+      "turns": 1,
+      "toolCalls": 10,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "inspection-targeted-change",
+      "category": "repository inspection + targeted change",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 11212,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.2.71",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 4400,
+        "output": 200,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 4600,
+        "cost": 0.028000000000000004
+      },
+      "turns": 1,
+      "toolCalls": 5,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "failure-diagnosis-repair",
+      "category": "failure diagnosis/repair",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 18344,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.2.71",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 9843,
+        "output": 403,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 10246,
+        "cost": 0.061305
+      },
+      "turns": 1,
+      "toolCalls": 7,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "repository-contract-generated-file",
+      "category": "repository contract adherence",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 11073,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.2.71",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 4694,
+        "output": 222,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 4916,
+        "cost": 0.030130000000000004
+      },
+      "turns": 1,
+      "toolCalls": 5,
+      "retries": 0,
+      "humanInterventionRequired": false
+    }
   ]
 }

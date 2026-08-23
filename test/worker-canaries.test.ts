@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter.ts";
@@ -48,6 +49,30 @@ test("aggregate report includes tokens and cost per verified completion when ava
   assert.equal(report.totalTokens, 11);
   assert.equal(report.tokensPerVerifiedCompletion, 11);
   assert.equal(report.costPerVerifiedCompletion, 0.02);
+});
+
+test("checked-in Pi baseline records a real graded corpus run", () => {
+  const baseline = JSON.parse(readFileSync("docs/evaluation/pi-worker-baseline.initial.json", "utf8"));
+  assert.equal(baseline.adapter?.id, "pi");
+  assert.equal(baseline.harness?.fixtureFormatVersion, WORKER_CANARY_FIXTURE_FORMAT_VERSION);
+  assert.equal(baseline.fixtureCount, workerCanaryFixtures.length);
+  assert.equal(typeof baseline.passed, "number");
+  assert.equal(typeof baseline.passRate, "number");
+  assert.equal(typeof baseline.totalWallTimeMs, "number");
+  assert.equal(typeof baseline.totalRetries, "number");
+  assert.equal(typeof baseline.humanInterventionRequired, "boolean");
+  assert.ok(baseline.totalWallTimeMs > 0);
+  assert.notEqual(baseline.status, "credential-gated-not-run-in-repository-tests");
+  assert.ok(Array.isArray(baseline.results));
+  assert.equal(baseline.results.length, workerCanaryFixtures.length);
+  for (const result of baseline.results) {
+    assert.equal(result.adapter?.id, "pi");
+    assert.equal(typeof result.passed, "boolean");
+    assert.equal(typeof result.wallTimeMs, "number");
+    assert.equal(typeof result.retries, "number");
+    assert.equal(typeof result.humanInterventionRequired, "boolean");
+    assert.ok(!result.graderFailures?.some((failure: string) => /done|completed/i.test(failure)), "grader failures must be mechanical, not worker prose");
+  }
 });
 
 test("independent grader can pass a mechanically correct candidate", async () => {
