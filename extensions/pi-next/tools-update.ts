@@ -10,6 +10,7 @@ import {
 import { join, relative } from "node:path";
 
 import { writeLoopResult } from "./loop.ts";
+import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
 import { safeLoopBoundary } from "./loop-state.ts";
 import { appendFix, currentTask, issueNumber, markDone } from "./plan.ts";
 import { recordTransition } from "./workflow-commit-policy.ts";
@@ -245,8 +246,18 @@ export function registerUpdateTool(pi: ExtensionAPI) {
         // worktree run without that env value falls back to ctx.cwd, which
         // is already the coordination root in that case.
         const authorityCwd = process.env.PI_NEXT_COORDINATION_CWD?.trim() || ctx.cwd;
+        const runId = required(params.runId, "runId");
+        if (params.outcome === "archived" && loopIssue) {
+          recordPiLifecycleJournal(authorityCwd, {
+            event: "issue_closed",
+            issueNumber: loopIssue,
+            runId,
+            idempotencyKey: `issue-closed:${loopIssue}`,
+            payload: { workItemId: String(loopIssue) },
+          });
+        }
         const path = writeLoopResult(authorityCwd, {
-          runId: required(params.runId, "runId"),
+          runId,
           step: Math.floor(params.step),
           outcome: params.outcome,
           issueNumber:

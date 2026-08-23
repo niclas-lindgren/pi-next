@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 import {
@@ -12,6 +13,7 @@ import {
   type ManualAcceptanceReview,
 } from "./acceptance-verification.ts";
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
+import { recordCurrentPiLifecycleJournal } from "./lifecycle-journal.ts";
 import { runCandidateReviewGate } from "./candidate-review.ts";
 import { currentGeneration } from "./foreground-supervisor.ts";
 import { recordTransition } from "./workflow-commit-policy.ts";
@@ -35,6 +37,7 @@ import {
   safetyFindings,
   verifyFile,
   workingFingerprint,
+  git,
   writeLog,
   writeQualityEvidence,
   safeToolUpdate,
@@ -592,6 +595,31 @@ export function registerCheckTool(pi: ExtensionAPI) {
       const report = `# Verification Report\n\nSTATUS: ${status}\nFAIL_DISPOSITION: ${failureDisposition ?? "NONE"}\nEVIDENCE_POLICY: ${ACCEPTANCE_EVIDENCE_POLICY}\nFINGERPRINT: ${fingerprint}\nGITHUB_ISSUE: ${githubIssue ? `#${githubIssue}` : "unknown"}\nISSUE_FINGERPRINT: ${issueFingerprint ?? "unverified"}\nISSUE_UPDATED_AT: ${issueUpdatedAt ?? "unverified"}\nAUTHORITY_STATUS: ${authorityVerified ? "VERIFIED" : "UNVERIFIED"}\nAUTHORITY_ACCEPTANCE_STATUS: ${authorityAcceptanceStatus}\nGENERATED_AT: ${new Date().toISOString()}\n\nA checked PLAN.md acceptance checkbox is workflow state only and is never verification evidence. GitHub issue-body acceptance wording remains authoritative; ordinary semantic criteria require concrete structured review evidence; \`external:\` criteria cannot self-pass. Failure disposition controls only the next workflow route and never turns semantic FAIL into PASS.\n\n| Criterion | Verdict | Evidence |\n| --- | --- | --- |\n${rows.join("\n")}\n`;
       const reportPath = verifyFile(ctx.cwd);
       writeFileSync(reportPath, report);
+      const headSha = await git(ctx.cwd, ["rev-parse", "HEAD"]).catch(() => undefined);
+      const journalCriteriaIds = checks.slice(0, 64).map((check) => `criterion:${createHash("sha256").update(check.text).digest("hex").slice(0, 16)}`);
+      const journalCwd = process.env.PI_NEXT_COORDINATION_CWD?.trim() || ctx.cwd;
+      recordCurrentPiLifecycleJournal(journalCwd, {
+        event: "verification_finished",
+        issueNumber: githubIssue || undefined,
+        idempotencyKey: `verification:${githubIssue || "unknown"}:${fingerprint}:${status}`,
+        payload: {
+          verification: status === "PASS" ? "pass" : status === "FAIL" ? "fail" : "unproven",
+          ...(headSha ? { candidateSha: headSha, headSha } : {}),
+          authorityFingerprint: issueFingerprint,
+          criteriaIds: journalCriteriaIds,
+        },
+      });
+      if (status === "NEEDS_REVIEW") {
+        recordCurrentPiLifecycleJournal(journalCwd, {
+          event: "pending_verification_recorded",
+          issueNumber: githubIssue || undefined,
+          idempotencyKey: `pending-verification:${githubIssue || "unknown"}:${fingerprint}`,
+          payload: {
+            ...(headSha ? { mainSha: headSha } : {}),
+            criteriaIds: journalCriteriaIds,
+          },
+        });
+      }
       return {
         content: [
           {

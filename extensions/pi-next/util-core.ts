@@ -276,6 +276,8 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
     env: {
       ...process.env,
       PI_NEXT_ISSUE_WORKER: "1",
+      ...(options.runId ? { PI_NEXT_RUN_ID: options.runId } : {}),
+      ...(options.issueNumber ? { PI_NEXT_ISSUE_NUMBER: String(options.issueNumber) } : {}),
       ...(options.coordinationCwd
         ? { PI_NEXT_COORDINATION_CWD: options.coordinationCwd }
         : {}),
