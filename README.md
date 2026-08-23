@@ -2,7 +2,7 @@
 
 Pi-next is an experimental autonomous work-item lifecycle kernel currently packaged as an extension for the [pi-coding-agent](https://github.com/niclas-lindgren/pi-coding-agent) host. Pi is the current/default coding worker, but it is not the architectural identity of the kernel: authority, leasing, recovery, verification, and guarded completion belong to pi-next while coding harnesses execute bounded worker roles behind an adapter contract.
 
-> **Experimental / pre-1.0:** v0.2.39 is the latest consumer-facing public release. Review the release notes and use a disposable repository before enabling autonomous runs on valuable work.
+> **Experimental / pre-1.0:** v0.2.71 is the latest consumer-facing public release. Review the release notes and use a disposable repository before enabling autonomous runs on valuable work.
 
 ## Design principle
 
@@ -24,7 +24,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for extension precedence and 
 Use an immutable release tag or commit, rather than floating `main`, for reproducible or autonomous use. The supported release is:
 
 ```sh
-pi install -l git:github.com/niclas-lindgren/pi-next@v0.2.39
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.2.71
 ```
 
 The `-l` form records the exact package ref in the consuming repository's `.pi/settings.json`; commit that settings entry if other checkouts should install the same package automatically. Use `pi install` without `-l` for a user-global installation. Pi's native lifecycle commands manage the package. Run `/pi-next-doctor` after installation to observe the loaded version and revision before enabling automation:
@@ -39,10 +39,10 @@ pi remove git:github.com/niclas-lindgren/pi-next
 To move a project to another pinned release, install the new exact tag or commit; subsequent `pi update --extensions` runs reconcile that pinned ref rather than floating to `main`:
 
 ```sh
-pi install -l git:github.com/niclas-lindgren/pi-next@v0.2.39
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.2.71
 ```
 
-A commit SHA may be used while developing. v0.2.39 uses package/config schema version 1 and supports Pi 0.84.2+ with Node 22.19+. It is pre-1.0: minor releases may change behavior, and consumers should review release notes before upgrading. Updating or removing pi-next does not own or delete the consumer's workflow state, recovery data, or policy.
+A commit SHA may be used while developing. v0.2.71 uses package/config schema version 1 and supports Pi 0.84.2+ with Node 22.19+. It is pre-1.0: minor releases may change behavior, and consumers should review release notes before upgrading. Updating or removing pi-next does not own or delete the consumer's workflow state, recovery data, or policy.
 For local development, Pi also accepts a package directory directly:
 
 ```sh

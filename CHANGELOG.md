@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.71 - prepared release
+
+Bundle lifecycle reliability, provider-neutral worker dispatch, and the self-host development workflow improvements accumulated since v0.2.70.
+
+### Material changes
+
+- Add the provider-neutral worker-adapter contract and Pi child-worker implementation, keeping host-session lifecycle separate from fresh worker context.
+- Add the append-only lifecycle journal, deterministic replay planner, named recovery checkpoints, fault-injection scenarios, and property-based lifecycle coverage.
+- Add the self-host supervisor/finalizer improvements for dependency-ready issue selection, deterministic verification, bounded repair/review, idempotent candidate finalization, and safe cleanup.
+- Add zero-token authority monitoring with wake-on-work, bounded backoff, progress reporting, and graceful stop behavior.
+- Add independently graded scripted and real-worker canary evaluation harnesses and the associated consumer/package smoke coverage.
+
+### Compatibility/configuration/schema
+
+- Add versioned lifecycle journal schema 1; pre-journal runtime state is imported through an explicit `baseline_imported` boundary and live authority/Git facts remain authoritative.
+- Worker dispatch and adapter telemetry are additive and provider-neutral; existing Pi configuration, authority, lease, workflow, and package/config schema contracts remain compatible.
+- Monitor mode is opt-in and supports `monitor.pollIntervalMs` and `monitor.maxBackoffMs`; no configuration is required for existing commands.
+
+### Breaking/behavior changes
+
+- None for existing commands or consumer configuration. Recovery can now resume from durable lifecycle facts and skips already-proven side effects; monitor mode only wakes the existing scheduler and never claims work itself.
+
+### Security/safety
+
+- Lifecycle journals, telemetry, and progress output retain bounded coordination facts only; prompts, transcripts, hidden reasoning, issue bodies, secrets, and credentials are excluded.
+- Worker and bootstrap boundaries continue to reject unauthorized main-branch, authority, and destructive worktree mutations, while finalization remains independently verified and authority-guarded.
+
+### Upgrade guidance
+
+- Upgrade now for lifecycle recovery, monitoring, and self-host reliability improvements. No manual migration is required; old runtime state is handled through the journal baseline boundary. Review the monitor and worker-adapter documentation before opting into those features.
+
 ## 0.2.70 - prepared release
 
 Add the temporary plain-Pi bootstrap supervisor for one explicit implementation issue.
