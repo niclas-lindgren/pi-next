@@ -35,14 +35,8 @@ function promptPolicy(config?: PiNextConfig): PromptPolicy {
 }
 
 function workflowPaths(workflow: PiNextConfig["workflow"]): WorkerWorkflowPaths {
-  return {
-    plan: workflow.planPath,
-    verify: workflow.verifyPath,
-    state: workflow.stateProvider.type === "helper"
-      ? workflow.stateProvider.path || "provider-backed"
-      : "provider-backed",
-    diagnostics: workflow.diagnosticsPath,
-  };
+  const state = workflow.stateProvider.type === "helper" ? workflow.stateProvider.path || "provider-backed" : "provider-backed";
+  return { plan: workflow.planPath, verify: workflow.verifyPath, state, diagnostics: workflow.diagnosticsPath };
 }
 
 function replaceBareWorkflowNames(text: string, workflow: PiNextConfig["workflow"]): string {
@@ -110,6 +104,7 @@ export function buildPiNextPrompt(
     phase: role,
     modelPolicy: dispatchInput.modelPolicy ?? config.workerDispatch.models[role as keyof typeof config.workerDispatch.models],
     workflowPaths: dispatchInput.workflowPaths ?? workflowPaths(config.workflow),
+    skillPolicy: dispatchInput.skillPolicy ?? config.skills,
   });
   const userArgs = args.trim() || "(no arguments)";
   const kernel = `${repositoryPolicyText(config)}\n${renderWorkerEnvelope(policy)}\n${WORK_LOG_INSTRUCTIONS}`;
@@ -239,6 +234,7 @@ export function buildLoopMaintenancePrompt(
     phase: "maintenance",
     issueNumber: input.issueNumber,
     workflowPaths: workflowPaths(config.workflow),
+    skillPolicy: config.skills,
   });
   const methodology = selectedSkillText(cwd, dispatch.skills);
   const prompt = `Pi-next issue-boundary maintenance checkpoint after archived issue #${input.issueNumber} (completed issue ${input.completedCount} in this loop).

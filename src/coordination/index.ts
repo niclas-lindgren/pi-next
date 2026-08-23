@@ -3,6 +3,7 @@ export * from "./types.ts";
 export * from "./issue-authority.ts";
 export * from "./config.ts";
 export * from "./worker-dispatch.ts";
+export * from "./skill-registry.ts";
 export * from "./worker-adapter.ts";
 export * from "./adversarial-review.ts";
 export * from "./feedback.ts";

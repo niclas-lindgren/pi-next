@@ -61,10 +61,21 @@ editing vendored files. Updating consists of changing the pinned SHA and, if
 needed, the allowlist, running sync, reviewing the diff, then running the tests.
 There is no background update.
 
-As additional upstream sources are supported, preserve the same invariant:
-installation is declarative, pinned, reviewable, non-interactive, and separate
-from runtime selection. Do not let a worker discover an arbitrary skill on the
-network and immediately execute it.
+The manifest represents one or more reviewed sources. The classic single
+`upstream`/`destination`/`packs` form is still valid; a `sources` array pins
+several independent upstreams, each with its own repository, immutable revision,
+allowlist, destination, license/provenance, overlays, and per-source
+`PROVENANCE.json`. Sources may not share or nest destinations, and a manifest
+cannot mix the single-upstream and `sources` forms. Each source syncs and checks
+independently and deterministically, so per-source drift or a missing provenance
+fails closed without affecting other sources.
+
+Whatever the number of sources, preserve the same invariant: installation is
+declarative, pinned, reviewable, non-interactive, and separate from runtime
+selection. Adding or updating a managed source stays an explicit repository
+change (update the pinned manifest, sync, inspect the diff/provenance/license,
+run integrity/tests, commit intentionally). A worker/model must never discover an
+arbitrary skill on the network and immediately execute it during normal dispatch.
 
 ## Skill-source policy
 
@@ -137,9 +148,35 @@ skills:
     - domain-modeling
 ```
 
-The exact configuration format is implementation-defined; it should integrate
-with the versioned pi-next configuration rather than create another hidden
-source of workflow authority.
+This is implemented as a versioned, validated `skills` section of
+`.pi-next/config.json`:
+
+```json
+{
+  "skills": {
+    "version": 1,
+    "mandatory": [
+      { "skill": "verification-before-completion", "roles": ["verification"] }
+    ],
+    "automatic": [
+      { "skill": "tdd", "roles": ["implementation"], "taskPattern": "test|regression" },
+      { "skill": "browser-testing", "roles": ["implementation"], "paths": ["src/ui/"] }
+    ],
+    "explicit": ["codebase-design"]
+  }
+}
+```
+
+A missing section uses the built-in default policy, which mirrors the historical
+role/risk selection so default dispatch behavior is preserved. Rules may match on
+lifecycle role, risk class, a bounded case-insensitive `taskPattern`, and
+repository `paths`. Every referenced skill must exist in the reviewed registry;
+unknown skills, unsupported versions, invalid patterns, process-owner skills
+routed automatically, and competing methodologies fail configuration validation
+rather than reaching a worker. The verification-before-completion discipline is a
+package-owned skill adapted from the Superpowers concept; it is available and can
+be configured mandatory, but pi-next never enables a Superpowers workflow
+bootstrap.
 
 ## Lazy loading and conflicts
 
@@ -147,11 +184,15 @@ The resolver returns skill identifiers and reasons. The worker adapter loads onl
 those resolved skills into the bounded worker packet. Installed-but-unselected
 skills consume no worker context.
 
-The resolver must also detect overlapping/conflicting automatic disciplines.
-Prefer one canonical skill for a methodology category (for example `tdd`,
-`debugging`, or `code-review`) unless a deliberately separate review axis is
-configured. Ambiguity should be resolved by explicit repository policy rather
-than by asking the worker to reconcile competing instructions.
+The resolver detects overlapping/conflicting automatic disciplines through each
+registry entry's methodology `category`. Two distinct skills that share a
+category (for example Matt `diagnosing-bugs` and a Superpowers
+`systematic-debugging`, both `debugging`) are the same axis; routing them both
+automatically fails validation. Prefer one canonical skill per category unless a
+deliberately separate axis is configured. At resolution a category is claimed
+once, with precedence mandatory > automatic > explicit, so a worker never
+receives competing instructions. Repeating the same skill id under different
+role/risk conditions is not a conflict.
 
 ## Telemetry and evaluation
 
