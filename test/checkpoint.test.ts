@@ -8,6 +8,8 @@ import {
   checkpointBranchName,
   checkpointCommit,
 } from "../extensions/pi-next/checkpoint.ts";
+import { piLifecycleJournalFile } from "../extensions/pi-next/lifecycle-journal.ts";
+import { readLifecycleJournal } from "../src/coordination/lifecycle-journal.ts";
 import { createDisposableGitFixture, type DisposableGitFixture } from "./helpers/git-fixture.ts";
 
 const exec = promisify(execFile);
@@ -54,6 +56,10 @@ test("checkpoint commits on the canonical branch and pushes that identity", asyn
     assert.equal(await git(state.workspace, "branch", "--show-current"), "agent/issue-638");
     assert.match(await git(state.repo, "ls-remote", "--heads", "origin", "agent/issue-638"), /agent\/issue-638/);
     assert.equal(await git(state.repo, "ls-remote", "--heads", "origin", "pi-next/issue-638/run-638"), "");
+    const journal = readLifecycleJournal(piLifecycleJournalFile(state.workspace, "run-638"));
+    const durableEvents = journal.filter((record) => record.event !== "baseline_imported");
+    assert.deepEqual(durableEvents.map((record) => record.event), ["candidate_committed"]);
+    assert.equal(durableEvents[0].payload.candidateSha, await git(state.workspace, "rev-parse", "HEAD"));
   } finally {
     await cleanup(state.fixture);
   }

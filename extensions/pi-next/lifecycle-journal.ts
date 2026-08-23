@@ -76,6 +76,26 @@ export function recordPiLifecycleJournal(
   if (checkpoint) emitLifecycleCheckpoint(checkpoint, "after");
 }
 
+export function currentPiRunId(): string | undefined {
+  return process.env.PI_NEXT_RUN_ID?.trim() || undefined;
+}
+
+export function currentPiIssueNumber(): number | undefined {
+  const raw = process.env.PI_NEXT_ISSUE_NUMBER?.trim();
+  if (!raw) return undefined;
+  const value = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+export function recordCurrentPiLifecycleJournal(
+  cwd: string,
+  input: Omit<LifecycleJournalAppendInput, "runId"> & { runId?: string },
+): void {
+  const runId = input.runId?.trim() || currentPiRunId();
+  if (!runId) return;
+  recordPiLifecycleJournal(cwd, { ...input, runId });
+}
+
 function mappedEvent(observation: LegacyLifecycleObservation): LifecycleJournalEventName | undefined {
   switch (observation.event) {
     case "claim_acquired": return "lease_claimed";
@@ -85,8 +105,8 @@ function mappedEvent(observation: LegacyLifecycleObservation): LifecycleJournalE
     case "legacy_branch_adopted":
     case "legacy_worktree_migrated":
     case "legacy_worktree_salvaged": return "workspace_prepared";
-    case "checkpoint_pushed": return "candidate_committed";
-    case "promotion_succeeded": return "promotion_succeeded";
+    case "checkpoint_pushed": return undefined;
+    case "promotion_succeeded": return undefined;
     case "plan_reconciled": return "authority_reconciled";
     case "issue_contained": return "failure_recorded";
     case "worker_stalled": return observation.outcome === "failure" ? "failure_recorded" : undefined;

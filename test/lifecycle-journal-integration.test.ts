@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,6 +18,9 @@ import {
   issueWorkerRunnerFromAdapter,
   PiWorkerAdapter,
 } from "../extensions/pi-next/pi-worker-adapter.ts";
+import { registerCheckTool } from "../extensions/pi-next/tools-check.ts";
+import { planFile } from "../extensions/pi-next/util.ts";
+import { createDisposableGitFixture } from "./helpers/git-fixture.ts";
 
 async function tempRoot(): Promise<string> {
   return mkdtemp(join(tmpdir(), "pi-next-journal-integration-"));
@@ -115,6 +118,41 @@ test("Pi journal bridge exposes deterministic before/after lifecycle faults", as
     assert.deepEqual(readLifecycleJournal(piLifecycleJournalFile(root, "journal-fault-before")), []);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("production verification tool journals verification and pending-external disposition", async () => {
+  const fixture = await createDisposableGitFixture({
+    prefix: "pi-next-journal-verify-",
+    initialFiles: { "README.md": "fixture\n" },
+  });
+  const priorRunId = process.env.PI_NEXT_RUN_ID;
+  const priorIssue = process.env.PI_NEXT_ISSUE_NUMBER;
+  const priorCoordination = process.env.PI_NEXT_COORDINATION_CWD;
+  try {
+    const runId = "journal-verify-production";
+    process.env.PI_NEXT_RUN_ID = runId;
+    process.env.PI_NEXT_ISSUE_NUMBER = "715";
+    process.env.PI_NEXT_COORDINATION_CWD = fixture.repo;
+    await mkdir(`${fixture.repo}/.pi-next`, { recursive: true });
+    await writeFile(planFile(fixture.repo), `# Plan: verify fixture\n\n**GitHub-Issue:** #715\n**Goal:** verify\n\n## Tasks\n- [x] implement\n  - Files: README.md\n  - Approach: done\n\n## Acceptance Criteria\n- [ ] external: production smoke must pass\n\n## Log\n- ready\n`);
+    let execute: ((id: string, params: { action: "verify"; reviews?: unknown[] }, signal: AbortSignal, update: () => void, ctx: { cwd: string }) => Promise<unknown>) | undefined;
+    registerCheckTool({ registerTool(tool: { name: string; execute: typeof execute }) { execute = tool.execute; } } as never);
+    assert.ok(execute);
+    await execute("verify", { action: "verify", reviews: [] }, new AbortController().signal, () => {}, { cwd: fixture.repo });
+    const records = readLifecycleJournal(piLifecycleJournalFile(fixture.repo, runId));
+    assert.deepEqual(records.map((record) => record.event), ["verification_finished", "pending_verification_recorded"]);
+    assert.equal(records[0].payload.verification, "unproven");
+    assert.equal(records[1].payload.criteriaIds?.length, 1);
+    assert.match(records[1].payload.criteriaIds?.[0] || "", /^criterion:[0-9a-f]{16}$/);
+  } finally {
+    if (priorRunId === undefined) delete process.env.PI_NEXT_RUN_ID;
+    else process.env.PI_NEXT_RUN_ID = priorRunId;
+    if (priorIssue === undefined) delete process.env.PI_NEXT_ISSUE_NUMBER;
+    else process.env.PI_NEXT_ISSUE_NUMBER = priorIssue;
+    if (priorCoordination === undefined) delete process.env.PI_NEXT_COORDINATION_CWD;
+    else process.env.PI_NEXT_COORDINATION_CWD = priorCoordination;
+    await fixture.cleanup();
   }
 });
 

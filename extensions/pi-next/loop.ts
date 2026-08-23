@@ -24,6 +24,7 @@ import {
 } from "./issue-candidates.ts";
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
+import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import {
   classifyFailure,
@@ -1054,6 +1055,13 @@ export async function runOwnedIssueCycle(
             prepared.activeWorkspace,
             prepared.activeIssueNumber,
           );
+          recordPiLifecycleJournal(coordinationCwd, {
+            event: "workspace_cleaned",
+            issueNumber: prepared.activeIssueNumber,
+            runId: prepared.runId,
+            idempotencyKey: `workspace-cleaned:${prepared.activeIssueNumber}:${prepared.activeWorkspace}`,
+            payload: { worktree: prepared.activeWorkspace },
+          });
         } catch (error) {
           const blocked: LoopState = {
             ...state,
