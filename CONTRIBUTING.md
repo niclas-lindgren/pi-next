@@ -61,7 +61,11 @@ Git mutation.
 They must not push to `origin`, the pi-next checkout, or an arbitrary consumer
 repository. Prefer deterministic in-memory authority fixtures over network
 calls. Add regression coverage at the real controller/loop boundary when a
-safety invariant is involved, not only for a parser or helper.
+safety invariant is involved, not only for a parser or helper. A real
+lifecycle/controller/recovery bug is not fully fixed until its outer-path
+ordering is captured as a deterministic scenario/replay/property regression
+where technically feasible; add or link sanitized entries in
+[`docs/HISTORICAL_INCIDENT_REGRESSIONS.md`](docs/HISTORICAL_INCIDENT_REGRESSIONS.md).
 
 ## Pull requests
 

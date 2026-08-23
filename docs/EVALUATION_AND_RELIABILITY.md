@@ -103,7 +103,7 @@ Use disposable temporary repositories and local bare remotes. Exercise real bran
 
 Every meaningful real-world failure should be capturable as bounded structured evidence and replayable without private transcripts.
 
-Replay fixtures may contain initial repository state, normalized authority state, scripted worker outcomes, lifecycle/fault events, and expected final invariants.
+Replay fixtures may contain initial repository state, normalized authority state, scripted worker outcomes, lifecycle/fault events, and expected final invariants. The discoverable historical corpus/index lives in [`HISTORICAL_INCIDENT_REGRESSIONS.md`](HISTORICAL_INCIDENT_REGRESSIONS.md); new real lifecycle/controller/recovery fixes should add a sanitized fixture there or link an equivalent outer-path regression.
 
 Permanent scenarios should include races, foreign/stale leases, non-zero worker exits, crash after claim/commit/push, crash after integration before cleanup, invalid consumer/provider preflight, authority changes before closure, PLAN narrowing live authority, pending external verification, unrelated main advancement, stale controller recovery, inherited cross-harness work, and scheduler continuation after candidate-local failure.
 

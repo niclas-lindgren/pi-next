@@ -57,6 +57,10 @@ export interface LifecycleReplayExpectation {
 export interface LifecycleReplayFixture {
   version: typeof LIFECYCLE_REPLAY_FIXTURE_VERSION;
   name: string;
+  /** Short sanitized provenance note. Never store private prompts/transcripts. */
+  provenance?: string;
+  /** The lifecycle invariant this fixture grades independently. */
+  invariant?: string;
   runId: string;
   issueNumber: number;
   events: LifecycleReplayFixtureEvent[];
