@@ -29,6 +29,103 @@ export type RecoveryLifecycleCheckpoint = (typeof RECOVERY_LIFECYCLE_CHECKPOINTS
 export type LifecycleCheckpointPosition = "before" | "after";
 export type LifecycleFaultAction = "throw" | "cancel" | "exit";
 
+export interface RecoveryLifecycleCheckpointCoverage {
+  /** Human-readable boundary contract; keep free of issue/private data. */
+  description: string;
+  /** True when the boundary has a durable lifecycle-journal fact. */
+  durableJournalEvent: boolean;
+  /** Invariant that crash/restart tests must preserve for this boundary. */
+  invariant: string;
+}
+
+export const RECOVERY_LIFECYCLE_CHECKPOINT_COVERAGE = {
+  candidate_selected: {
+    description: "A work item has been selected, before ownership is granted.",
+    durableJournalEvent: true,
+    invariant: "restart may re-evaluate candidates but must not infer ownership from selection",
+  },
+  lease_claimed: {
+    description: "Live authority/lease granted ownership for the canonical issue identity.",
+    durableJournalEvent: true,
+    invariant: "no duplicate fresh owner or claim after restart",
+  },
+  workspace_prepared: {
+    description: "Canonical issue worktree/branch identity is established or recovered.",
+    durableJournalEvent: true,
+    invariant: "unique dirty/unintegrated work is preserved and never silently replaced",
+  },
+  authority_loaded: {
+    description: "Current authority snapshot has been loaded for planning or mutable work.",
+    durableJournalEvent: true,
+    invariant: "mutable transitions fail closed when authority freshness cannot be proven",
+  },
+  plan_ready: {
+    description: "The bounded plan or repaired plan is ready for worker dispatch.",
+    durableJournalEvent: true,
+    invariant: "planning retries are idempotent or fail safe without granting authority",
+  },
+  worker_started: {
+    description: "A bounded implementation worker has been dispatched.",
+    durableJournalEvent: true,
+    invariant: "restart must not launch duplicate implementation when durable completion evidence exists",
+  },
+  worker_finished: {
+    description: "The implementation worker result/evidence has settled.",
+    durableJournalEvent: true,
+    invariant: "durable worker completion is replayable without resurrecting implementation unnecessarily",
+  },
+  verification_finished: {
+    description: "Mechanical verification has settled with pass/fail/unproven evidence.",
+    durableJournalEvent: true,
+    invariant: "promotion remains blocked unless verification evidence is current and acceptable",
+  },
+  candidate_committed: {
+    description: "Candidate implementation is durable as a commit SHA.",
+    durableJournalEvent: true,
+    invariant: "restart must not duplicate the candidate commit side effect",
+  },
+  promotion_started: {
+    description: "Guarded finalization/promotion has begun.",
+    durableJournalEvent: true,
+    invariant: "promotion retries are idempotent or fail closed against Git/authority evidence",
+  },
+  promotion_succeeded: {
+    description: "Integration/push side effect is durable enough to reconcile by SHA.",
+    durableJournalEvent: true,
+    invariant: "restart must not duplicate merge or push after durable integration evidence",
+  },
+  reachability_proven: {
+    description: "The candidate/integration SHA is proven reachable from the configured remote main.",
+    durableJournalEvent: true,
+    invariant: "cleanup and closure require durable reachability proof first",
+  },
+  authority_reconciled: {
+    description: "Fresh authority has been checked after integration and before completion.",
+    durableJournalEvent: true,
+    invariant: "no close before current authority/freshness proof",
+  },
+  pending_verification_recorded: {
+    description: "External or pending verification state is durably recorded.",
+    durableJournalEvent: true,
+    invariant: "crash after pending verification does not resurrect implementation unnecessarily",
+  },
+  issue_closed: {
+    description: "Authority completion/closure side effect has been performed.",
+    durableJournalEvent: true,
+    invariant: "closure retry reconciles authority instead of closing stale work",
+  },
+  lease_released: {
+    description: "The active issue lease has been released or made non-owning.",
+    durableJournalEvent: true,
+    invariant: "lease release is idempotent and never substitutes for integration proof",
+  },
+  workspace_cleaned: {
+    description: "Local disposable workspace cleanup has completed.",
+    durableJournalEvent: true,
+    invariant: "cleanup never precedes durable integration/reachability and never deletes unique work",
+  },
+} as const satisfies Record<RecoveryLifecycleCheckpoint, RecoveryLifecycleCheckpointCoverage>;
+
 const CHECKPOINT_SET = new Set<string>(RECOVERY_LIFECYCLE_CHECKPOINTS);
 
 export interface LifecycleFaultInjectionOptions {

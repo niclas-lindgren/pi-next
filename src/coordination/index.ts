@@ -12,4 +12,5 @@ export * from "./issue-leases.ts";
 export * from "./authority-read-policy.ts";
 export * from "./finalize.ts";
 export * from "./lifecycle-journal.ts";
+export * from "./lifecycle-checkpoints.ts";
 export * from "./cli.ts";
