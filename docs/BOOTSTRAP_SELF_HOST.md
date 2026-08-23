@@ -12,7 +12,7 @@ npm run bootstrap:self-host -- --next-only
 
 `--issue N` remains an explicit operator override. `--next-only` performs roadmap discovery and reports the selected issue plus bounded skip/block reasons without launching a worker/model or mutating GitHub.
 
-After an issue number is resolved, the supervisor creates/reuses the canonical `.worktrees/issue-N` worktree and launches a fresh plain-Pi implementation worker. It then runs deterministic checks outside the worker. Optional bounded repair/review modes may be enabled explicitly. One invocation still executes at most one issue; automatic selection is not queue progression.
+After an issue number is resolved, the supervisor creates/reuses the canonical `.worktrees/issue-N` worktree and launches a fresh plain-Pi implementation worker. It then runs deterministic checks outside the worker. If implementation completed, candidate work exists, and deterministic verification fails with bounded evidence, normal self-host operation launches at most one fresh repair worker automatically, reruns verification, and continues to finalization on success. Use `--no-repair` to opt out; `--repair` remains a compatibility alias for the default. Optional review may be enabled explicitly. One invocation still executes at most one issue; automatic selection is not queue progression.
 
 ## Operator feedback contract
 

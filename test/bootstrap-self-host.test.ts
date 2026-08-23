@@ -222,8 +222,85 @@ test("uses at most one fresh repair session and passes concise failure evidence"
     assert.equal(sessions.length, 2);
     assert.notEqual(sessions[0], sessions[1]);
     assert.match(sessions[1]!.prompt, /DETERMINISTIC FAILURE EVIDENCE/);
+    assert.match(sessions[1]!.prompt, /EXACT CANDIDATE EVIDENCE/);
+    assert.match(sessions[1]!.prompt, /implementation\.txt/);
     assert.doesNotMatch(sessions[1]!.prompt, /implementation transcript|hidden reasoning/i);
     assert.ok(sessions.every((session) => session.disposed));
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("#79 regression shape: typecheck passes, npm test fails, then fresh automatic repair runs", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    let testRuns = 0;
+    const factory = fakeFactory(sessions, async (role, cwd) => {
+      await writeFile(join(cwd, role === "implementation" ? "lifecycle-model-property.test.ts" : "bootstrap-self-host.test.ts"), "changed\n");
+    });
+    const commands: string[] = [];
+    const report = await runBootstrap(
+      { issueNumber: 79, cwd: fixtureState.root, allowRepair: true, review: false, timeoutMs: 5_000 },
+      {
+        ...dependenciesFor(fixtureState.root, factory, () => 0, commands),
+        fetchIssue: async () => issue(79),
+        runCommand: async (command, args, options) => {
+          commands.push(`${command} ${args.join(" ")}`);
+          if (command === "sh" && args[0] === "-c" && args[1] === "npm run typecheck") return checkResult(options.cwd, args[1], 0);
+          if (command === "sh" && args[0] === "-c" && args[1] === "npm test") return checkResult(options.cwd, args[1], testRuns++ === 0 ? 1 : 0);
+          return runCommand(command, args, options);
+        },
+      },
+    );
+
+    assert.equal(report.disposition, "pass");
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation", "repair"]);
+    assert.match(sessions[1]!.prompt, /npm test/);
+    assert.match(sessions[1]!.prompt, /lifecycle-model-property\.test\.ts/);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("automatic repair stops after one failed repair verification and preserves candidate", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    let checkRuns = 0;
+    const factory = fakeFactory(sessions, async (role, cwd) => {
+      await writeFile(join(cwd, `${role}.txt`), "changed\n");
+    });
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: true, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => (checkRuns++ < 4 ? 1 : 0), []),
+    );
+
+    assert.equal(report.disposition, "repairable-failure");
+    assert.equal(report.repairOutcome, "exhausted");
+    assert.equal(report.repairBudgetExhausted, true);
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation", "repair"]);
+    assert.equal(report.checks.some((check) => !check.passed), true);
+    assert.deepEqual(report.candidate.changedFiles.sort(), ["implementation.txt", "repair.txt"]);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("does not automatically repair an unproven no-change verification failure", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async () => undefined);
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: true, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 1, []),
+    );
+
+    assert.equal(report.disposition, "repairable-failure");
+    assert.equal(report.repairOutcome, "ineligible");
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation"]);
+    assert.equal(report.candidateHasDelta, false);
   } finally {
     await fixtureState.cleanup();
   }
@@ -423,9 +500,47 @@ test("normal rerun with preserved candidate verifies and finalizes without relau
   }
 });
 
-test("verify-only may use one bounded repair after candidate checks fail, without implementation", async () => {
+test("successful automatic repair continues into normal finalization", async () => {
   const fixtureState = await fixture();
   try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    let checkRuns = 0;
+    let finalizations = 0;
+    const factory = fakeFactory(sessions, async (role, cwd) => {
+      await writeFile(join(cwd, `${role}.txt`), "changed\n");
+    });
+    const report = await runBootstrapLifecycle(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: true, review: false, timeoutMs: 5_000, finalize: true },
+      {
+        ...dependenciesFor(fixtureState.root, factory, () => (checkRuns++ === 0 ? 1 : 0), []),
+        runFinalizer: async (options) => {
+          finalizations += 1;
+          assert.deepEqual(options.candidatePaths?.sort(), ["implementation.txt", "repair.txt"]);
+          return { ok: true, issueNumber: 75, branch: "agent/issue-75", candidateSha: "sha", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+        },
+      },
+    );
+
+    assert.equal(report.finalization, "PASS");
+    assert.equal(report.repair, "COMPLETED");
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation", "repair"]);
+    assert.equal(finalizations, 1);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("verify-only may use one bounded explicit repair after preserved candidate checks fail, without implementation", async () => {
+  const fixtureState = await fixture();
+  try {
+    const setupFactory = fakeFactory([], async (_role, cwd) => {
+      await writeFile(join(cwd, "preserved-for-repair.txt"), "candidate\n");
+    });
+    await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, setupFactory, () => 1, []),
+    );
+
     const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
     let checkRuns = 0;
     const factory = fakeFactory(sessions, async (role, cwd) => {
@@ -743,6 +858,41 @@ test("explicit --issue bypasses automatic selection and remains unchanged", asyn
   assert.equal(code, 0);
   assert.deepEqual(calls, [85]);
   assert.deepEqual(finalizations, [85]);
+});
+
+test("CLI enables one automatic repair by default and --no-repair opts out", async () => {
+  const observed: boolean[] = [];
+  const baseReport = (options: { issueNumber: number }) => ({
+    issueNumber: options.issueNumber,
+    attempts: 1,
+    start: "2026-01-01T00:00:00.000Z",
+    end: "2026-01-01T00:00:00.000Z",
+    disposition: "pass" as const,
+    branch: "agent/issue-85",
+    worktree: ".worktrees/issue-85",
+    revision: "r",
+    baselineRevision: "b",
+    candidate: { changedFiles: ["candidate.txt"] } as never,
+    dependencySetup: { action: "not-required" as const },
+    workerAttempts: [],
+    checks: [],
+    mechanicalPass: true,
+    candidateReadyForReview: true,
+    finalizationReady: false,
+    implementationOutcome: "implemented" as const,
+    candidateHasDelta: true,
+  });
+
+  assert.equal(await runBootstrapCli(["--issue", "85", "--no-finalize"], {}, async (options) => {
+    observed.push(options.allowRepair);
+    return baseReport(options);
+  }), 0);
+  assert.equal(await runBootstrapCli(["--issue", "85", "--no-repair", "--no-finalize"], {}, async (options) => {
+    observed.push(options.allowRepair);
+    return baseReport(options);
+  }), 0);
+
+  assert.deepEqual(observed, [true, false]);
 });
 
 test("--next-only launches zero workers or bootstrap executions", async () => {

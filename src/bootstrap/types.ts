@@ -268,6 +268,8 @@ export interface BootstrapReport {
   candidateReadyForReview: boolean;
   finalizationReady: boolean;
   implementationOutcome: "implemented" | "already-satisfied" | "unproven-no-change" | "failed";
+  repairOutcome?: "not-needed" | "disabled" | "ineligible" | "completed" | "exhausted" | "failed";
+  repairBudgetExhausted?: boolean;
   candidateHasDelta: boolean;
   noChangeReason?: string;
   failureReason?: string;
@@ -280,6 +282,7 @@ export interface BootstrapLifecycleReport {
   verification: "PASS" | "FAIL";
   finalization: "PASS" | "BLOCKED" | "SKIPPED";
   candidatePreserved?: boolean;
+  repair?: "NOT_NEEDED" | "DISABLED" | "INELIGIBLE" | "COMPLETED" | "EXHAUSTED" | "FAILED";
   implementationReport: BootstrapReport;
   finalizationReport?: BootstrapFinalizerReport;
   finalizationFailure?: { code: string; reason: string };

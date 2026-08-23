@@ -83,10 +83,19 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   }
   let checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
   const implementationCompleted = options.verifyOnly || resumeExistingCandidate || initialWorker?.disposition === "completed";
+  let repairOutcome: BootstrapReport["repairOutcome"] = checks.every((check) => check.passed) ? "not-needed" : options.allowRepair ? "ineligible" : "disabled";
   if (!checks.every((check) => check.passed) && options.allowRepair && implementationCompleted) {
-    const repairPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "repair", failureEvidence(checks));
-    await runWorker(await getFactory(), "repair", repairPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
-    checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
+    const repairCandidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
+    const repairCandidateHasDelta = repairCandidate.changedFiles.length > 0 || repairCandidate.committedChanges || repairCandidate.uncommittedChanges;
+    const evidence = failureEvidence(checks);
+    if (repairCandidateHasDelta && evidence) {
+      const currentCandidateEvidence = await candidateEvidence(worktree.path, repository.baselineRevision, repairCandidate.headRevision, runner);
+      const repairPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "repair", evidence, currentCandidateEvidence);
+      const repairWorker = await runWorker(await getFactory(), "repair", repairPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
+      repairOutcome = repairWorker.disposition === "completed" ? "completed" : "failed";
+      checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
+      if (!checks.every((check) => check.passed)) repairOutcome = "exhausted";
+    }
   }
   const candidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
   const candidateHasDelta = candidate.changedFiles.length > 0 || candidate.committedChanges || candidate.uncommittedChanges;
@@ -102,7 +111,7 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   const reviewPass = options.review ? candidateHasDelta ? reviewer?.disposition === "completed" && reviewPassed(reviewerResult) : undefined : undefined;
   const closedByAuthority = issue.state === "CLOSED";
   const noChangeReason = !candidateHasDelta && mechanicalPass ? closedByAuthority ? "authoritative issue state is CLOSED; no candidate changes were produced" : "no candidate changes were produced and satisfaction was not mechanically proven" : undefined;
-  const implementationOutcome: BootstrapReport["implementationOutcome"] = !implementationCompleted || !mechanicalPass ? "failed" : candidateHasDelta ? "implemented" : closedByAuthority ? "already-satisfied" : "unproven-no-change";
+  const implementationOutcome: BootstrapReport["implementationOutcome"] = !implementationCompleted ? "failed" : candidateHasDelta ? "implemented" : mechanicalPass ? closedByAuthority ? "already-satisfied" : "unproven-no-change" : "failed";
   const finalizationReady = implementationOutcome === "implemented" && mechanicalPass && !candidate.behindOriginMain && (options.review ? reviewPass === true : true);
   const disposition: Disposition = !implementationCompleted ? "blocked" : !mechanicalPass ? "repairable-failure" : !candidateHasDelta ? closedByAuthority ? "already-satisfied" : "no-change" : options.review && reviewPass !== true ? "blocked" : "pass";
   const reason = disposition === "pass" || disposition === "already-satisfied" ? undefined : noChangeReason ?? (reviewer && reviewPass !== true ? "independent review did not return a passing structured verdict" : initialWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification"));
@@ -127,6 +136,8 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     candidateReadyForReview: mechanicalPass && candidateHasDelta,
     finalizationReady,
     implementationOutcome,
+    repairOutcome,
+    repairBudgetExhausted: repairOutcome === "exhausted",
     candidateHasDelta,
     noChangeReason,
     failureReason: reason,

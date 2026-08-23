@@ -47,6 +47,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 
 - **adopt-pattern** — durable workflow systems separate side-effect completion evidence from incidental local resources. The bootstrap supervisor now treats `.git/pi-next/bootstrap-lifecycle/issue-N.verified-candidate.json` as a bounded exact-candidate proof only after deterministic finalizer verification records the candidate SHA, and still validates the live local branch before skipping an implementation worker. Mere branch/worktree existence remains non-authoritative and cannot bypass no-op candidate semantics.
 
+### Bootstrap automatic bounded repair (issue #134)
+
+- **adopt-pattern** — deterministic recovery systems spend a fixed retry budget only after the failed step leaves a mechanically proven candidate and bounded failure evidence. The bootstrap supervisor now makes the already-existing one-shot repair budget the normal path: a fresh repair worker receives the task packet, current candidate evidence, and exact failed checks, then verification reruns once. Failed second verification exhausts the budget and preserves the candidate rather than looping.
+- **reject** — continuing the implementation conversation, repairing preflight/authority/no-change/finalization failures, or recursively launching workers. These states are either unsafe, unproven, or owned by separate recovery semantics.
+
 ### Bootstrap lifecycle lock decisions (issue #114)
 
 - **adopt-pattern** — local process lock managers commonly use an atomic lock directory plus bounded owner metadata and heartbeat. The bootstrap utility adopts that filesystem primitive in `.git/pi-next/bootstrap-lifecycle/issue-N.lock`, keeping coordination outside candidate contents and failing closed for live or ambiguous owners.
