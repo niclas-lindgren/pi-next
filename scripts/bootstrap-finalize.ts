@@ -115,6 +115,18 @@ export function classifyCiEvidence(input: { checkRows: Array<{ name?: string | n
   return { state };
 }
 
+export async function evaluateGhPrChecks(input: { cwd: string; prNumber: number; requiredContexts: string[]; runCommand?: CommandRunner }): Promise<CiEvaluation> {
+  const runner = input.runCommand ?? runCommand;
+  const r = await runner("gh", ["pr", "checks", String(input.prNumber), "--json", "name,state,bucket"], { cwd: input.cwd });
+  if (r.exitCode !== 0 && !isNoChecksCliResult(r)) return { state: "UNKNOWN", reason: (r.stderr || r.stdout).trim() || "gh pr checks unavailable" };
+  try {
+    const rows = r.exitCode === 0 ? JSON.parse(r.stdout) as Array<{ name?: string; state?: string; bucket?: string }> : [];
+    return classifyCiEvidence({ checkRows: rows, requiredContexts: input.requiredContexts, noChecksCliExit: r.exitCode !== 0 });
+  } catch (error) {
+    return { state: "UNKNOWN", reason: `could not parse gh pr checks output: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 class GhAuthority implements BootstrapFinalizeAuthority {
   async fetchIssue(issueNumber: number, cwd: string): Promise<BootstrapFinalizeIssue> { const r = await runCommand("gh", ["issue", "view", String(issueNumber), "--json", "number,title,body,state,updatedAt,comments,labels"], { cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("AUTHORITY_FAILED", r.stderr || r.stdout); const raw = JSON.parse(r.stdout) as { number: number; title: string; body?: string; state?: string; updatedAt?: string; comments?: unknown[]; labels?: Array<{ name?: string } | string> }; const state: "OPEN" | "CLOSED" = raw.state === "CLOSED" ? "CLOSED" : "OPEN"; return { number: raw.number, title: raw.title, body: raw.body ?? "", state, updatedAt: raw.updatedAt, comments: raw.comments ?? [], labels: (raw.labels ?? []).map((l: { name?: string } | string) => typeof l === "string" ? l : l.name).filter((label): label is string => Boolean(label)) }; }
   async listPullRequests(branch: string, cwd: string): Promise<BootstrapFinalizePr[]> { const r = await runCommand("gh", ["pr", "list", "--head", branch, "--base", "main", "--state", "all", "--json", "number,headRefName,headRefOid,baseRefName,state,mergeCommit"], { cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("AUTHORITY_FAILED", r.stderr || r.stdout); return (JSON.parse(r.stdout) as Array<{ number: number; headRefName: string; headRefOid: string; baseRefName: string; state: string; mergeCommit?: { oid?: string } }>).map((p): BootstrapFinalizePr => ({ number: p.number, headRefName: p.headRefName, headSha: p.headRefOid, baseRefName: p.baseRefName, state: p.state === "MERGED" ? "MERGED" : p.state === "CLOSED" ? "CLOSED" : "OPEN", mergeCommitSha: p.mergeCommit?.oid })); }
@@ -124,13 +136,7 @@ class GhAuthority implements BootstrapFinalizeAuthority {
     if (required === undefined) return { state: "UNKNOWN", reason: "required-check policy unavailable" };
     const started = Date.now();
     for (let i = 0; i < 20; i++) {
-      const r = await runCommand("gh", ["pr", "checks", String(input.pr.number), "--json", "name,state,conclusion,bucket"], { cwd: input.cwd });
-      let evaluation: CiEvaluation;
-      if (r.exitCode !== 0 && !isNoChecksCliResult(r)) return { state: "UNKNOWN", reason: (r.stderr || r.stdout).trim() || "gh pr checks unavailable" };
-      try {
-        const rows = r.exitCode === 0 ? JSON.parse(r.stdout) as Array<{ name?: string; state?: string; conclusion?: string; bucket?: string }> : [];
-        evaluation = classifyCiEvidence({ checkRows: rows, requiredContexts: required, noChecksCliExit: r.exitCode !== 0 });
-      } catch (error) { return { state: "UNKNOWN", reason: `could not parse gh pr checks output: ${error instanceof Error ? error.message : String(error)}` }; }
+      const evaluation = await evaluateGhPrChecks({ cwd: input.cwd, prNumber: input.pr.number, requiredContexts: required });
       if (evaluation.state === "PENDING") {
         const elapsed = Math.floor((Date.now() - started) / 1000);
         input.reporter?.(`bootstrap finalize #${input.issueNumber ?? input.pr.number} · CI · waiting · elapsed=${elapsed}s`);
