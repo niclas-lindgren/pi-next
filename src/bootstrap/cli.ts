@@ -88,7 +88,7 @@ export async function runBootstrapLifecycle(
       reporter: (line) => emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "activity", detail: line }),
     });
     emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "pass" });
-    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "pass", detail: "implementation: PASS; verification: PASS; finalization: PASS" });
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "pass", detail: finalizationReport.pendingExternalVerification ? "implementation: PASS; verification: PASS; integration: PASS; external verification: PENDING; cleanup: PASS" : "implementation: PASS; verification: PASS; finalization: PASS" });
     return { ...base, disposition: "pass", finalization: "PASS", finalizationReport };
   } catch (error) {
     const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "FINALIZATION_FAILED";

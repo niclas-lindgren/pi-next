@@ -168,7 +168,8 @@ export interface BootstrapFinalizerReport {
   issueClosed: boolean;
   worktreeRemoved: boolean;
   localBranchRemoved: boolean;
-  outcome: "finalized" | "already-satisfied";
+  outcome: "finalized" | "already-satisfied" | "integrated-pending-verification";
+  pendingExternalVerification?: boolean;
 }
 
 export type BootstrapFinalizer = (options: {

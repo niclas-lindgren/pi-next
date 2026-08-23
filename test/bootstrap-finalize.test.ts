@@ -189,15 +189,88 @@ test("issue 119 prose mentioning pending external verification does not block ex
   } finally { await f.cleanup(); }
 });
 
-test("explicit structured pending external verification marker leaves integrated issue open", async () => {
+test("explicit structured pending external verification marker leaves integrated issue open but cleans worktree", async () => {
   const f = await fixture();
   try {
-    const { pr } = await externallyMergedCandidate(f.root, f.remote, 122);
+    const { pr, worktree } = await externallyMergedCandidate(f.root, f.remote, 122);
     const authority = new FakeAuthority(f.root, 122);
     authority.issue.comments = [{ id: "pending", body: pendingMarker }];
     authority.prs.push(pr);
-    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 122, authority }), "EXTERNAL_VERIFICATION_PENDING");
+    const lines: string[] = [];
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 122, authority, reporter: (line) => lines.push(line) });
+    assert.equal(result.outcome, "integrated-pending-verification");
+    assert.equal(result.issueClosed, false);
+    assert.equal(result.pendingExternalVerification, true);
+    assert.equal(result.worktreeRemoved, true);
+    assert.equal(result.localBranchRemoved, true);
     assert.equal(authority.closed, false);
+    await assert.rejects(git(worktree, "status", "--porcelain"));
+    await assert.rejects(git(f.root, "rev-parse", "--verify", "agent/issue-122"));
+    assert.ok(lines.includes("bootstrap finalize #122 · external verification pending · issue remains open"));
+    assert.ok(lines.includes("bootstrap finalize #122 · INTEGRATED_PENDING_VERIFICATION"));
+  } finally { await f.cleanup(); }
+});
+
+test("pending integrated finalization rerun is idempotent after worktree and branch cleanup", async () => {
+  const f = await fixture();
+  try {
+    const { pr } = await externallyMergedCandidate(f.root, f.remote, 123);
+    const authority = new FakeAuthority(f.root, 123);
+    authority.issue.comments = [{ id: "pending", body: pendingMarker }];
+    authority.prs.push(pr);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 123, authority });
+    const rerun = await runBootstrapFinalize({ cwd: f.root, issueNumber: 123, authority });
+    assert.equal(rerun.outcome, "integrated-pending-verification");
+    assert.equal(rerun.worktreeRemoved, true);
+    assert.equal(rerun.localBranchRemoved, true);
+    assert.equal(authority.closed, false);
+  } finally { await f.cleanup(); }
+});
+
+test("local branch is preserved when merged PR is not reachable from origin main", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await dirtyCandidate(f.root, 124);
+    await git(worktree, "add", "feature.txt");
+    await git(worktree, "commit", "-qm", "candidate 124");
+    const sha = await git(worktree, "rev-parse", "HEAD");
+    const authority = new FakeAuthority(f.root, 124);
+    authority.prs.push({ number: 124, headRefName: "agent/issue-124", headSha: sha, baseRefName: "main", state: "MERGED", mergeCommitSha: sha });
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 124, authority }), "REACHABILITY_FAILED");
+    assert.equal(await git(f.root, "rev-parse", "--verify", "agent/issue-124"), sha);
+    assert.equal(await git(worktree, "rev-parse", "HEAD"), sha);
+  } finally { await f.cleanup(); }
+});
+
+test("successful external verification can close without recreating old worktree", async () => {
+  const f = await fixture();
+  try {
+    const { pr } = await externallyMergedCandidate(f.root, f.remote, 125);
+    const authority = new FakeAuthority(f.root, 125);
+    authority.issue.comments = [{ id: "pending", body: pendingMarkerFor(pr.headSha) }];
+    authority.prs.push(pr);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 125, authority });
+    authority.issue.comments = [{ id: "pending", body: pendingMarkerFor(pr.headSha) }, { id: "pass", body: resultMarkerFor(pr.headSha, "passed") }];
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 125, authority });
+    assert.equal(result.outcome, "finalized");
+    assert.equal(result.issueClosed, true);
+    assert.equal(authority.closed, true);
+  } finally { await f.cleanup(); }
+});
+
+test("failed external verification does not close and allows a fresh branch from current main", async () => {
+  const f = await fixture();
+  try {
+    const { pr } = await externallyMergedCandidate(f.root, f.remote, 126);
+    const authority = new FakeAuthority(f.root, 126);
+    authority.issue.comments = [{ id: "pending", body: pendingMarkerFor(pr.headSha) }];
+    authority.prs.push(pr);
+    await runBootstrapFinalize({ cwd: f.root, issueNumber: 126, authority });
+    authority.issue.comments = [{ id: "pending", body: pendingMarkerFor(pr.headSha) }, { id: "fail", body: resultMarkerFor(pr.headSha, "failed") }];
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 126, authority }), "EXTERNAL_VERIFICATION_FAILED");
+    assert.equal(authority.closed, false);
+    const fresh = await cleanCandidate(f.root, 126);
+    assert.equal(await git(fresh, "rev-parse", "HEAD"), await git(f.root, "rev-parse", "origin/main"));
   } finally { await f.cleanup(); }
 });
 
@@ -413,6 +486,8 @@ function externalIssue(body: string, comments: unknown[] = []): BootstrapFinaliz
 const pendingRecord = { version: 1, status: "awaiting_external_verification", criteria: [{ id: "deploy", description: "verify deployed revision", environment: "production" }], integratedMainSha: "a".repeat(40) };
 const pendingMarker = `<!-- pi-next-pending-verification -->\n${JSON.stringify(pendingRecord)}`;
 const passedMarker = `<!-- pi-next-pending-verification-result -->\n${JSON.stringify({ version: 1, integratedMainSha: pendingRecord.integratedMainSha, status: "passed", evidence: "operator approved" })}`;
+function pendingMarkerFor(integratedMainSha: string): string { return `<!-- pi-next-pending-verification -->\n${JSON.stringify({ ...pendingRecord, integratedMainSha })}`; }
+function resultMarkerFor(integratedMainSha: string, status: "passed" | "failed"): string { return `<!-- pi-next-pending-verification-result -->\n${JSON.stringify({ version: 1, integratedMainSha, status, evidence: "operator evidence" })}`; }
 
 test("external verification classifier ignores ordinary prose, checklists, code fences, and historical discussion", () => {
   assert.equal(classifyExternalVerificationAuthority(externalIssue("This spec says pending external verification remains open after integration.")), "clear");
