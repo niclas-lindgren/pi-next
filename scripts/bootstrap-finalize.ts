@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { acquireBootstrapLifecycleLock, type BootstrapLifecycleLock } from "../src/bootstrap/lifecycle-lock.js";
 import { writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.js";
+import { CANONICAL_STATUS_ARGS, changedFilePathsFromStatus, uniqueSortedGitPaths } from "../src/bootstrap/git-status.js";
 import { emitLifecycleCheckpoint } from "../src/coordination/lifecycle-checkpoints.js";
 
 const execFileAsync = promisify(execFile);
@@ -75,7 +76,7 @@ async function discoverIssue(root: string, explicit: number | undefined, runner:
   const entries = parseWorktrees(await git(root, ["worktree", "list", "--porcelain"], runner));
   const plausible = new Set<number>();
   const addIfLiveCandidate = async (issue: number, branch: string, worktreePath?: string) => {
-    const dirty = worktreePath ? (await gitRaw(worktreePath, ["status", "--porcelain=v1"], runner)).trimEnd().length > 0 : false;
+    const dirty = worktreePath ? (await gitRaw(worktreePath, [...CANONICAL_STATUS_ARGS], runner)).trimEnd().length > 0 : false;
     const integrated = (await tryGit(root, ["merge-base", "--is-ancestor", branch, "origin/main"], runner)) !== undefined;
     if (dirty || !integrated) plausible.add(issue);
   };
@@ -92,7 +93,7 @@ async function discoverIssue(root: string, explicit: number | undefined, runner:
 async function resolveRoot(cwd: string, runner: CommandRunner): Promise<string> { return git(cwd, ["rev-parse", "--show-toplevel"], runner); }
 async function findWorktree(root: string, branch: string, issue: number, runner: CommandRunner): Promise<string | undefined> { const expected = resolve(root, ".worktrees", `issue-${issue}`); const entries = parseWorktrees(await git(root, ["worktree", "list", "--porcelain"], runner)); const hit = entries.find((e) => e.branch === branch); if (hit && resolve(hit.path) !== expected) throw new BootstrapFinalizeError("AMBIGUOUS_CANDIDATE", `${branch} is checked out at non-canonical path ${hit.path}`); return hit ? expected : undefined; }
 
-async function changedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const s = await gitRaw(worktree, ["status", "--porcelain=v1"], runner); return [...new Set(s.split("\n").filter(Boolean).map((l) => l.slice(3).split(" -> ").pop()!))].sort(); }
+async function changedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const s = await gitRaw(worktree, [...CANONICAL_STATUS_ARGS], runner); return changedFilePathsFromStatus(s); }
 async function committedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const base = await git(worktree, ["merge-base", "HEAD", "origin/main"], runner); const out = await git(worktree, ["diff", "--name-only", `${base}..HEAD`], runner); return out.split("\n").filter(Boolean).sort(); }
 function exactMergedPr(prs: BootstrapFinalizePr[], candidateSha: string | undefined): BootstrapFinalizePr | undefined {
   const merged = prs.filter((p) => p.state === "MERGED" && p.mergeCommitSha);
@@ -115,7 +116,7 @@ async function synchronizeLocalMain(input: { root: string; issueNumber: number; 
 
   const entries = parseWorktrees(await git(input.root, ["worktree", "list", "--porcelain"], input.runner));
   const canonicalRoot = entries[0]?.path ?? input.root;
-  const rootStatus = await gitRaw(canonicalRoot, ["status", "--porcelain=v1"], input.runner);
+  const rootStatus = await gitRaw(canonicalRoot, [...CANONICAL_STATUS_ARGS], input.runner);
   if (rootStatus.trimEnd().length > 0) return report({ status: "skipped", reason: "dirty root checkout" });
 
   const localMain = await tryGit(input.root, ["rev-parse", "--verify", "refs/heads/main"], input.runner);
@@ -131,7 +132,7 @@ async function synchronizeLocalMain(input: { root: string; issueNumber: number; 
   if (mainWorktrees.length > 1) return report({ status: "skipped", reason: "multiple main worktrees" });
   const mainWorktree = mainWorktrees[0];
   if (mainWorktree) {
-    const mainStatus = await gitRaw(mainWorktree.path, ["status", "--porcelain=v1"], input.runner);
+    const mainStatus = await gitRaw(mainWorktree.path, [...CANONICAL_STATUS_ARGS], input.runner);
     if (mainStatus.trimEnd().length > 0) return report({ status: "skipped", reason: mainWorktree.path === canonicalRoot ? "dirty root checkout" : "dirty main checkout" });
     await git(mainWorktree.path, ["merge", "--ff-only", "origin/main"], input.runner);
   } else {
@@ -285,7 +286,7 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
   await git(worktree, ["fetch", "origin", "main", "--quiet"], runner);
   await git(worktree, ["diff", "--check"], runner);
   const dirty = await changedPaths(worktree, runner);
-  const intended = options.candidatePaths ? [...options.candidatePaths].sort() : dirty;
+  const intended = options.candidatePaths ? uniqueSortedGitPaths(options.candidatePaths) : dirty;
   if (dirty.some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "worktree contains changes outside intended candidate paths");
   if (dirty.length) { await git(worktree, ["add", "--", ...intended], runner); const staged = await git(worktree, ["diff", "--cached", "--name-only"], runner); if (staged.split("\n").filter(Boolean).some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "staging would capture unintended paths"); await git(worktree, ["commit", "-m", commitMessage(issue)], runner); say(`bootstrap finalize #${issueNumber} · committed ${await git(worktree, ["rev-parse", "--short", "HEAD"], runner)}`); }
   const candidateSha = await git(worktree, ["rev-parse", "HEAD"], runner);

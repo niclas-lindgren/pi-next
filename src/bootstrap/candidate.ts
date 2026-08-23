@@ -3,22 +3,8 @@ import { resolve } from "node:path";
 import { BootstrapError } from "./errors.js";
 import { CandidateState, CommandRunner, MAX_CHANGED_FILES, MAX_PACKET_BYTES } from "./types.js";
 import { git } from "./git-utils.js";
+import { CANONICAL_STATUS_ARGS, parseGitStatus, uniqueSortedGitPaths } from "./git-status.js";
 import { redactSecrets } from "./utils.js";
-
-function parseStatusLine(line: string): { index: string; worktree: string; path: string; untracked: boolean } | undefined {
-  if (!line) return undefined;
-  const match = line.match(/^([ MADRCU?!])([ MADRCU?!]) (.+)$/) ?? line.match(/^([MADRCU?!]) (.+)$/);
-  if (!match) return { index: " ", worktree: " ", path: line.split(" -> ").at(-1) ?? line, untracked: false };
-  const compact = match.length === 3;
-  const index = compact ? " " : match[1]!;
-  const worktree = compact ? match[1]! : match[2]!;
-  const rawPath = compact ? match[2]! : match[3]!;
-  return { index, worktree, path: rawPath.split(" -> ").at(-1) ?? rawPath, untracked: index === "?" && worktree === "?" };
-}
-
-function statusEntries(status: string): Array<{ index: string; worktree: string; path: string; untracked: boolean }> {
-  return status.split("\n").map(parseStatusLine).filter((entry): entry is NonNullable<ReturnType<typeof parseStatusLine>> => Boolean(entry));
-}
 
 function splitLines(value: string): string[] {
   return value.split("\n").filter(Boolean);
@@ -32,7 +18,7 @@ export async function readCandidateState(cwd: string, baselineRevision: string, 
   const headRevision = await git(cwd, ["rev-parse", "HEAD"], runner);
   const mergeBaseRevision = await git(cwd, ["merge-base", baselineRevision, headRevision], runner);
   const [status, committedFilesText, stagedFilesText, unstagedFilesText, aheadMerge, aheadMain, behindMain] = await Promise.all([
-    git(cwd, ["status", "--short", "--untracked-files=all"], runner),
+    git(cwd, [...CANONICAL_STATUS_ARGS], runner),
     git(cwd, ["diff", "--name-only", `${mergeBaseRevision}..${headRevision}`], runner),
     git(cwd, ["diff", "--cached", "--name-only"], runner),
     git(cwd, ["diff", "--name-only"], runner),
@@ -40,12 +26,12 @@ export async function readCandidateState(cwd: string, baselineRevision: string, 
     revCount(cwd, `${baselineRevision}..${headRevision}`, runner),
     revCount(cwd, `${headRevision}..${baselineRevision}`, runner),
   ]);
-  const entries = statusEntries(status);
-  const committedFiles = splitLines(committedFilesText);
-  const stagedFiles = [...new Set([...splitLines(stagedFilesText), ...entries.filter((entry) => entry.index !== " " && !entry.untracked).map((entry) => entry.path)])];
-  const unstagedFiles = [...new Set([...splitLines(unstagedFilesText), ...entries.filter((entry) => entry.worktree !== " " && !entry.untracked).map((entry) => entry.path)])];
-  const untrackedFiles = entries.filter((entry) => entry.untracked).map((entry) => entry.path);
-  const changedFiles = [...new Set([...committedFiles, ...stagedFiles, ...unstagedFiles, ...untrackedFiles])].slice(0, MAX_CHANGED_FILES);
+  const entries = parseGitStatus(status);
+  const committedFiles = uniqueSortedGitPaths(splitLines(committedFilesText));
+  const stagedFiles = uniqueSortedGitPaths([...splitLines(stagedFilesText), ...entries.filter((entry) => entry.index !== " " && !entry.untracked).map((entry) => entry.path)]);
+  const unstagedFiles = uniqueSortedGitPaths([...splitLines(unstagedFilesText), ...entries.filter((entry) => entry.worktree !== " " && !entry.untracked).map((entry) => entry.path)]);
+  const untrackedFiles = uniqueSortedGitPaths(entries.filter((entry) => entry.untracked).map((entry) => entry.path));
+  const changedFiles = uniqueSortedGitPaths([...committedFiles, ...stagedFiles, ...unstagedFiles, ...untrackedFiles]).slice(0, MAX_CHANGED_FILES);
   return {
     headRevision,
     baselineRevision,
@@ -94,8 +80,8 @@ async function untrackedEvidence(cwd: string, files: string[]): Promise<string> 
 
 export async function candidateEvidence(cwd: string, baselineRevision: string, revision: string, runner: CommandRunner): Promise<string> {
   const mergeBaseRevision = await git(cwd, ["merge-base", baselineRevision, revision], runner);
-  const status = await git(cwd, ["status", "--short", "--untracked-files=all"], runner);
-  const untrackedFiles = statusEntries(status).filter((entry) => entry.untracked).map((entry) => entry.path);
+  const status = await git(cwd, [...CANONICAL_STATUS_ARGS], runner);
+  const untrackedFiles = uniqueSortedGitPaths(parseGitStatus(status).filter((entry) => entry.untracked).map((entry) => entry.path));
   const [committed, staged, unstaged, untracked] = await Promise.all([
     git(cwd, ["diff", "--no-ext-diff", `${mergeBaseRevision}..${revision}`], runner),
     git(cwd, ["diff", "--cached", "--no-ext-diff"], runner),
