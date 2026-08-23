@@ -8,6 +8,7 @@ import {
   emitLifecycleCheckpoint,
   lifecycleFaultInjectionFromEnv,
   LifecycleCheckpointFault,
+  RECOVERY_LIFECYCLE_CHECKPOINT_COVERAGE,
   RECOVERY_LIFECYCLE_CHECKPOINTS,
   type RecoveryLifecycleCheckpoint,
   withLifecycleFaultInjection,
@@ -45,6 +46,14 @@ test("recovery lifecycle checkpoints are stable, typed, and journal-covered wher
     "lease_released",
     "workspace_cleaned",
   ]);
+
+  assert.deepEqual(Object.keys(RECOVERY_LIFECYCLE_CHECKPOINT_COVERAGE), [...RECOVERY_LIFECYCLE_CHECKPOINTS]);
+  for (const checkpoint of RECOVERY_LIFECYCLE_CHECKPOINTS) {
+    const coverage = RECOVERY_LIFECYCLE_CHECKPOINT_COVERAGE[checkpoint];
+    assert.equal(coverage.durableJournalEvent, true, `${checkpoint} must declare durable journal coverage`);
+    assert.ok(coverage.description.length > 20, `${checkpoint} must document its lifecycle boundary`);
+    assert.ok(coverage.invariant.length > 20, `${checkpoint} must document its crash/restart invariant`);
+  }
 
   const nonBoundaryJournalEvents = new Set([
     "baseline_imported",

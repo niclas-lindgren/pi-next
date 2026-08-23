@@ -89,7 +89,7 @@ Permanent scenarios should include races, foreign/stale leases, non-zero worker 
 
 ## Fault injection
 
-Introduce named lifecycle checkpoints instead of timing-based sleeps. Initial checkpoints should cover candidate selection, lease claim, workspace preparation, authority load, plan readiness, worker start/finish, verification, candidate commit, promotion start/push, reachability proof, authority update, lease release, and workspace cleanup.
+Introduce named lifecycle checkpoints instead of timing-based sleeps. Initial checkpoints should cover candidate selection, lease claim, workspace preparation, authority load, plan readiness, worker start/finish, verification, candidate commit, promotion start/push, reachability proof, authority update, lease release, and workspace cleanup. The current typed checkpoint contract and coverage rule are documented in [`RECOVERY_LIFECYCLE_CHECKPOINTS.md`](RECOVERY_LIFECYCLE_CHECKPOINTS.md).
 
 Test mode must be able to terminate at a checkpoint and restart from durable evidence. Recovery must be idempotent and must not repeat unsafe side effects merely because a process died between steps.
 
