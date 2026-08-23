@@ -7,6 +7,7 @@
 - Add a deterministic multi-source skill registry and a kernel task-aware resolver. `skills/manifest.json` can now pin more than one reviewed upstream source (each with its own immutable revision, allowlist, destination, license/provenance, overlays, and per-source `PROVENANCE.json`) while preserving the existing single-upstream integrity guarantees.
 - Resolve skills in the kernel before worker launch with explicit mandatory/automatic/explicit tiers, role/task/path/risk rules, one-canonical-methodology-per-category conflict detection, and bounded telemetry (registry fingerprint, selected ids, source/provenance version, tier, reason). Available, selected, and loaded skills are mechanically distinct; installed-but-unselected skills add no worker-context payload.
 - Adopt the Superpowers `verification-before-completion` concept as a package-owned discipline behind pi-next's trust/authority boundary without importing a competing Superpowers workflow bootstrap; process-owner skills can never be routed automatically.
+- Add memorable `make bootstrap`, `make bootstrap-N`, and `make bootstrap-next` targets as thin wrappers around the existing `npm run bootstrap:self-host` CLI, documented in `make help`; the Make layer does not duplicate bootstrap/lifecycle semantics.
 
 ### Compatibility/configuration/schema
 
