@@ -48,16 +48,33 @@ async function dirtyTrackedCandidate(root: string, issue: number, file = "README
   return path;
 }
 
+async function externallyMergedCandidate(root: string, remote: string, issue: number, file = "feature.txt") {
+  const worktree = await dirtyCandidate(root, issue, file);
+  await git(worktree, "add", file);
+  await git(worktree, "commit", "-qm", `candidate ${issue}`);
+  const sha = await git(worktree, "rev-parse", "HEAD");
+  await git(worktree, "push", "-q", "-u", "origin", `agent/issue-${issue}`);
+  await git(root, "switch", "main");
+  await git(root, "merge", "--ff-only", sha);
+  await git(root, "push", "-q", "origin", "main");
+  assert.equal(await git(remote, "rev-parse", "main"), sha);
+  return { worktree, sha, pr: { number: issue, headRefName: `agent/issue-${issue}`, headSha: sha, baseRefName: "main", state: "MERGED" as const, mergeCommitSha: sha } };
+}
+
 class FakeAuthority implements BootstrapFinalizeAuthority {
   issue: BootstrapFinalizeIssue;
   prs: BootstrapFinalizePr[] = [];
   checks: CheckConclusion | CiEvaluation | Array<CheckConclusion | CiEvaluation> = "PASS";
   closed = false;
+  createdPrs = 0;
+  mergedPrs = 0;
+  waitedForChecks = 0;
   constructor(private root: string, issueNumber: number) { this.issue = { number: issueNumber, title: "feat(finalize): add helper", state: "OPEN" }; }
   async fetchIssue() { return { ...this.issue, state: this.closed ? "CLOSED" as const : this.issue.state }; }
   async listPullRequests(branch: string) { return this.prs.filter((p) => p.headRefName === branch); }
-  async createPullRequest(input: { branch: string; headSha: string }) { const pr = { number: this.prs.length + 1, headRefName: input.branch, headSha: input.headSha, baseRefName: "main", state: "OPEN" as const }; this.prs.push(pr); return pr; }
+  async createPullRequest(input: { branch: string; headSha: string }) { this.createdPrs++; const pr = { number: this.prs.length + 1, headRefName: input.branch, headSha: input.headSha, baseRefName: "main", state: "OPEN" as const }; this.prs.push(pr); return pr; }
   async waitForChecks(input: { reporter?: (line: string) => void; issueNumber?: number }) {
+    this.waitedForChecks++;
     if (Array.isArray(this.checks)) {
       for (let i = 0; i < this.checks.length; i++) {
         const value = this.checks[i]!;
@@ -70,7 +87,7 @@ class FakeAuthority implements BootstrapFinalizeAuthority {
     if ((typeof value === "string" ? value : value.state) === "PENDING") input.reporter?.(`bootstrap finalize #${input.issueNumber ?? this.issue.number} · CI · waiting · elapsed=0s`);
     return value;
   }
-  async mergePullRequest(input: { pr: BootstrapFinalizePr; headSha: string }) { await git(this.root, "fetch", "origin", input.pr.headRefName); await git(this.root, "switch", "main"); await git(this.root, "merge", "--ff-only", input.headSha); await git(this.root, "push", "-q", "origin", "main"); input.pr.state = "MERGED"; input.pr.mergeCommitSha = input.headSha; return input.pr; }
+  async mergePullRequest(input: { pr: BootstrapFinalizePr; headSha: string }) { this.mergedPrs++; await git(this.root, "fetch", "origin", input.pr.headRefName); await git(this.root, "switch", "main"); await git(this.root, "merge", "--ff-only", input.headSha); await git(this.root, "push", "-q", "origin", "main"); input.pr.state = "MERGED"; input.pr.mergeCommitSha = input.headSha; return input.pr; }
   async closeIssue() { this.closed = true; this.issue.state = "CLOSED"; }
 }
 
@@ -121,6 +138,79 @@ test("finalizer treats closed zero-delta candidate as harmless already-satisfied
     assert.equal(result.issueClosed, true);
     assert.equal(authority.prs.length, 0);
     await assert.rejects(git(f.root, "rev-parse", "--verify", "agent/issue-101"));
+  } finally { await f.cleanup(); }
+});
+
+test("externally merged candidate with worktree still present resumes post-merge cleanup instead of zero-delta rejection", async () => {
+  const f = await fixture();
+  try {
+    const { sha, pr } = await externallyMergedCandidate(f.root, f.remote, 77);
+    const authority = new FakeAuthority(f.root, 77);
+    authority.prs.push(pr);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 77, authority });
+    assert.equal(result.outcome, "finalized");
+    assert.equal(result.candidateSha, sha);
+    assert.equal(result.pr, 77);
+    assert.equal(result.issueClosed, true);
+    assert.equal(authority.closed, true);
+    assert.equal(authority.createdPrs, 0);
+    assert.equal(authority.waitedForChecks, 0);
+    assert.equal(authority.mergedPrs, 0);
+    await assert.rejects(git(f.root, "rev-parse", "--verify", "agent/issue-77"));
+  } finally { await f.cleanup(); }
+});
+
+test("externally merged zero-diff candidate proves exact head reachability before cleanup", async () => {
+  const f = await fixture();
+  try {
+    const { sha, pr } = await externallyMergedCandidate(f.root, f.remote, 118);
+    const authority = new FakeAuthority(f.root, 118);
+    authority.prs.push(pr);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 118, authority });
+    assert.equal(result.reachable, true);
+    assert.equal(await git(f.remote, "merge-base", "--is-ancestor", sha, "main").then(() => "yes"), "yes");
+  } finally { await f.cleanup(); }
+});
+
+test("dirty unique work appearing after external merge blocks cleanup", async () => {
+  const f = await fixture();
+  try {
+    const { worktree, pr } = await externallyMergedCandidate(f.root, f.remote, 119);
+    await writeFile(join(worktree, "unique.txt"), "do not delete\n");
+    const authority = new FakeAuthority(f.root, 119);
+    authority.prs.push(pr);
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 119, authority }), "UNIQUE_WORK_PRESENT");
+    assert.equal(await git(worktree, "status", "--porcelain"), "?? unique.txt");
+  } finally { await f.cleanup(); }
+});
+
+test("historical merged PR on reused issue branch with different head SHA is ignored for current candidate", async () => {
+  const f = await fixture();
+  try {
+    const historical = await externallyMergedCandidate(f.root, f.remote, 120, "old.txt");
+    await git(f.root, "worktree", "remove", historical.worktree);
+    await git(f.root, "branch", "-d", "agent/issue-120");
+    await git(f.root, "worktree", "add", "-q", "-b", "agent/issue-120", join(f.root, ".worktrees", "issue-120"), "origin/main");
+    await writeFile(join(f.root, ".worktrees", "issue-120", "new.txt"), "new candidate\n");
+    await git(join(f.root, ".worktrees", "issue-120"), "add", "new.txt");
+    await git(join(f.root, ".worktrees", "issue-120"), "commit", "-qm", "new candidate");
+    const authority = new FakeAuthority(f.root, 120);
+    authority.prs.push({ ...historical.pr, number: 12 });
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 120, authority });
+    assert.equal(result.pr, 2);
+    assert.equal(authority.createdPrs, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("multiple merged PRs without local exact candidate identity fail closed", async () => {
+  const f = await fixture();
+  try {
+    const one = await externallyMergedCandidate(f.root, f.remote, 121, "one.txt");
+    await git(f.root, "worktree", "remove", one.worktree);
+    await git(f.root, "branch", "-d", "agent/issue-121");
+    const authority = new FakeAuthority(f.root, 121);
+    authority.prs.push(one.pr, { ...one.pr, number: 122, headSha: await git(f.root, "rev-parse", "main"), mergeCommitSha: await git(f.root, "rev-parse", "main") });
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 121, authority }), "AMBIGUOUS_PR");
   } finally { await f.cleanup(); }
 });
 

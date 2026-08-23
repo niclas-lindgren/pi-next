@@ -80,6 +80,16 @@ async function findWorktree(root: string, branch: string, issue: number, runner:
 
 async function changedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const s = await gitRaw(worktree, ["status", "--porcelain=v1"], runner); return [...new Set(s.split("\n").filter(Boolean).map((l) => l.slice(3).split(" -> ").pop()!))].sort(); }
 async function committedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const base = await git(worktree, ["merge-base", "HEAD", "origin/main"], runner); const out = await git(worktree, ["diff", "--name-only", `${base}..HEAD`], runner); return out.split("\n").filter(Boolean).sort(); }
+function exactMergedPr(prs: BootstrapFinalizePr[], candidateSha: string | undefined): BootstrapFinalizePr | undefined {
+  const merged = prs.filter((p) => p.state === "MERGED" && p.mergeCommitSha);
+  if (candidateSha) {
+    const exact = merged.filter((p) => p.headSha === candidateSha);
+    if (exact.length > 1) throw new BootstrapFinalizeError("AMBIGUOUS_PR", "multiple merged PRs match the exact candidate SHA");
+    return exact[0];
+  }
+  if (merged.length > 1) throw new BootstrapFinalizeError("AMBIGUOUS_PR", "multiple merged PRs exist for the reusable issue branch without exact candidate identity");
+  return merged[0];
+}
 
 function normalizeCiEvaluation(value: CheckConclusion | CiEvaluation): CiEvaluation { return typeof value === "string" ? { state: value } : value; }
 function isNoChecksCliResult(result: CommandResult): boolean { return result.exitCode !== 0 && /no checks|no check runs|no status checks|no checks reported|not found/i.test(`${result.stdout}\n${result.stderr}`); }
@@ -161,15 +171,36 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
   const initialAuthorityFingerprint = authorityFingerprint(issue);
   const worktree = await findWorktree(root, branch, issueNumber, runner);
   const branchExists = await tryGit(root, ["rev-parse", "--verify", branch], runner);
-  if (!branchExists && !worktree) {
-    const prs = await authority.listPullRequests(branch, root);
-    const merged = prs.find((p) => p.state === "MERGED" && p.mergeCommitSha);
-    if (!merged) throw new BootstrapFinalizeError("MISSING_CANDIDATE", `no local ${branch} and no merged PR evidence`);
+  const localCandidateSha = worktree ? await git(worktree, ["rev-parse", "HEAD"], runner) : branchExists ? await git(root, ["rev-parse", branch], runner) : undefined;
+  const prsBeforeClassification = await authority.listPullRequests(branch, root);
+  const alreadyMerged = exactMergedPr(prsBeforeClassification, localCandidateSha);
+  if (alreadyMerged) {
+    const candidateSha = alreadyMerged.headSha;
     await git(root, ["fetch", "origin", "main", "--quiet"], runner);
-    const reachable = (await tryGit(root, ["merge-base", "--is-ancestor", merged.mergeCommitSha!, "origin/main"], runner)) !== undefined;
-    if (!reachable) throw new BootstrapFinalizeError("REACHABILITY_FAILED", "merged PR is not reachable from origin/main");
-    return { ok: true, issueNumber, branch, candidateSha: merged.headSha, pr: merged.number, merged: true, reachable: true, issueClosed: issue.state === "CLOSED", worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+    const candidateReachable = (await tryGit(root, ["merge-base", "--is-ancestor", candidateSha, "origin/main"], runner)) !== undefined;
+    const mergeReachable = (await tryGit(root, ["merge-base", "--is-ancestor", alreadyMerged.mergeCommitSha!, "origin/main"], runner)) !== undefined;
+    if (!candidateReachable || !mergeReachable) throw new BootstrapFinalizeError("REACHABILITY_FAILED", "exact merged candidate is not durably reachable from origin/main");
+    say(`bootstrap finalize #${issueNumber} · exact merged PR #${alreadyMerged.number} already reachable from origin/main`);
+    const latest = await authority.fetchIssue(issueNumber, root);
+    let issueClosed = latest.state === "CLOSED";
+    if (!issueClosed && authorityFingerprint(latest) !== initialAuthorityFingerprint) throw new BootstrapFinalizeError("STALE_AUTHORITY", "issue authority changed before closure");
+    if (!issueClosed && !isExternalPending(latest)) { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
+    if (!issueClosed && isExternalPending(latest)) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_PENDING", "pending external verification remains open after integration");
+    let worktreeRemoved = false;
+    if (worktree) {
+      if ((await git(worktree, ["status", "--porcelain"], runner)) !== "") throw new BootstrapFinalizeError("UNIQUE_WORK_PRESENT", "refusing cleanup with dirty worktree");
+      await git(root, ["worktree", "remove", worktree], runner);
+      try { if (existsSync(worktree)) await rm(worktree, { recursive: true, force: true }); } catch {}
+      worktreeRemoved = true;
+      say(`bootstrap finalize #${issueNumber} · worktree removed`);
+    } else worktreeRemoved = true;
+    let branchRemoved = false;
+    if (branchExists) { await git(root, ["branch", "-d", branch], runner); branchRemoved = true; say(`bootstrap finalize #${issueNumber} · local branch removed`); }
+    else branchRemoved = true;
+    say(`bootstrap finalize #${issueNumber} · PASS`);
+    return { ok: true, issueNumber, branch, candidateSha, pr: alreadyMerged.number, merged: true, reachable: true, issueClosed, worktreeRemoved, localBranchRemoved: branchRemoved, outcome: "finalized" };
   }
+  if (!branchExists && !worktree) throw new BootstrapFinalizeError("MISSING_CANDIDATE", `no local ${branch} and no exact merged PR evidence`);
   if (!worktree) throw new BootstrapFinalizeError("MISSING_WORKTREE", `canonical worktree for ${branch} is missing before integration`);
   const coordStatus = await git(root, ["status", "--porcelain"], runner);
   if (coordStatus) throw new BootstrapFinalizeError("ROOT_DIRTY", "coordination checkout is dirty");
@@ -199,8 +230,9 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
   say(`bootstrap finalize #${issueNumber} · pushed ${branch}`);
   if (process.env.PI_NEXT_BOOTSTRAP_FINALIZE_CRASH_AFTER === "push") process.exit(99);
   let prs = await authority.listPullRequests(branch, root);
-  if (prs.length > 1) throw new BootstrapFinalizeError("AMBIGUOUS_PR", `multiple PRs for ${branch}`);
-  let pr = prs[0];
+  const relevantPrs = prs.filter((p) => p.headSha === candidateSha || p.state !== "MERGED");
+  if (relevantPrs.length > 1) throw new BootstrapFinalizeError("AMBIGUOUS_PR", `multiple PRs for ${branch}`);
+  let pr = relevantPrs[0];
   if (pr && pr.headSha !== candidateSha && pr.state !== "MERGED") throw new BootstrapFinalizeError("PR_SHA_MISMATCH", "existing PR points to a different candidate SHA");
   if (!pr) pr = await authority.createPullRequest({ issue, branch, headSha: candidateSha, cwd: root });
   say(`bootstrap finalize #${issueNumber} · PR #${pr.number} ready`);
