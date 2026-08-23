@@ -73,13 +73,16 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     return factory;
   };
 
+  const preWorkerCandidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
+  const resumeExistingCandidate = !options.verifyOnly && (preWorkerCandidate.changedFiles.length > 0 || preWorkerCandidate.committedChanges || preWorkerCandidate.uncommittedChanges);
+
   let initialWorker: WorkerReport | undefined;
-  if (!options.verifyOnly) {
+  if (!options.verifyOnly && !resumeExistingCandidate) {
     const initialPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "implementation");
     initialWorker = await runWorker(await getFactory(), "implementation", initialPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
   }
   let checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
-  const implementationCompleted = options.verifyOnly || initialWorker?.disposition === "completed";
+  const implementationCompleted = options.verifyOnly || resumeExistingCandidate || initialWorker?.disposition === "completed";
   if (!checks.every((check) => check.passed) && options.allowRepair && implementationCompleted) {
     const repairPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "repair", failureEvidence(checks));
     await runWorker(await getFactory(), "repair", repairPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);

@@ -1,10 +1,12 @@
 import { resolve } from "node:path";
-import { BootstrapCliOptions, BootstrapDependencies, BootstrapOptions, BootstrapReport, Disposition, NextIssueSelection } from "./types.js";
+import { BootstrapCliOptions, BootstrapDependencies, BootstrapLifecycleOptions, BootstrapLifecycleReport, BootstrapOptions, BootstrapReport, Disposition, NextIssueSelection } from "./types.js";
 import { BootstrapError } from "./errors.js";
 import { redact, emitProgress } from "./utils.js";
 import { createCliProgressReporter } from "./reporter.js";
 import { resolveNextIssue } from "./roadmap.js";
 import { runBootstrap } from "./supervisor.js";
+import { runCommand } from "./command-runner.js";
+import { runBootstrapFinalize } from "../../scripts/bootstrap-finalize.ts";
 
 function parseArgs(args: string[]): BootstrapCliOptions {
   let issueNumber: number | undefined;
@@ -12,6 +14,7 @@ function parseArgs(args: string[]): BootstrapCliOptions {
   let review = false;
   let verifyOnly = false;
   let nextOnly = false;
+  let finalize = true;
   let timeoutMs: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -20,17 +23,80 @@ function parseArgs(args: string[]): BootstrapCliOptions {
     else if (arg === "--review") review = true;
     else if (arg === "--verify-only" || arg === "--resume") verifyOnly = true;
     else if (arg === "--next-only") nextOnly = true;
+    else if (arg === "--no-finalize") finalize = false;
     else if (arg === "--timeout-ms") timeoutMs = Number(args[++index]);
     else if (arg === "--queue") throw new BootstrapError("multi-issue --queue mode is intentionally not implemented");
     else throw new BootstrapError(`unknown option: ${arg}`);
   }
   if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber <= 0)) throw new BootstrapError("--issue must be a positive integer");
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) throw new BootstrapError("--timeout-ms must be positive");
-  return { issueNumber, allowRepair, review, verifyOnly, timeoutMs, nextOnly };
+  return { issueNumber, allowRepair, review, verifyOnly, timeoutMs, nextOnly, finalize };
 }
 
-export function exitCodeForDisposition(disposition: Disposition): number {
+export function exitCodeForDisposition(disposition: Disposition | "finalization-blocked"): number {
   return disposition === "pass" || disposition === "already-satisfied" ? 0 : disposition === "repairable-failure" ? 1 : 2;
+}
+
+function implementationPhase(report: BootstrapReport): "PASS" | "FAIL" | "BLOCKED" {
+  if (report.implementationOutcome === "failed") return report.disposition === "repairable-failure" ? "FAIL" : "BLOCKED";
+  return "PASS";
+}
+
+function verificationPhase(report: BootstrapReport): "PASS" | "FAIL" {
+  return report.mechanicalPass ? "PASS" : "FAIL";
+}
+
+async function hasLocalFinalizationCandidate(options: BootstrapLifecycleOptions, dependencies: BootstrapDependencies): Promise<boolean> {
+  const runner = dependencies.runCommand ?? runCommand;
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const root = await runner("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { cwd });
+  if (root.exitCode !== 0) return false;
+  const repositoryRoot = root.stdout.trim();
+  const branch = `agent/issue-${options.issueNumber}`;
+  const ref = await runner("git", ["-C", repositoryRoot, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repositoryRoot });
+  if (ref.exitCode === 0) return true;
+  const worktrees = await runner("git", ["-C", repositoryRoot, "worktree", "list", "--porcelain"], { cwd: repositoryRoot });
+  return worktrees.exitCode === 0 && worktrees.stdout.includes(`/.worktrees/issue-${options.issueNumber}\n`);
+}
+
+export async function runBootstrapLifecycle(
+  options: BootstrapLifecycleOptions,
+  dependencies: BootstrapDependencies = {},
+  execute: (options: BootstrapOptions, dependencies?: BootstrapDependencies) => Promise<BootstrapReport> = runBootstrap,
+): Promise<BootstrapLifecycleReport> {
+  const reporter = dependencies.reporter;
+  const resumeFinalizationOnly = options.finalize && !options.verifyOnly && await hasLocalFinalizationCandidate(options, dependencies);
+  const implementationReport = await execute(resumeFinalizationOnly ? { ...options, verifyOnly: true } : options, dependencies);
+  const base: Omit<BootstrapLifecycleReport, "finalization"> = {
+    issueNumber: implementationReport.issueNumber,
+    disposition: implementationReport.disposition,
+    implementation: implementationPhase(implementationReport),
+    verification: verificationPhase(implementationReport),
+    implementationReport,
+  };
+  if (!options.finalize || options.verifyOnly || !implementationReport.mechanicalPass || (!implementationReport.finalizationReady && !resumeFinalizationOnly)) {
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "skipped", detail: !options.finalize ? "disabled" : options.verifyOnly ? "verify-only" : !implementationReport.mechanicalPass ? "verification-failed" : "not-ready" });
+    return { ...base, finalization: "SKIPPED" };
+  }
+  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "start" });
+  try {
+    const runFinalizer = dependencies.runFinalizer ?? ((input) => runBootstrapFinalize(input));
+    const finalizationReport = await runFinalizer({
+      cwd: options.cwd,
+      issueNumber: options.issueNumber,
+      candidatePaths: implementationReport.candidate.changedFiles,
+      reporter: (line) => emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "activity", detail: line }),
+    });
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "pass" });
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "pass", detail: "implementation: PASS; verification: PASS; finalization: PASS" });
+    return { ...base, disposition: "pass", finalization: "PASS", finalizationReport };
+  } catch (error) {
+    const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "FINALIZATION_FAILED";
+    const reason = redact(error instanceof Error ? error.message : String(error));
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "blocked", detail: code });
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: PASS; finalization: BLOCKED; candidate preserved" });
+    return { ...base, disposition: "finalization-blocked", finalization: "BLOCKED", candidatePreserved: true, finalizationFailure: { code, reason } };
+  }
 }
 
 function printSelection(selection: NextIssueSelection): void {
@@ -65,15 +131,16 @@ export async function runBootstrapCli(
       console.error("--next-only inspects automatic selection; omit --issue");
       return 2;
     }
-    const options: BootstrapOptions = {
+    const options: BootstrapLifecycleOptions = {
       issueNumber: selectedIssueNumber,
       cwd: cli.cwd,
       allowRepair: cli.allowRepair,
       review: cli.review,
       verifyOnly: cli.verifyOnly,
       timeoutMs: cli.timeoutMs,
+      finalize: cli.finalize,
     };
-    const report = await execute(options, { ...dependencies, reporter });
+    const report = await runBootstrapLifecycle(options, { ...dependencies, reporter }, execute);
     console.log(JSON.stringify(report, null, 2));
     return exitCodeForDisposition(report.disposition);
   } catch (error) {

@@ -9,8 +9,8 @@ export const CHECKS = ["npm run typecheck", "npm test"] as const;
 export type Disposition = "pass" | "already-satisfied" | "no-change" | "repairable-failure" | "blocked";
 export type WorkerRole = "implementation" | "repair" | "review";
 
-export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "terminal";
-export type BootstrapProgressState = "start" | "ready" | "activity" | "heartbeat" | "pass" | "fail" | "completed";
+export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "finalization" | "terminal";
+export type BootstrapProgressState = "start" | "ready" | "activity" | "heartbeat" | "pass" | "fail" | "blocked" | "skipped" | "completed";
 
 export interface BootstrapProgressEvent {
   issueNumber: number;
@@ -157,11 +157,33 @@ export interface WorkerFactoryInput {
 
 export type WorkerFactory = (input: WorkerFactoryInput) => Promise<WorkerSession>;
 
+export interface BootstrapFinalizerReport {
+  ok: boolean;
+  issueNumber: number;
+  branch: string;
+  candidateSha: string;
+  pr?: number;
+  merged: boolean;
+  reachable: boolean;
+  issueClosed: boolean;
+  worktreeRemoved: boolean;
+  localBranchRemoved: boolean;
+  outcome: "finalized" | "already-satisfied";
+}
+
+export type BootstrapFinalizer = (options: {
+  cwd?: string;
+  issueNumber?: number;
+  candidatePaths?: string[];
+  reporter?: (line: string) => void;
+}) => Promise<BootstrapFinalizerReport>;
+
 export interface BootstrapDependencies {
   runCommand?: CommandRunner;
   fetchIssue?: (issueNumber: number, cwd: string) => Promise<Issue>;
   fetchRoadmapIssues?: (cwd: string) => Promise<RoadmapIssue[]>;
   createWorker?: WorkerFactory;
+  runFinalizer?: BootstrapFinalizer;
   now?: () => Date;
   reporter?: BootstrapReporter;
   heartbeatMs?: number;
@@ -177,6 +199,10 @@ export interface BootstrapOptions {
   signal?: AbortSignal;
 }
 
+export interface BootstrapLifecycleOptions extends BootstrapOptions {
+  finalize: boolean;
+}
+
 export interface BootstrapCliOptions {
   issueNumber?: number;
   cwd?: string;
@@ -185,6 +211,7 @@ export interface BootstrapCliOptions {
   timeoutMs?: number;
   verifyOnly?: boolean;
   nextOnly: boolean;
+  finalize: boolean;
 }
 
 export interface CheckReport {
@@ -232,6 +259,18 @@ export interface BootstrapReport {
   candidateHasDelta: boolean;
   noChangeReason?: string;
   failureReason?: string;
+}
+
+export interface BootstrapLifecycleReport {
+  issueNumber: number;
+  disposition: Disposition | "finalization-blocked";
+  implementation: "PASS" | "FAIL" | "BLOCKED";
+  verification: "PASS" | "FAIL";
+  finalization: "PASS" | "BLOCKED" | "SKIPPED";
+  candidatePreserved?: boolean;
+  implementationReport: BootstrapReport;
+  finalizationReport?: BootstrapFinalizerReport;
+  finalizationFailure?: { code: string; reason: string };
 }
 
 export interface RepositoryState {
