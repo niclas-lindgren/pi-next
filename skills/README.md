@@ -13,8 +13,16 @@ Pi-next also vendors a small, reviewed subset of [`mattpocock/skills`](https://g
 
 The allowlist, immutable upstream revision, provenance URL, managed
  destination, and local overlay are recorded in [`manifest.json`](manifest.json).
+The manifest can represent multiple pinned sources (a `sources` array) in
+addition to the classic single-upstream form; each source installs and verifies
+independently into its own destination with its own `PROVENANCE.json`.
 The vendored files are not workflow authority and are not loaded by default.
 Role selection and capability enforcement belong to the Pi-next worker contract.
+
+Pi-next also ships an adapted `verification-before-completion` discipline under
+`skills/pi-next/`. Deterministic routing (registry + resolver) lives in the
+kernel; see [`../docs/SKILLS.md`](../docs/SKILLS.md) for the available/selected/
+loaded model, routing tiers, and conflict detection.
 
 Run the deterministic commands from the repository root:
 

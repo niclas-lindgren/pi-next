@@ -21,6 +21,8 @@ const PROVENANCE_FILE = "PROVENANCE.json";
 const MANIFEST_VERSION = 1 as const;
 const SHA256 = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
+/** Internal name for the classic single-upstream manifest form. */
+const DEFAULT_SOURCE_NAME = "default";
 
 export interface SkillPackManifest {
   name: string;
@@ -35,17 +37,28 @@ export interface SkillOverlayManifest {
   appliesTo: string[];
 }
 
-export interface SkillManifest {
-  schemaVersion: typeof MANIFEST_VERSION;
-  upstream: {
-    repository: string;
-    revision: string;
-    license: string;
-    provenance: string;
-  };
+export interface SkillUpstream {
+  repository: string;
+  revision: string;
+  license: string;
+  provenance: string;
+}
+
+/** One reviewed, pinned upstream source installed into its own destination. */
+export interface SkillSourceManifest {
+  name: string;
+  upstream: SkillUpstream;
   destination: string;
   packs: SkillPackManifest[];
   overlays: SkillOverlayManifest[];
+  /** Deterministic per-source fingerprint recorded in that source's provenance. */
+  fingerprint: string;
+}
+
+/** A registry manifest may pin one or more reviewed upstream sources. */
+export interface SkillManifest {
+  schemaVersion: typeof MANIFEST_VERSION;
+  sources: SkillSourceManifest[];
 }
 
 interface ProvenanceFile {
@@ -58,7 +71,7 @@ type ProvenancePack = Omit<SkillPackManifest, "files"> & { files: ProvenanceFile
 interface SkillProvenance {
   schemaVersion: typeof MANIFEST_VERSION;
   manifest: string;
-  upstream: SkillManifest["upstream"];
+  upstream: SkillUpstream;
   destination: string;
   packs: ProvenancePack[];
   license: ProvenanceFile;
@@ -68,13 +81,33 @@ interface SkillProvenance {
 export interface SkillSyncOptions {
   root: string;
   manifestPath?: string;
+  /** Local checkout used for the single-source manifest form. */
   sourceDir?: string;
+  /** Local checkouts keyed by source name for the multi-source form. */
+  sourceDirs?: Record<string, string>;
+}
+
+export interface SkillSourceSyncResult {
+  name: string;
+  revision: string;
+  destination: string;
+  files: string[];
 }
 
 export interface SkillSyncResult {
   revision: string;
   files: string[];
   destination: string;
+  sources: SkillSourceSyncResult[];
+}
+
+export interface SkillSourceCheckResult {
+  name: string;
+  revision: string;
+  destination: string;
+  packs: string[];
+  files: number;
+  overlays: string[];
 }
 
 export interface SkillCheckResult {
@@ -82,6 +115,7 @@ export interface SkillCheckResult {
   packs: string[];
   files: number;
   overlays: string[];
+  sources: SkillSourceCheckResult[];
 }
 
 export class SkillPackError extends Error {
@@ -136,69 +170,6 @@ function rejectUnknown(value: Record<string, unknown>, allowed: string[], name: 
   }
 }
 
-function validateManifest(value: unknown): SkillManifest {
-  const root = object(value, "manifest");
-  rejectUnknown(root, ["schemaVersion", "upstream", "destination", "packs", "overlays"], "manifest");
-  if (root.schemaVersion !== MANIFEST_VERSION) fail(`manifest.schemaVersion must be ${MANIFEST_VERSION}`);
-
-  const upstream = object(root.upstream, "manifest.upstream");
-  rejectUnknown(upstream, ["repository", "revision", "license", "provenance"], "manifest.upstream");
-  const repository = stringValue(upstream.repository, "manifest.upstream.repository");
-  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(repository)) {
-    fail("manifest.upstream.repository must be an HTTPS GitHub .git URL");
-  }
-  const revision = stringValue(upstream.revision, "manifest.upstream.revision");
-  if (!REVISION.test(revision)) fail("manifest.upstream.revision must be a full 40-character commit SHA");
-  const license = safeRelativePath(upstream.license, "manifest.upstream.license");
-  const provenance = stringValue(upstream.provenance, "manifest.upstream.provenance");
-  if (!/^https:\/\//.test(provenance)) fail("manifest.upstream.provenance must be an HTTPS URL");
-  const destination = safeRelativePath(root.destination, "manifest.destination");
-
-  if (!Array.isArray(root.packs) || root.packs.length === 0) fail("manifest.packs must be a non-empty array");
-  const destinations = new Set<string>();
-  const packs = root.packs.map((raw, index) => {
-    const pack = object(raw, `manifest.packs[${index}]`);
-    rejectUnknown(pack, ["name", "source", "destination", "files"], `manifest.packs[${index}]`);
-    const name = safeName(pack.name, `manifest.packs[${index}].name`);
-    const source = safeRelativePath(pack.source, `manifest.packs[${index}].source`);
-    const packDestination = safeRelativePath(pack.destination, `manifest.packs[${index}].destination`);
-    const files = stringArray(pack.files, `manifest.packs[${index}].files`).map((file) => safeRelativePath(file, `manifest.packs[${index}].files[]`));
-    if (!files.includes("SKILL.md")) fail(`manifest.packs[${index}] must allowlist SKILL.md`);
-    for (const file of files) {
-      const managed = `${packDestination}/${file}`;
-      if (managed === "LICENSE" || managed === PROVENANCE_FILE) fail(`pack cannot manage reserved destination: ${managed}`);
-      if (destinations.has(managed)) fail(`duplicate managed destination: ${managed}`);
-      destinations.add(managed);
-    }
-    return { name, source, destination: packDestination, files };
-  });
-
-  const overlaysRaw = root.overlays === undefined ? [] : root.overlays;
-  if (!Array.isArray(overlaysRaw)) fail("manifest.overlays must be an array");
-  const overlays = overlaysRaw.map((raw, index) => {
-    const overlay = object(raw, `manifest.overlays[${index}]`);
-    rejectUnknown(overlay, ["name", "path", "appliesTo"], `manifest.overlays[${index}]`);
-    const name = safeName(overlay.name, `manifest.overlays[${index}].name`);
-    const path = safeRelativePath(overlay.path, `manifest.overlays[${index}].path`);
-    const appliesTo = stringArray(overlay.appliesTo, `manifest.overlays[${index}].appliesTo`);
-    if (appliesTo.some((pack) => !packs.some(({ name: known }) => known === pack))) {
-      fail(`manifest.overlays[${index}].appliesTo references an unknown pack`);
-    }
-    if (path === destination || path.startsWith(`${destination}/`)) {
-      fail(`manifest.overlays[${index}].path must not be inside the managed destination`);
-    }
-    return { name, path, appliesTo };
-  });
-
-  return {
-    schemaVersion: MANIFEST_VERSION,
-    upstream: { repository, revision, license, provenance },
-    destination,
-    packs,
-    overlays,
-  };
-}
-
 function canonicalJson(value: unknown): string {
   const sorted = (input: unknown): unknown => {
     if (Array.isArray(input)) return input.map(sorted);
@@ -210,8 +181,112 @@ function canonicalJson(value: unknown): string {
   return `${JSON.stringify(sorted(value), null, 2)}\n`;
 }
 
-function manifestFingerprint(manifest: SkillManifest): string {
-  return createHash("sha256").update(canonicalJson(manifest)).digest("hex");
+function fingerprint(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function validateUpstream(raw: Record<string, unknown>, label: string): SkillUpstream {
+  const upstream = object(raw.upstream, `${label}.upstream`);
+  rejectUnknown(upstream, ["repository", "revision", "license", "provenance"], `${label}.upstream`);
+  const repository = stringValue(upstream.repository, `${label}.upstream.repository`);
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(repository)) {
+    fail(`${label}.upstream.repository must be an HTTPS GitHub .git URL`);
+  }
+  const revision = stringValue(upstream.revision, `${label}.upstream.revision`);
+  if (!REVISION.test(revision)) fail(`${label}.upstream.revision must be a full 40-character commit SHA`);
+  const license = safeRelativePath(upstream.license, `${label}.upstream.license`);
+  const provenance = stringValue(upstream.provenance, `${label}.upstream.provenance`);
+  if (!/^https:\/\//.test(provenance)) fail(`${label}.upstream.provenance must be an HTTPS URL`);
+  return { repository, revision, license, provenance };
+}
+
+function validatePacks(rawPacks: unknown, label: string): SkillPackManifest[] {
+  if (!Array.isArray(rawPacks) || rawPacks.length === 0) fail(`${label}.packs must be a non-empty array`);
+  const destinations = new Set<string>();
+  return rawPacks.map((raw, index) => {
+    const pack = object(raw, `${label}.packs[${index}]`);
+    rejectUnknown(pack, ["name", "source", "destination", "files"], `${label}.packs[${index}]`);
+    const name = safeName(pack.name, `${label}.packs[${index}].name`);
+    const source = safeRelativePath(pack.source, `${label}.packs[${index}].source`);
+    const packDestination = safeRelativePath(pack.destination, `${label}.packs[${index}].destination`);
+    const files = stringArray(pack.files, `${label}.packs[${index}].files`).map((file) => safeRelativePath(file, `${label}.packs[${index}].files[]`));
+    if (!files.includes("SKILL.md")) fail(`${label}.packs[${index}] must allowlist SKILL.md`);
+    for (const file of files) {
+      const managed = `${packDestination}/${file}`;
+      if (managed === "LICENSE" || managed === PROVENANCE_FILE) fail(`pack cannot manage reserved destination: ${managed}`);
+      if (destinations.has(managed)) fail(`duplicate managed destination: ${managed}`);
+      destinations.add(managed);
+    }
+    return { name, source, destination: packDestination, files };
+  });
+}
+
+function validateOverlays(raw: unknown, label: string, destination: string, packs: SkillPackManifest[]): SkillOverlayManifest[] {
+  const overlaysRaw = raw === undefined ? [] : raw;
+  if (!Array.isArray(overlaysRaw)) fail(`${label}.overlays must be an array`);
+  return overlaysRaw.map((entry, index) => {
+    const overlay = object(entry, `${label}.overlays[${index}]`);
+    rejectUnknown(overlay, ["name", "path", "appliesTo"], `${label}.overlays[${index}]`);
+    const name = safeName(overlay.name, `${label}.overlays[${index}].name`);
+    const path = safeRelativePath(overlay.path, `${label}.overlays[${index}].path`);
+    const appliesTo = stringArray(overlay.appliesTo, `${label}.overlays[${index}].appliesTo`);
+    if (appliesTo.some((pack) => !packs.some(({ name: known }) => known === pack))) {
+      fail(`${label}.overlays[${index}].appliesTo references an unknown pack`);
+    }
+    if (path === destination || path.startsWith(`${destination}/`)) {
+      fail(`${label}.overlays[${index}].path must not be inside the managed destination`);
+    }
+    return { name, path, appliesTo };
+  });
+}
+
+function normalizeSingleSource(root: Record<string, unknown>): SkillSourceManifest {
+  rejectUnknown(root, ["schemaVersion", "upstream", "destination", "packs", "overlays"], "manifest");
+  const upstream = validateUpstream(root, "manifest");
+  const destination = safeRelativePath(root.destination, "manifest.destination");
+  const packs = validatePacks(root.packs, "manifest");
+  const overlays = validateOverlays(root.overlays, "manifest", destination, packs);
+  // Preserve the classic single-source fingerprint so existing provenance and
+  // `skills:check` remain valid without a resync.
+  const legacyFingerprint = fingerprint({ schemaVersion: MANIFEST_VERSION, upstream, destination, packs, overlays });
+  return { name: DEFAULT_SOURCE_NAME, upstream, destination, packs, overlays, fingerprint: legacyFingerprint };
+}
+
+function normalizeMultiSource(root: Record<string, unknown>): SkillSourceManifest[] {
+  rejectUnknown(root, ["schemaVersion", "sources"], "manifest");
+  if (!Array.isArray(root.sources) || root.sources.length === 0) fail("manifest.sources must be a non-empty array");
+  const names = new Set<string>();
+  const destinations: string[] = [];
+  return root.sources.map((raw, index) => {
+    const label = `manifest.sources[${index}]`;
+    const src = object(raw, label);
+    rejectUnknown(src, ["name", "upstream", "destination", "packs", "overlays"], label);
+    const name = safeName(src.name, `${label}.name`);
+    if (names.has(name)) fail(`duplicate source name: ${name}`);
+    names.add(name);
+    const upstream = validateUpstream(src, label);
+    const destination = safeRelativePath(src.destination, `${label}.destination`);
+    for (const other of destinations) {
+      if (destination === other || destination.startsWith(`${other}/`) || other.startsWith(`${destination}/`)) {
+        fail(`overlapping source destination: ${destination}`);
+      }
+    }
+    destinations.push(destination);
+    const packs = validatePacks(src.packs, label);
+    const overlays = validateOverlays(src.overlays, label, destination, packs);
+    const sourceFingerprint = fingerprint({ name, upstream, destination, packs, overlays });
+    return { name, upstream, destination, packs, overlays, fingerprint: sourceFingerprint };
+  });
+}
+
+function validateManifest(value: unknown): SkillManifest {
+  const root = object(value, "manifest");
+  if (root.schemaVersion !== MANIFEST_VERSION) fail(`manifest.schemaVersion must be ${MANIFEST_VERSION}`);
+  const hasSources = root.sources !== undefined;
+  const hasSingle = root.upstream !== undefined || root.destination !== undefined || root.packs !== undefined || root.overlays !== undefined;
+  if (hasSources && hasSingle) fail("manifest must use either a single upstream source or a sources array, not both");
+  const sources = hasSources ? normalizeMultiSource(root) : [normalizeSingleSource(root)];
+  return { schemaVersion: MANIFEST_VERSION, sources };
 }
 
 function rootPath(root: string, path: string): string {
@@ -332,9 +407,9 @@ export async function readSkillManifest(root: string, manifestPath = SKILL_MANIF
   return validateManifest(await readJson(path));
 }
 
-async function buildProvenance(manifest: SkillManifest, destination: string): Promise<SkillProvenance> {
+async function buildProvenance(source: SkillSourceManifest, destination: string): Promise<SkillProvenance> {
   const packs: ProvenancePack[] = [];
-  for (const pack of manifest.packs) {
+  for (const pack of source.packs) {
     const files: ProvenanceFile[] = [];
     for (const file of pack.files) {
       files.push({ path: managedPath(pack.destination, file), sha256: await sha256(join(destination, pack.destination, file)) });
@@ -344,19 +419,24 @@ async function buildProvenance(manifest: SkillManifest, destination: string): Pr
   const licensePath = join(destination, "LICENSE");
   return {
     schemaVersion: MANIFEST_VERSION,
-    manifest: manifestFingerprint(manifest),
-    upstream: manifest.upstream,
-    destination: manifest.destination,
+    manifest: source.fingerprint,
+    upstream: source.upstream,
+    destination: source.destination,
     packs,
     license: { path: "LICENSE", sha256: await sha256(licensePath) },
-    overlays: manifest.overlays,
+    overlays: source.overlays,
   };
 }
 
-export async function syncSkillPacks(options: SkillSyncOptions): Promise<SkillSyncResult> {
-  const root = resolve(options.root);
-  const manifest = await readSkillManifest(root, options.manifestPath);
-  const destination = rootPath(root, manifest.destination);
+function sourceCheckoutFor(options: SkillSyncOptions, manifest: SkillManifest, source: SkillSourceManifest): string | undefined {
+  const named = options.sourceDirs?.[source.name];
+  if (named) return named;
+  if (options.sourceDir && manifest.sources.length === 1) return options.sourceDir;
+  return undefined;
+}
+
+async function syncOneSource(root: string, source: SkillSourceManifest, sourceDirOverride?: string): Promise<SkillSourceSyncResult> {
+  const destination = rootPath(root, source.destination);
   await assertNoSymlinkPath(destination, root);
 
   const markerPath = join(destination, PROVENANCE_FILE);
@@ -371,21 +451,21 @@ export async function syncSkillPacks(options: SkillSyncOptions): Promise<SkillSy
     fail(`managed destination is not empty and has no ${PROVENANCE_FILE}; refusing to overwrite consumer-owned files`);
   }
 
-  const source = options.sourceDir ? resolve(options.sourceDir) : await gitSource(manifest.upstream.repository, manifest.upstream.revision);
+  const checkout = sourceDirOverride ? resolve(sourceDirOverride) : await gitSource(source.upstream.repository, source.upstream.revision);
   try {
-    const sourceLicense = rootPath(source, manifest.upstream.license);
-    await assertNoSymlinkPath(sourceLicense, source);
+    const sourceLicense = rootPath(checkout, source.upstream.license);
+    await assertNoSymlinkPath(sourceLicense, checkout);
     const sourceLicenseStat = await lstat(sourceLicense);
     if (!sourceLicenseStat.isFile() || sourceLicenseStat.isSymbolicLink()) fail("upstream license must be a regular file");
-    for (const pack of manifest.packs) {
-      const sourcePack = rootPath(source, pack.source);
-      await assertNoSymlinkPath(sourcePack, source);
+    for (const pack of source.packs) {
+      const sourcePack = rootPath(checkout, pack.source);
+      await assertNoSymlinkPath(sourcePack, checkout);
       for (const file of pack.files) {
         const sourcePath = join(sourcePack, file);
         const stat = await lstat(sourcePath).catch(() => undefined);
         if (!stat || !stat.isFile() || stat.isSymbolicLink()) fail(`allowlisted upstream file is missing or unsafe: ${pack.source}/${file}`);
       }
-      await assertRelativeLinks(source, pack);
+      await assertRelativeLinks(checkout, pack);
     }
 
     await mkdir(destination, { recursive: true });
@@ -393,11 +473,11 @@ export async function syncSkillPacks(options: SkillSyncOptions): Promise<SkillSy
     await assertNoSymlinkPath(destinationLicense, destination);
     await copyFile(sourceLicense, destinationLicense);
     const currentPaths = new Set<string>(["LICENSE", PROVENANCE_FILE]);
-    for (const pack of manifest.packs) {
+    for (const pack of source.packs) {
       for (const file of pack.files) {
         const output = managedPath(pack.destination, file);
         currentPaths.add(output);
-        const sourcePath = join(source, pack.source, file);
+        const sourcePath = join(checkout, pack.source, file);
         const destinationPath = join(destination, output);
         await assertNoSymlinkPath(destinationPath, destination);
         await mkdir(dirname(destinationPath), { recursive: true });
@@ -412,27 +492,37 @@ export async function syncSkillPacks(options: SkillSyncOptions): Promise<SkillSy
         if (await pathExists(oldPath)) await rm(oldPath);
       }
     }
-    const provenance = await buildProvenance(manifest, destination);
+    const provenance = await buildProvenance(source, destination);
     await writeFile(markerPath, canonicalJson(provenance), "utf8");
     return {
-      revision: manifest.upstream.revision,
+      name: source.name,
+      revision: source.upstream.revision,
+      destination: source.destination,
       files: [...currentPaths].filter((file) => file !== PROVENANCE_FILE).sort(),
-      destination: manifest.destination,
     };
   } finally {
-    if (!options.sourceDir) await rm(source, { recursive: true, force: true });
+    if (!sourceDirOverride) await rm(checkout, { recursive: true, force: true });
   }
 }
 
-export async function checkSkillPacks(options: SkillSyncOptions): Promise<SkillCheckResult> {
+export async function syncSkillPacks(options: SkillSyncOptions): Promise<SkillSyncResult> {
   const root = resolve(options.root);
   const manifest = await readSkillManifest(root, options.manifestPath);
-  const destination = rootPath(root, manifest.destination);
+  const results: SkillSourceSyncResult[] = [];
+  for (const source of manifest.sources) {
+    results.push(await syncOneSource(root, source, sourceCheckoutFor(options, manifest, source)));
+  }
+  const primary = results[0];
+  return { revision: primary.revision, files: primary.files, destination: primary.destination, sources: results };
+}
+
+async function checkOneSource(root: string, source: SkillSourceManifest): Promise<SkillSourceCheckResult> {
+  const destination = rootPath(root, source.destination);
   const markerPath = join(destination, PROVENANCE_FILE);
-  if (!(await pathExists(markerPath))) fail(`managed skills are not synced; missing ${manifest.destination}/${PROVENANCE_FILE}`);
+  if (!(await pathExists(markerPath))) fail(`managed skills are not synced; missing ${source.destination}/${PROVENANCE_FILE}`);
   const provenance = object(await readJson(markerPath), "provenance") as unknown as SkillProvenance;
-  if (provenance.manifest !== manifestFingerprint(manifest)) fail("skill manifest changed; run the deterministic sync command");
-  if (provenance.upstream.revision !== manifest.upstream.revision) fail("skill provenance revision does not match the manifest");
+  if (provenance.manifest !== source.fingerprint) fail("skill manifest changed; run the deterministic sync command");
+  if (provenance.upstream.revision !== source.upstream.revision) fail("skill provenance revision does not match the manifest");
 
   const expected = provenanceFiles(provenance);
   for (const file of expected) {
@@ -446,7 +536,7 @@ export async function checkSkillPacks(options: SkillSyncOptions): Promise<SkillC
   const expectedPaths = new Set(expected.map((file) => file.path).concat(PROVENANCE_FILE));
   for (const file of actual) if (!expectedPaths.has(file)) fail(`unexpected file in managed destination: ${file}`);
 
-  for (const pack of manifest.packs) {
+  for (const pack of source.packs) {
     const managedPack = join(destination, pack.destination);
     for (const file of pack.files.filter((candidate) => candidate.endsWith(".md"))) {
       const content = await readFile(join(managedPack, file), "utf8");
@@ -458,25 +548,44 @@ export async function checkSkillPacks(options: SkillSyncOptions): Promise<SkillC
       }
     }
   }
-  for (const overlay of manifest.overlays) {
+  for (const overlay of source.overlays) {
     if (!(await pathExists(rootPath(root, overlay.path)))) fail(`local overlay is missing: ${overlay.path}`);
   }
   return {
-    revision: manifest.upstream.revision,
-    packs: manifest.packs.map((pack) => pack.name),
+    name: source.name,
+    revision: source.upstream.revision,
+    destination: source.destination,
+    packs: source.packs.map((pack) => pack.name),
     files: expected.length,
-    overlays: manifest.overlays.map((overlay) => overlay.name),
+    overlays: source.overlays.map((overlay) => overlay.name),
+  };
+}
+
+export async function checkSkillPacks(options: SkillSyncOptions): Promise<SkillCheckResult> {
+  const root = resolve(options.root);
+  const manifest = await readSkillManifest(root, options.manifestPath);
+  const results: SkillSourceCheckResult[] = [];
+  for (const source of manifest.sources) results.push(await checkOneSource(root, source));
+  const primary = results[0];
+  return {
+    revision: primary.revision,
+    packs: results.flatMap((result) => result.packs),
+    files: results.reduce((total, result) => total + result.files, 0),
+    overlays: results.flatMap((result) => result.overlays),
+    sources: results,
   };
 }
 
 export async function resolveSkillPacks(root: string, manifestPath?: string): Promise<Array<{ name: string; skillPath: string; overlayPaths: string[] }>> {
   const base = resolve(root);
   const manifest = await readSkillManifest(base, manifestPath);
-  return manifest.packs.map((pack) => ({
-    name: pack.name,
-    skillPath: rootPath(base, join(manifest.destination, pack.destination, "SKILL.md")),
-    overlayPaths: manifest.overlays.filter((overlay) => overlay.appliesTo.includes(pack.name)).map((overlay) => rootPath(base, overlay.path)),
-  }));
+  return manifest.sources.flatMap((source) =>
+    source.packs.map((pack) => ({
+      name: pack.name,
+      skillPath: rootPath(base, join(source.destination, pack.destination, "SKILL.md")),
+      overlayPaths: source.overlays.filter((overlay) => overlay.appliesTo.includes(pack.name)).map((overlay) => rootPath(base, overlay.path)),
+    })),
+  );
 }
 
 export type SkillCliCommand = "sync" | "check";

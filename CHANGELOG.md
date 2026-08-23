@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Material changes
+
+- Add a deterministic multi-source skill registry and a kernel task-aware resolver. `skills/manifest.json` can now pin more than one reviewed upstream source (each with its own immutable revision, allowlist, destination, license/provenance, overlays, and per-source `PROVENANCE.json`) while preserving the existing single-upstream integrity guarantees.
+- Resolve skills in the kernel before worker launch with explicit mandatory/automatic/explicit tiers, role/task/path/risk rules, one-canonical-methodology-per-category conflict detection, and bounded telemetry (registry fingerprint, selected ids, source/provenance version, tier, reason). Available, selected, and loaded skills are mechanically distinct; installed-but-unselected skills add no worker-context payload.
+- Adopt the Superpowers `verification-before-completion` concept as a package-owned discipline behind pi-next's trust/authority boundary without importing a competing Superpowers workflow bootstrap; process-owner skills can never be routed automatically.
+
+### Compatibility/configuration/schema
+
+- New optional versioned `skills` routing policy under `.pi-next/config.json`; a missing section uses the built-in default that mirrors prior role/risk selection. Unknown/unavailable skills, unsupported versions, invalid patterns, and competing methodologies fail configuration validation.
+- The classic single-upstream `skills/manifest.json` form and its provenance fingerprint are unchanged; a manifest cannot mix the single-upstream and `sources` forms.
+
+### Security/safety
+
+- Adding or updating a managed source remains an explicit reviewed repository change; a worker/model cannot discover and install a skill from the network during normal dispatch.
+
 ## 0.2.72 - prepared release
 
 Bundle the lifecycle-kernel convergence, zero-delta implementation retry, bounded worker-context minimization, and independently graded worker canaries accumulated since v0.2.71.

@@ -10,6 +10,20 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type { WorkerModelPolicy, WorkerRole } from "./worker-dispatch.ts";
 import type { AdversarialReviewPolicy, ReviewAxis } from "./adversarial-review.ts";
+import {
+  DEFAULT_SKILL_ROUTING_POLICY,
+  RISK_CLASSES,
+  SKILL_ROUTING_POLICY_VERSION,
+  SkillRegistryError,
+  builtInSkillRegistry,
+  validateSkillRoutingPolicy,
+  type RiskClass,
+  type SkillAutomaticRule,
+  type SkillMandatoryRule,
+  type SkillRoutingPolicy,
+} from "./skill-registry.ts";
+
+const WORKER_ROLE_PATTERN = /^(controller|planning|implementation|repair|review-spec|review-standards|verification|maintenance)$/;
 
 export const PI_NEXT_CONFIG_VERSION = 1 as const;
 export const PI_NEXT_CONFIG_PATH = ".pi-next/config.json" as const;
@@ -65,6 +79,8 @@ export interface PiNextConfig {
     models: Partial<Record<WorkerRole, WorkerModelPolicy>>;
     maxEscalations: number;
   };
+  /** Versioned, validated skill routing policy (mandatory/automatic/explicit). */
+  skills: SkillRoutingPolicy;
   adversarialReview: AdversarialReviewPolicy;
   convergence: {
     softTransitions: number;
@@ -125,6 +141,7 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
     helperDir: ".pi-next/scripts",
   },
   workerDispatch: { version: 1 as const, models: {}, maxEscalations: 2 },
+  skills: JSON.parse(JSON.stringify(DEFAULT_SKILL_ROUTING_POLICY)) as SkillRoutingPolicy,
   adversarialReview: { enabled: false, requiredRisk: "high" as const, maxRounds: 2, axes: ["spec", "standards"] as ReviewAxis[] },
   convergence: {
     softTransitions: 6,
@@ -203,9 +220,80 @@ function cloneDefaults(): PiNextConfig {
   return JSON.parse(JSON.stringify(DEFAULT_PI_NEXT_CONFIG)) as PiNextConfig;
 }
 
+function riskArray(value: unknown, name: string): RiskClass[] {
+  const list = strings(value, name, RISK_CLASSES.length);
+  for (const risk of list) {
+    if (!(RISK_CLASSES as readonly string[]).includes(risk)) throw new PiNextConfigError(`${name} contains an unsupported risk class: ${risk}`);
+  }
+  return list as RiskClass[];
+}
+
+function roleArray(value: unknown, name: string): WorkerRole[] {
+  const list = strings(value, name, 8);
+  for (const role of list) {
+    if (!WORKER_ROLE_PATTERN.test(role)) throw new PiNextConfigError(`${name} contains an unsupported worker role: ${role}`);
+  }
+  return list as WorkerRole[];
+}
+
+function parseSkillsPolicy(value: unknown): SkillRoutingPolicy {
+  if (value === undefined) return JSON.parse(JSON.stringify(DEFAULT_SKILL_ROUTING_POLICY)) as SkillRoutingPolicy;
+  const root = object(value, "config.skills");
+  rejectUnknown(root, ["version", "mandatory", "automatic", "explicit"], "config.skills");
+  if (root.version !== SKILL_ROUTING_POLICY_VERSION) throw new PiNextConfigError(`config.skills.version must be ${SKILL_ROUTING_POLICY_VERSION}`);
+
+  const mandatoryRaw = root.mandatory === undefined ? [] : root.mandatory;
+  if (!Array.isArray(mandatoryRaw) || mandatoryRaw.length > 32) throw new PiNextConfigError("config.skills.mandatory must be an array with at most 32 entries");
+  const mandatory: SkillMandatoryRule[] = mandatoryRaw.map((raw, index) => {
+    const rule = object(raw, `config.skills.mandatory[${index}]`);
+    rejectUnknown(rule, ["skill", "roles", "risk", "reason"], `config.skills.mandatory[${index}]`);
+    if (typeof rule.skill !== "string" || !rule.skill.trim()) throw new PiNextConfigError(`config.skills.mandatory[${index}].skill must be a non-empty string`);
+    return {
+      skill: rule.skill.trim(),
+      ...(rule.roles === undefined ? {} : { roles: roleArray(rule.roles, `config.skills.mandatory[${index}].roles`) }),
+      ...(rule.risk === undefined ? {} : { risk: riskArray(rule.risk, `config.skills.mandatory[${index}].risk`) }),
+      ...(rule.reason === undefined ? {} : { reason: String(rule.reason).trim() }),
+    };
+  });
+
+  const automaticRaw = root.automatic === undefined ? [] : root.automatic;
+  if (!Array.isArray(automaticRaw) || automaticRaw.length > 64) throw new PiNextConfigError("config.skills.automatic must be an array with at most 64 entries");
+  const automatic: SkillAutomaticRule[] = automaticRaw.map((raw, index) => {
+    const rule = object(raw, `config.skills.automatic[${index}]`);
+    rejectUnknown(rule, ["skill", "roles", "risk", "taskPattern", "paths", "reason"], `config.skills.automatic[${index}]`);
+    if (typeof rule.skill !== "string" || !rule.skill.trim()) throw new PiNextConfigError(`config.skills.automatic[${index}].skill must be a non-empty string`);
+    if (rule.taskPattern !== undefined) {
+      if (typeof rule.taskPattern !== "string" || !rule.taskPattern.trim() || rule.taskPattern.length > 200) throw new PiNextConfigError(`config.skills.automatic[${index}].taskPattern must be a bounded non-empty string`);
+      try {
+        new RegExp(rule.taskPattern, "i");
+      } catch {
+        throw new PiNextConfigError(`config.skills.automatic[${index}].taskPattern is not a valid regular expression`);
+      }
+    }
+    return {
+      skill: rule.skill.trim(),
+      ...(rule.roles === undefined ? {} : { roles: roleArray(rule.roles, `config.skills.automatic[${index}].roles`) }),
+      ...(rule.risk === undefined ? {} : { risk: riskArray(rule.risk, `config.skills.automatic[${index}].risk`) }),
+      ...(rule.taskPattern === undefined ? {} : { taskPattern: String(rule.taskPattern) }),
+      ...(rule.paths === undefined ? {} : { paths: strings(rule.paths, `config.skills.automatic[${index}].paths`, 32) }),
+      ...(rule.reason === undefined ? {} : { reason: String(rule.reason).trim() }),
+    };
+  });
+
+  const explicit = root.explicit === undefined ? [] : strings(root.explicit, "config.skills.explicit", 64);
+  const policy: SkillRoutingPolicy = { version: SKILL_ROUTING_POLICY_VERSION, mandatory, automatic, explicit };
+  try {
+    validateSkillRoutingPolicy(policy, builtInSkillRegistry());
+  } catch (error) {
+    if (error instanceof SkillRegistryError) throw new PiNextConfigError(error.message);
+    throw error;
+  }
+  return policy;
+}
+
 export function validatePiNextConfig(value: unknown): PiNextConfig {
   const root = object(value, "config");
-  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview", "convergence", "workerWatchdog", "monitor", "assessment"], "config");
+  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "skills", "adversarialReview", "convergence", "workerWatchdog", "monitor", "assessment"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
     throw new PiNextConfigError(`config.version must be ${PI_NEXT_CONFIG_VERSION}`);
   }
@@ -292,6 +380,8 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
   const maxEscalationsRaw = dispatchValue.maxEscalations === undefined ? 2 : dispatchValue.maxEscalations;
   if (typeof maxEscalationsRaw !== "number" || !Number.isInteger(maxEscalationsRaw) || maxEscalationsRaw < 0 || maxEscalationsRaw > 3) throw new PiNextConfigError("config.workerDispatch.maxEscalations must be between 0 and 3");
   const maxEscalations = maxEscalationsRaw;
+
+  const skills = parseSkillsPolicy(root.skills);
 
   const reviewValue: Record<string, unknown> = root.adversarialReview === undefined
     ? { ...DEFAULT_PI_NEXT_CONFIG.adversarialReview }
@@ -413,6 +503,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     repositoryPolicy: { entrypoints },
     workflow: { ...paths, stateProvider },
     workerDispatch: { version: 1, models, maxEscalations: Number(maxEscalations) },
+    skills,
     adversarialReview: { enabled: reviewValue.enabled, requiredRisk: reviewValue.requiredRisk, maxRounds: reviewValue.maxRounds, axes: axesValue },
     convergence,
     workerWatchdog,
