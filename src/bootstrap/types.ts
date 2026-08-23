@@ -7,7 +7,7 @@ export const MAX_CHANGED_FILES = 200;
 export const CHECKS = ["npm run typecheck", "npm test"] as const;
 
 export type Disposition = "pass" | "already-satisfied" | "no-change" | "repairable-failure" | "blocked";
-export type WorkerRole = "implementation" | "repair" | "review";
+export type WorkerRole = "implementation" | "implementation-retry" | "repair" | "review";
 
 export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "finalization" | "terminal";
 export type BootstrapProgressState = "start" | "ready" | "activity" | "heartbeat" | "pass" | "fail" | "blocked" | "skipped" | "completed";
@@ -207,7 +207,7 @@ export interface BootstrapOptions {
   allowRepair: boolean;
   review: boolean;
   timeoutMs?: number;
-  verifyOnly?: boolean;
+  verifyOnly?: boolean; implementationRetryBudget?: number;
   signal?: AbortSignal;
 }
 
@@ -267,7 +267,8 @@ export interface BootstrapReport {
   reviewPass?: boolean;
   candidateReadyForReview: boolean;
   finalizationReady: boolean;
-  implementationOutcome: "implemented" | "already-satisfied" | "unproven-no-change" | "failed";
+  implementationOutcome: "implemented" | "already-satisfied" | "unproven-no-change" | "retry-exhausted" | "failed";
+  implementationAttemptCount?: number; implementationRetryEligibleReason?: string; implementationRetryBudgetExhausted?: boolean;
   repairOutcome?: "not-needed" | "disabled" | "ineligible" | "completed" | "exhausted" | "failed";
   repairBudgetExhausted?: boolean;
   candidateHasDelta: boolean;

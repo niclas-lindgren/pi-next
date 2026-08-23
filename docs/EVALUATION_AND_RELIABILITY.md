@@ -82,6 +82,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adopt-pattern** — durable workflow kernels expose one typed single-work-item primitive and make entry points schedulers/adapters over it. Pi-next now promotes the bootstrap lifecycle mechanics into a production-owned `lifecycle` API with a canonical run/issue/phase projection consumed by bootstrap and available to explicit, auto, and monitor schedulers.
 - **reject** — making `/pi-next auto` or bootstrap infer current truth from stale historical controller records, PLAN files, or worker UI. These remain evidence/projections; the lifecycle kernel result/projection is the current state contract.
 
+### Zero-delta implementation retry (issue #149)
+
+- **adopt-pattern** — bounded workflow retry controllers distinguish no-candidate generation failures from candidate verification failures. Pi-next now spends one separate fresh implementation retry only when a completed implementation worker produced mechanically proven zero delta, the issue is still open, satisfaction is unproven, and no repair/finalization phase has started.
+- **reject** — accepting unchanged deterministic checks as proof of satisfaction, reusing the first worker conversation, retrying provider/preflight/cancellation failures, or looping after the single zero-delta retry budget is exhausted.
+
 ### Bootstrap lifecycle lock decisions (issue #114)
 
 - **adopt-pattern** — local process lock managers commonly use an atomic lock directory plus bounded owner metadata and heartbeat. The bootstrap utility adopts that filesystem primitive in `.git/pi-next/bootstrap-lifecycle/issue-N.lock`, keeping coordination outside candidate contents and failing closed for live or ambiguous owners.

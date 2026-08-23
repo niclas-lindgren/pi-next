@@ -76,7 +76,7 @@ export type IssueLifecycleExecutor = (
 ) => Promise<BootstrapReport>;
 
 function implementationPhase(report: BootstrapReport): UnifiedLifecycleResult["implementation"] {
-  if (report.implementationOutcome === "failed") return report.disposition === "repairable-failure" ? "FAIL" : "BLOCKED";
+  if (report.implementationOutcome === "failed" || report.implementationOutcome === "retry-exhausted") return report.disposition === "repairable-failure" ? "FAIL" : "BLOCKED";
   return "PASS";
 }
 
@@ -180,6 +180,7 @@ export async function runSingleIssueLifecycle(
       review: options.review,
       timeoutMs: options.timeoutMs,
       verifyOnly: resumeFinalizationOnly ? true : options.verifyOnly,
+      implementationRetryBudget: options.implementationRetryBudget,
       signal: options.signal,
     };
     const lifecycleExecutor = execute ?? (await import("../bootstrap/supervisor.js")).runBootstrap;
