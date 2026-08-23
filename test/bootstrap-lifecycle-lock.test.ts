@@ -127,8 +127,9 @@ test("self-host lifecycle blocks before worker/model launch and retained lock is
     await active.release();
 
     let sawLock = false;
-    const lifecycle = await runBootstrapLifecycle({ cwd: f.root, issueNumber: 600, allowRepair: false, review: false, finalize: true }, { runFinalizer: async (input) => { sawLock = !!input.lifecycleLock; return { ok: true, issueNumber: 600, branch: "agent/issue-600", candidateSha: "0".repeat(40), merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" }; } }, async () => report(600));
+    const lifecycle = await runBootstrapLifecycle({ cwd: f.root, issueNumber: 600, allowRepair: false, review: false, finalize: true }, { runFinalizer: async (input) => { sawLock = !!input.lifecycleLock; return { ok: true, issueNumber: 600, branch: "agent/issue-600", candidateSha: "0".repeat(40), merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, localMainSync: { status: "fast-forwarded", before: "0".repeat(40), after: "1".repeat(40) }, outcome: "finalized" }; } }, async () => report(600));
     assert.equal(lifecycle.finalization, "PASS");
+    assert.equal(lifecycle.finalizationReport?.localMainSync?.status, "fast-forwarded");
     assert.equal(sawLock, true);
   } finally { await f.cleanup(); }
 });
