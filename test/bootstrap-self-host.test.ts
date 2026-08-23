@@ -789,11 +789,12 @@ test("--next-only evaluates the real #73/#107 fenced dependency shape without am
 test("automatic selection invokes the existing single-issue bootstrap path exactly once and does not queue progress", async () => {
   const calls: number[] = [];
   const finalizations: number[] = [];
+  const selectedFixtureIssue = 81;
   const code = await runBootstrapCli([], {
-    fetchRoadmapIssues: async () => roadmap([{ number: 79 }, { number: 80 }]),
+    fetchRoadmapIssues: async () => roadmap([{ number: selectedFixtureIssue }, { number: 82 }]),
     runFinalizer: async (options) => {
       finalizations.push(options.issueNumber ?? 0);
-      return { ok: true, issueNumber: options.issueNumber ?? 0, branch: "agent/issue-79", candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+      return { ok: true, issueNumber: options.issueNumber ?? 0, branch: `agent/issue-${selectedFixtureIssue}`, candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
     },
   }, async (options) => {
     calls.push(options.issueNumber);
@@ -803,8 +804,8 @@ test("automatic selection invokes the existing single-issue bootstrap path exact
       start: "2026-01-01T00:00:00.000Z",
       end: "2026-01-01T00:00:00.000Z",
       disposition: "pass",
-      branch: "agent/issue-79",
-      worktree: ".worktrees/issue-79",
+      branch: `agent/issue-${selectedFixtureIssue}`,
+      worktree: `.worktrees/issue-${selectedFixtureIssue}`,
       revision: "r",
       baselineRevision: "b",
       candidate: {} as never,
@@ -819,8 +820,8 @@ test("automatic selection invokes the existing single-issue bootstrap path exact
     };
   });
   assert.equal(code, 0);
-  assert.deepEqual(calls, [79]);
-  assert.deepEqual(finalizations, [79]);
+  assert.deepEqual(calls, [selectedFixtureIssue]);
+  assert.deepEqual(finalizations, [selectedFixtureIssue]);
 });
 
 test("--no-finalize preserves verified candidate stop-before-finalization behavior", async () => {

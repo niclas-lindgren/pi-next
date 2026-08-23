@@ -37,7 +37,7 @@ This is not a feature-parity exercise. Pi-next should harvest proven mechanisms 
 | Aider | token-budgeted repository map/context selection; mature edit/context strategies | evaluate and adopt only if it improves measured tokens per verified completion |
 | OpenHands | typed append-only lifecycle events plus resumable current state | adopt the small event/replay pattern, not the platform |
 | Temporal | idempotent durable transitions; external side effects separated from deterministic decisions | adopt invariants, not server/runtime dependency |
-| fast-check | model/property testing with generated command sequences and shrinking | likely direct dependency if it stays small |
+| fast-check | model/property testing with generated command sequences and shrinking | adopt direct dev dependency for lifecycle model tests; its `commands`/`asyncModelRun` API gives reviewed preconditioned model commands and automatic shrink output without a custom generator/shrinker |
 | Codex | structured worker events/results; sandbox/security ideas; native model/harness optimization | evaluate behind adapter |
 | Claude Agent SDK | structured headless worker execution and cancellation; native Claude optimization | evaluate behind adapter |
 
@@ -83,6 +83,12 @@ Core invariants include:
 - optimization budgets cannot prevent correctness-required lifecycle transitions.
 
 Use model/property generation where practical. Preserve minimized failing sequences as permanent regressions.
+
+#### Issue #79 lifecycle model-test decision
+
+- **adopt** — `fast-check` is used directly for bounded lifecycle model tests. Its maintained model-based `commands` and `asyncModelRun` pattern supplies command preconditions, deterministic seeds, case budgets, and automatic shrinking to a minimal command sequence such as `claim(owner-a) -> expireLease() -> claim(owner-b) -> promoteAndClose()`. This avoids a pi-next-specific random generator/shrinker while keeping the reference model small and reviewable.
+- **adopt-pattern** — the property test keeps the reference state deliberately smaller than production state: work item, lease, workspace, candidate, verification, and authority freshness. Commands drive production coordination primitives with memory authority, controllable clock, scripted workers, and disposable Git; no LLM/provider credentials are involved. Normal CI uses a small deterministic budget, while `PI_NEXT_LIFECYCLE_MODEL_RUNS`, `PI_NEXT_LIFECYCLE_MODEL_MAX_COMMANDS`, and `PI_NEXT_LIFECYCLE_MODEL_SEED` allow larger local/nightly stress and fixed-seed reproduction.
+- **reject** — custom shrinking or arbitrary source-code mutation. Fast-check already provides readable minimized command counterexamples, and permanent regressions should be promoted from those shrunk sequences when they expose a real bug.
 
 ### 2. Integration tests — real Git, no LLM
 
