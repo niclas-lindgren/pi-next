@@ -55,6 +55,7 @@
     "bootstrap:self-host": "tsx scripts/bootstrap-self-host.ts",
     "bootstrap:finalize": "tsx scripts/bootstrap-finalize.ts",
     "eval:replay": "tsx scripts/eval-replay.ts",
+    "eval:worker": "tsx scripts/eval-worker.ts",
     "skills:sync": "tsx src/skills/bin.ts sync",
     "skills:check": "tsx src/skills/bin.ts check",
     "release": "node scripts/release.mjs",

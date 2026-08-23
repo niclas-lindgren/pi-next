@@ -1,0 +1,12 @@
+{
+  "baselineId": "pi-worker-canaries-initial",
+  "status": "credential-gated-not-run-in-repository-tests",
+  "adapter": { "id": "pi", "version": "1" },
+  "harness": { "name": "pi-next-worker-eval", "fixtureFormatVersion": 1 },
+  "command": "PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi --output docs/evaluation/pi-worker-baseline.local.json",
+  "fixtureCount": 6,
+  "notes": [
+    "Normal npm test is zero-LLM; this checked-in baseline marker records the versioned corpus and command, not an acceptance grade.",
+    "Authoritative Pi pass-rate/token/cost numbers are produced by the explicit eval command in credentialed environments."
+  ]
+}

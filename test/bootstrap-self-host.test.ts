@@ -939,7 +939,7 @@ test("--next-only evaluates the real #73/#107 fenced dependency shape without am
 test("automatic selection invokes the existing single-issue bootstrap path exactly once and does not queue progress", async () => {
   const calls: number[] = [];
   const finalizations: number[] = [];
-  const selectedFixtureIssue = 81;
+  const selectedFixtureIssue = 85;
   const code = await runBootstrapCli([], {
     fetchRoadmapIssues: async () => roadmap([{ number: selectedFixtureIssue }, { number: 82 }]),
     runFinalizer: async (options) => {
