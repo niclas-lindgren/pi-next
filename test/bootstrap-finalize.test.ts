@@ -421,6 +421,7 @@ test("CI evidence classifier distinguishes absence, missing policy, failures, pe
   assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "SUCCESS" }], requiredContexts: ["npm test"] }).state, "PASS");
   assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "QUEUED" }], requiredContexts: ["npm test"] }).state, "PENDING");
   assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", conclusion: "CANCELLED" }], requiredContexts: ["npm test"] }).state, "FAIL");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "COMPLETED" }], requiredContexts: ["npm test"] }).state, "UNKNOWN");
   assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "???" }], requiredContexts: ["npm test"] }).state, "UNKNOWN");
   assert.deepEqual(classifyCiEvidence({ checkRows: [], checksUnavailable: true }).state, "UNKNOWN");
 });
