@@ -30,7 +30,45 @@ This Pi-specific mechanism is not part of the generic worker contract. Another a
 
 See [`HOST_SESSION_LIFECYCLE.md`](HOST_SESSION_LIFECYCLE.md) for the Pi host contract, replacement semantics, memory/UI implications, and required regression invariant.
 
-Methodology is selective. TDD, bug diagnosis, code review, and codebase design are loaded only for roles/tasks that need them. Skills are advisory and never define authority, ownership, promotion, or closure.
+## Skill resolution
+
+Methodology is selective. **Available does not mean loaded.** Pi-next may have a reviewed catalog of installed skills, while each worker receives only the subset resolved for its exact dispatch.
+
+The kernel resolves skills before the adapter launches the worker. Selection may use deterministic signals such as:
+
+- lifecycle role;
+- work-item type/labels and exact requirements;
+- relevant repository paths/components;
+- language/framework;
+- configured risk/domain class;
+- repair/failure state;
+- explicit consumer policy.
+
+A skill policy may distinguish:
+
+- **mandatory** disciplines for a lifecycle/risk boundary;
+- **automatic** disciplines selected by role/task/risk rules;
+- **explicit** disciplines that are available but require an operator/project/planning request.
+
+Examples:
+
+- planning -> codebase/domain design only when material;
+- implementation -> TDD where appropriate;
+- repair -> diagnosing-bugs (+ TDD at a regression seam);
+- frontend changes -> frontend/browser verification disciplines when configured;
+- review-spec -> spec review discipline;
+- review-standards -> standards/design discipline;
+- verification -> an explicit verification-before-completion discipline when configured;
+- controller -> no engineering-method skill by default;
+- maintenance -> performance/telemetry discipline.
+
+No role receives all installed skills by default, and installed-but-unselected skills must consume no worker context. The resolver should reject or explicitly resolve overlapping automatic methodologies such as two TDD or two debugging skills instead of giving the worker competing instructions.
+
+External skills remain methodology rather than workflow ownership. In particular, framework-level bootstrap/process instructions that attempt to own planning, worktrees, subagent execution, review, or completion must not silently wrap or replace the pi-next kernel. Useful individual disciplines may be adapted behind the same trust/authority boundary. See [`SKILLS.md`](SKILLS.md).
+
+The dispatch should retain bounded provenance for each resolved skill: identifier, exact version/source, selection reason/rule, and optionally its measured context contribution. This allows evaluation to compare routing policies against verified outcome, retries, tokens/cost, and latency without storing raw prompts or hidden reasoning.
+
+## Model routing
 
 Consumers may configure provider-neutral model routing under `.pi-next/config.json`:
 
@@ -52,5 +90,7 @@ Model identifiers are examples and are not bundled defaults. Unknown roles, unsu
 ## Evaluation
 
 Worker quality is measured by an independent grader rather than worker self-report. Use the same repository/task fixtures across adapters and compare at least verified acceptance pass rate, tokens/cost per verified completion, wall time, retries/escalations, command/turn count, regressions, context growth/cache efficiency, and pi-next intervention/recovery.
+
+Skill-routing policies should be evaluated the same way: compare no/legacy routing against deterministic selective loading while holding model and fixtures stable. Do not keep a routing rule merely because it reduces context; it must improve or preserve verified-completion efficiency and kernel safety.
 
 The evaluation and reference-feature-harvest policy is defined in [`EVALUATION_AND_RELIABILITY.md`](EVALUATION_AND_RELIABILITY.md).
