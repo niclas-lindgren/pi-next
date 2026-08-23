@@ -43,6 +43,11 @@ This is not a feature-parity exercise. Pi-next should harvest proven mechanisms 
 
 The table is intentionally revisitable. New useful features discovered in mature frameworks should be added here before implementation so they are consciously adopted or rejected rather than rediscovered ad hoc.
 
+### Bootstrap lifecycle lock decisions (issue #114)
+
+- **adopt-pattern** — local process lock managers commonly use an atomic lock directory plus bounded owner metadata and heartbeat. The bootstrap utility adopts that filesystem primitive in `.git/pi-next/bootstrap-lifecycle/issue-N.lock`, keeping coordination outside candidate contents and failing closed for live or ambiguous owners.
+- **reject** — timestamp-only stale stealing and Git-status-only producer inference. Recovery requires a valid issue/run/pid record and positive local evidence that the recorded process is dead; dirty candidate work is preserved for the normal finalizer/recovery path.
+
 ### Bootstrap supervisor decisions (issue #74)
 
 - **adopt-pattern** — mini-SWE-agent's small `Agent`/`Environment`/`Model` separation and local environment process-group timeout pattern. The bootstrap utility keeps the same narrow seam: an injectable worker session factory, a canonical cwd, bounded cancellation, and no lifecycle authority in the worker. Its shell adapter kills the process group on timeout rather than importing the framework.

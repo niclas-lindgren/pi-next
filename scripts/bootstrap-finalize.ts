@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { acquireBootstrapLifecycleLock, type BootstrapLifecycleLock } from "../src/bootstrap/lifecycle-lock.js";
 
 const execFileAsync = promisify(execFile);
 const REQUIRED_CHECKS = ["npm run typecheck", "npm test"] as const;
@@ -25,7 +26,7 @@ export interface BootstrapFinalizeAuthority {
   closeIssue(issueNumber: number, cwd: string): Promise<void>;
 }
 
-export interface BootstrapFinalizeOptions { cwd?: string; issueNumber?: number; authority?: BootstrapFinalizeAuthority; runCommand?: CommandRunner; candidatePaths?: string[]; reporter?: (line: string) => void; }
+export interface BootstrapFinalizeOptions { cwd?: string; issueNumber?: number; authority?: BootstrapFinalizeAuthority; runCommand?: CommandRunner; candidatePaths?: string[]; reporter?: (line: string) => void; lifecycleLock?: BootstrapLifecycleLock; }
 export interface BootstrapFinalizeReport { ok: boolean; issueNumber: number; branch: string; candidateSha: string; pr?: number; merged: boolean; reachable: boolean; issueClosed: boolean; worktreeRemoved: boolean; localBranchRemoved: boolean; outcome: "finalized" | "already-satisfied" | "integrated-pending-verification"; pendingExternalVerification?: boolean; }
 
 export class BootstrapFinalizeError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "BootstrapFinalizeError"; } }
@@ -193,7 +194,7 @@ class GhAuthority implements BootstrapFinalizeAuthority {
   async closeIssue(issueNumber: number, cwd: string) { const r = await runCommand("gh", ["issue", "close", String(issueNumber), "--comment", "Finalized by bootstrap finalizer after merge reachability proof."], { cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("CLOSE_FAILED", r.stderr || r.stdout); }
 }
 
-export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {}): Promise<BootstrapFinalizeReport> {
+async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = {}): Promise<BootstrapFinalizeReport> {
   const runner = options.runCommand ?? runCommand;
   const root = await resolveRoot(options.cwd ?? process.cwd(), runner);
   const say = (msg: string) => options.reporter?.(msg);
@@ -291,6 +292,31 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
   const pendingExternalVerification = !issueClosed && externalDisposition === "pending";
   say(`bootstrap finalize #${issueNumber} · ${pendingExternalVerification ? "INTEGRATED_PENDING_VERIFICATION" : "PASS"}`);
   return { ok: true, issueNumber, branch, candidateSha, pr: pr.number, merged: true, reachable, issueClosed, ...cleanup, outcome: pendingExternalVerification ? "integrated-pending-verification" : "finalized", ...(pendingExternalVerification ? { pendingExternalVerification: true } : {}) };
+}
+
+export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {}): Promise<BootstrapFinalizeReport> {
+  const runner = options.runCommand ?? runCommand;
+  const root = await resolveRoot(options.cwd ?? process.cwd(), runner);
+  const commonDir = await git(options.cwd ?? process.cwd(), ["rev-parse", "--path-format=absolute", "--git-common-dir"], runner);
+  let lifecycleLock = options.lifecycleLock;
+  let ownsLock = false;
+  if (!lifecycleLock && options.issueNumber !== undefined) {
+    lifecycleLock = await acquireBootstrapLifecycleLock({ root, gitCommonDir: commonDir, issueNumber: options.issueNumber, operation: "finalize", phase: "finalization" });
+    ownsLock = true;
+  }
+  try {
+    if (!lifecycleLock) {
+      // Implicit candidate selection may inspect local Git first; acquire immediately after the issue is known.
+      const issueNumber = await discoverIssue(root, options.issueNumber, runner);
+      lifecycleLock = await acquireBootstrapLifecycleLock({ root, gitCommonDir: commonDir, issueNumber, operation: "finalize", phase: "finalization" });
+      ownsLock = true;
+      return await runBootstrapFinalizeUnlocked({ ...options, issueNumber, lifecycleLock });
+    }
+    await lifecycleLock.update("finalization");
+    return await runBootstrapFinalizeUnlocked({ ...options, lifecycleLock });
+  } finally {
+    if (ownsLock) await lifecycleLock?.release();
+  }
 }
 
 function usage(): string { return `Usage: npm run bootstrap:finalize -- [--issue N]\n\nFinalize one mechanically-passing bootstrap candidate.\n\nOptions:\n  --issue N   finalize the explicit canonical agent/issue-N candidate\n  -h, --help  show this help\n`; }

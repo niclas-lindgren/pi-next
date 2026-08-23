@@ -7,6 +7,7 @@ import { resolveNextIssue } from "./roadmap.js";
 import { runBootstrap } from "./supervisor.js";
 import { runCommand } from "./command-runner.js";
 import { runBootstrapFinalize } from "../../scripts/bootstrap-finalize.ts";
+import { acquireBootstrapLifecycleLock, BootstrapLifecycleLockError } from "./lifecycle-lock.js";
 
 function parseArgs(args: string[]): BootstrapCliOptions {
   let issueNumber: number | undefined;
@@ -65,37 +66,52 @@ export async function runBootstrapLifecycle(
   execute: (options: BootstrapOptions, dependencies?: BootstrapDependencies) => Promise<BootstrapReport> = runBootstrap,
 ): Promise<BootstrapLifecycleReport> {
   const reporter = dependencies.reporter;
-  const resumeFinalizationOnly = options.finalize && !options.verifyOnly && await hasLocalFinalizationCandidate(options, dependencies);
-  const implementationReport = await execute(resumeFinalizationOnly ? { ...options, verifyOnly: true } : options, dependencies);
-  const base: Omit<BootstrapLifecycleReport, "finalization"> = {
-    issueNumber: implementationReport.issueNumber,
-    disposition: implementationReport.disposition,
-    implementation: implementationPhase(implementationReport),
-    verification: verificationPhase(implementationReport),
-    implementationReport,
-  };
-  if (!options.finalize || options.verifyOnly || !implementationReport.mechanicalPass || (!implementationReport.finalizationReady && !resumeFinalizationOnly)) {
-    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "skipped", detail: !options.finalize ? "disabled" : options.verifyOnly ? "verify-only" : !implementationReport.mechanicalPass ? "verification-failed" : "not-ready" });
-    return { ...base, finalization: "SKIPPED" };
-  }
-  emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "start" });
+  const runner = dependencies.runCommand ?? runCommand;
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const rootResult = await runner("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { cwd });
+  if (rootResult.exitCode !== 0) throw new BootstrapError(`could not resolve repository root: ${(rootResult.stderr || rootResult.stdout).trim()}`);
+  const commonDirResult = await runner("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd });
+  if (commonDirResult.exitCode !== 0) throw new BootstrapError(`could not resolve repository git directory: ${(commonDirResult.stderr || commonDirResult.stdout).trim()}`);
+  const lifecycleLock = await acquireBootstrapLifecycleLock({ root: rootResult.stdout.trim(), gitCommonDir: commonDirResult.stdout.trim(), issueNumber: options.issueNumber, operation: "self-host", phase: "preflight", heartbeatMs: dependencies.heartbeatMs });
   try {
-    const runFinalizer = dependencies.runFinalizer ?? ((input) => runBootstrapFinalize(input));
-    const finalizationReport = await runFinalizer({
-      cwd: options.cwd,
-      issueNumber: options.issueNumber,
-      candidatePaths: implementationReport.candidate.changedFiles,
-      reporter: (line) => emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "activity", detail: line }),
-    });
-    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "pass" });
-    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "pass", detail: finalizationReport.pendingExternalVerification ? "implementation: PASS; verification: PASS; integration: PASS; external verification: PENDING; cleanup: PASS" : "implementation: PASS; verification: PASS; finalization: PASS" });
-    return { ...base, disposition: "pass", finalization: "PASS", finalizationReport };
-  } catch (error) {
-    const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "FINALIZATION_FAILED";
-    const reason = redact(error instanceof Error ? error.message : String(error));
-    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "blocked", detail: code });
-    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: PASS; finalization: BLOCKED; candidate preserved" });
-    return { ...base, disposition: "finalization-blocked", finalization: "BLOCKED", candidatePreserved: true, finalizationFailure: { code, reason } };
+    const resumeFinalizationOnly = options.finalize && !options.verifyOnly && await hasLocalFinalizationCandidate(options, dependencies);
+    await lifecycleLock.update(resumeFinalizationOnly ? "finalization" : "worker");
+    const implementationReport = await execute(resumeFinalizationOnly ? { ...options, verifyOnly: true } : options, dependencies);
+    const base: Omit<BootstrapLifecycleReport, "finalization"> = {
+      issueNumber: implementationReport.issueNumber,
+      disposition: implementationReport.disposition,
+      implementation: implementationPhase(implementationReport),
+      verification: verificationPhase(implementationReport),
+      implementationReport,
+    };
+    await lifecycleLock.update("verification");
+    if (!options.finalize || options.verifyOnly || !implementationReport.mechanicalPass || (!implementationReport.finalizationReady && !resumeFinalizationOnly)) {
+      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "skipped", detail: !options.finalize ? "disabled" : options.verifyOnly ? "verify-only" : !implementationReport.mechanicalPass ? "verification-failed" : "not-ready" });
+      return { ...base, finalization: "SKIPPED" };
+    }
+    await lifecycleLock.update("finalization");
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "start" });
+    try {
+      const runFinalizer = dependencies.runFinalizer ?? ((input) => runBootstrapFinalize(input));
+      const finalizationReport = await runFinalizer({
+        cwd: options.cwd,
+        issueNumber: options.issueNumber,
+        candidatePaths: implementationReport.candidate.changedFiles,
+        reporter: (line) => emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "activity", detail: line }),
+        lifecycleLock,
+      });
+      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "pass" });
+      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "pass", detail: finalizationReport.pendingExternalVerification ? "implementation: PASS; verification: PASS; integration: PASS; external verification: PENDING; cleanup: PASS" : "implementation: PASS; verification: PASS; finalization: PASS" });
+      return { ...base, disposition: "pass", finalization: "PASS", finalizationReport };
+    } catch (error) {
+      const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "FINALIZATION_FAILED";
+      const reason = redact(error instanceof Error ? error.message : String(error));
+      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "blocked", detail: code });
+      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: PASS; finalization: BLOCKED; candidate preserved" });
+      return { ...base, disposition: "finalization-blocked", finalization: "BLOCKED", candidatePreserved: true, finalizationFailure: { code, reason } };
+    }
+  } finally {
+    await lifecycleLock.release();
   }
 }
 
@@ -147,7 +163,7 @@ export async function runBootstrapCli(
     if (selectedIssueNumber !== undefined) emitProgress(reporter, { issueNumber: selectedIssueNumber, phase: "terminal", state: "fail", detail: "blocked" });
     console.error(JSON.stringify({
       disposition: "blocked",
-      code: error instanceof BootstrapError ? error.code : "BOOTSTRAP_FAILED",
+      code: error instanceof BootstrapError || error instanceof BootstrapLifecycleLockError ? error.code : "BOOTSTRAP_FAILED",
       reason: redact(error instanceof Error ? error.message : String(error)),
     }));
     return 2;

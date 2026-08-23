@@ -13,4 +13,5 @@ export * from "./candidate.js";
 export * from "./verification.js";
 export * from "./reviewer.js";
 export * from "./supervisor.js";
+export * from "./lifecycle-lock.js";
 export * from "./cli.js";
