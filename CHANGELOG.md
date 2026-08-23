@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.72 - prepared release
+
+Bundle the lifecycle-kernel convergence, zero-delta implementation retry, bounded worker-context minimization, and independently graded worker canaries accumulated since v0.2.71.
+
+### Material changes
+
+- Add a canonical single-issue lifecycle kernel primitive with a typed run/issue/phase projection, and converge `/pi-next auto` and bootstrap onto it instead of separate orchestration paths.
+- Automatically spend exactly one fresh bounded implementation retry when a completed implementation worker produced mechanically proven zero candidate delta and satisfaction is still unproven, without treating unchanged checks as proof.
+- Benchmark and minimize worker context using proven relevance (bounded repository map, task-aware skill loading) while kernel-owned lifecycle policy stays mechanically enforced.
+- Add independently graded scripted and real-worker canary harnesses, plus file-level candidate-path identity for finalizer verification handoff.
+
+### Compatibility/configuration/schema
+
+- Lifecycle kernel projection, retry policy, and worker-context budgets are additive; existing pi-next authority, lease, workflow, and package/config schema contracts remain compatible.
+- Bootstrap lifecycle reports gain `implementationOutcome: "retry-exhausted"` and retry evidence fields; existing dispositions remain stable.
+
+### Breaking/behavior changes
+
+- None for existing commands or consumer configuration. A zero-delta completed implementation may now launch one additional bounded implementation worker before exhausting its retry budget.
+
+### Security/safety
+
+- The zero-delta retry refreshes issue authority before relaunching, refuses retries for closed issues, and stops after the single-retry budget; prompts, transcripts, and hidden reasoning remain excluded from telemetry.
+
+### Upgrade guidance
+
+- No consumer action is required. Operators may observe one extra implementation-retry worker in progress output for unproven no-change candidates.
+
 ## 0.2.71 - prepared release
 
 Bundle lifecycle reliability, provider-neutral worker dispatch, and the self-host development workflow improvements accumulated since v0.2.70.
