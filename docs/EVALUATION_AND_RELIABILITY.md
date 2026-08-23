@@ -59,6 +59,15 @@ This is not a feature-parity exercise. Pi-next should harvest proven mechanisms 
 
 The table is intentionally revisitable. New useful features discovered in mature frameworks should be added here before implementation so they are consciously adopted or rejected rather than rediscovered ad hoc.
 
+### Worker context minimization decisions (issue #82)
+
+- **adopt-pattern** — Aider's bounded repository-map/context-budget idea as a small structural sketch (`repo-map`) with an explicit byte/file budget. Pi-next does not build a vector database, whole-repository prompt, or second semantic codebase index.
+- **adopt-pattern** — minimal fresh-worker packets from Pi/mini-SWE/Codex/Claude-style harnesses: child coding workers receive exact task, cwd and bounded checks, while kernel-owned lifecycle policy (leases, promotion, closure, cleanup, authority freshness) stays mechanically enforced rather than repeated in every prompt.
+- **adopt-pattern** — task-aware lazy skill loading: the reviewed skill registry may grow, but available/unselected skills contribute zero worker-context payload. Results record available count, selected IDs, loaded contexts, reason tier, provenance/version, and estimated per-skill tokens.
+- **adapter** — Matt Pocock methodology catalog is represented as composable skill entries selected by deterministic pi-next rules rather than loaded universally.
+- **adapter** — Superpowers is evaluated only as individual disciplines such as verification-before-completion behind pi-next dispatch/trust boundaries. Its global bootstrap/process-owner workflow is not imported because that would change orchestration semantics rather than context selection.
+- **reject** — universal always-on skills, pi-next controller/extension context in ordinary coding children, competing workflow bootstraps, and prompt-size-only optimizations that reduce tokens while degrading independent verified completion.
+
 ### Bootstrap auto-finalization recovery proof (issue #108)
 
 - **adopt-pattern** — durable workflow systems separate side-effect completion evidence from incidental local resources. The bootstrap supervisor now treats `.git/pi-next/bootstrap-lifecycle/issue-N.verified-candidate.json` as a bounded exact-candidate proof only after deterministic finalizer verification records the candidate SHA, and still validates the live local branch before skipping an implementation worker. Mere branch/worktree existence remains non-authoritative and cannot bypass no-op candidate semantics.

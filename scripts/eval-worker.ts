@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { PiWorkerAdapter } from "../src/evaluation/pi-worker-adapter.ts";
+import { type ContextStrategyId } from "../src/evaluation/context-strategies.ts";
 import { runWorkerCanaryCorpus, workerCanaryFixtures } from "../src/evaluation/worker-canaries.ts";
 import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter.ts";
 
@@ -14,7 +15,14 @@ function argValue(name: string): string | undefined {
 const adapterName = argValue("--adapter") ?? "pi";
 const smoke = process.argv.includes("--smoke");
 const output = argValue("--output");
+const contextStrategy = (argValue("--context-strategy") ?? "default") as ContextStrategyId;
+const knownContextStrategies = new Set<string>(["default", "minimal", "no-controller-context", "repo-map", "selective-skills", "resolver", "expanded-skill-registry", "verification-discipline"]);
 const allowLlm = process.env.PI_NEXT_EVAL_ALLOW_LLM === "1" || process.env.PI_NEXT_WORKER_EVAL_ALLOW_LLM === "1";
+
+if (!knownContextStrategies.has(contextStrategy)) {
+  console.error(`Unknown context strategy: ${contextStrategy}`);
+  process.exit(2);
+}
 
 if (adapterName === "pi" && !allowLlm) {
   console.error("Refusing to run real Pi worker eval without PI_NEXT_EVAL_ALLOW_LLM=1. Normal npm test remains zero-LLM.");
@@ -48,7 +56,7 @@ if (!adapter) {
   process.exit(2);
 }
 
-const report = await runWorkerCanaryCorpus(adapter, fixtures);
+const report = await runWorkerCanaryCorpus(adapter, fixtures, { contextStrategy });
 const json = `${JSON.stringify(report, null, 2)}\n`;
 if (output) {
   const path = resolve(output);
