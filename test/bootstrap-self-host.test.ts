@@ -13,6 +13,7 @@ import {
   resolveNextIssue,
   runBootstrap,
   runBootstrapCli,
+  runBootstrapLifecycle,
   runCommand,
   type BootstrapDependencies,
   type BootstrapProgressEvent,
@@ -392,6 +393,36 @@ test("verify-only grades preserved dirty work without an implementation turn", a
   }
 });
 
+test("normal rerun with preserved candidate verifies and finalizes without relaunching implementation", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, fakeFactory(sessions, async (_role, cwd) => {
+        await writeFile(join(cwd, "resume.txt"), "candidate\n");
+      }), () => 0, []),
+    );
+    let finalizations = 0;
+    const report = await runBootstrapLifecycle(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000, finalize: true },
+      {
+        ...dependenciesFor(fixtureState.root, async () => { throw new Error("implementation worker must not relaunch"); }, () => 0, []),
+        runFinalizer: async (options) => {
+          finalizations += 1;
+          assert.deepEqual(options.candidatePaths, ["resume.txt"]);
+          return { ok: true, issueNumber: 75, branch: "agent/issue-75", candidateSha: "sha", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+        },
+      },
+    );
+    assert.equal(report.finalization, "PASS");
+    assert.equal(report.implementationReport.attempts, 0);
+    assert.equal(finalizations, 1);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
 test("verify-only may use one bounded repair after candidate checks fail, without implementation", async () => {
   const fixtureState = await fixture();
   try {
@@ -679,8 +710,13 @@ test("malformed anchored dependency metadata fails closed", async () => {
 
 test("explicit --issue bypasses automatic selection and remains unchanged", async () => {
   const calls: number[] = [];
+  const finalizations: number[] = [];
   const code = await runBootstrapCli(["--issue", "85"], {
     fetchRoadmapIssues: async () => { throw new Error("selection should not run"); },
+    runFinalizer: async (options) => {
+      finalizations.push(options.issueNumber ?? 0);
+      return { ok: true, issueNumber: options.issueNumber ?? 0, branch: "agent/issue-85", candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+    },
   }, async (options) => {
     calls.push(options.issueNumber);
     return {
@@ -706,6 +742,7 @@ test("explicit --issue bypasses automatic selection and remains unchanged", asyn
   });
   assert.equal(code, 0);
   assert.deepEqual(calls, [85]);
+  assert.deepEqual(finalizations, [85]);
 });
 
 test("--next-only launches zero workers or bootstrap executions", async () => {
@@ -751,8 +788,13 @@ test("--next-only evaluates the real #73/#107 fenced dependency shape without am
 
 test("automatic selection invokes the existing single-issue bootstrap path exactly once and does not queue progress", async () => {
   const calls: number[] = [];
+  const finalizations: number[] = [];
   const code = await runBootstrapCli([], {
     fetchRoadmapIssues: async () => roadmap([{ number: 79 }, { number: 80 }]),
+    runFinalizer: async (options) => {
+      finalizations.push(options.issueNumber ?? 0);
+      return { ok: true, issueNumber: options.issueNumber ?? 0, branch: "agent/issue-79", candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
+    },
   }, async (options) => {
     calls.push(options.issueNumber);
     return {
@@ -778,6 +820,68 @@ test("automatic selection invokes the existing single-issue bootstrap path exact
   });
   assert.equal(code, 0);
   assert.deepEqual(calls, [79]);
+  assert.deepEqual(finalizations, [79]);
+});
+
+test("--no-finalize preserves verified candidate stop-before-finalization behavior", async () => {
+  let finalizations = 0;
+  const code = await runBootstrapCli(["--issue", "85", "--no-finalize"], {
+    runFinalizer: async () => {
+      finalizations += 1;
+      throw new Error("finalizer must not run");
+    },
+  }, async (options) => ({
+    issueNumber: options.issueNumber,
+    attempts: 1,
+    start: "2026-01-01T00:00:00.000Z",
+    end: "2026-01-01T00:00:00.000Z",
+    disposition: "pass",
+    branch: "agent/issue-85",
+    worktree: ".worktrees/issue-85",
+    revision: "r",
+    baselineRevision: "b",
+    candidate: { changedFiles: ["candidate.txt"] } as never,
+    dependencySetup: { action: "not-required" },
+    workerAttempts: [],
+    checks: [],
+    mechanicalPass: true,
+    candidateReadyForReview: true,
+    finalizationReady: true,
+    implementationOutcome: "implemented",
+    candidateHasDelta: true,
+  }));
+  assert.equal(code, 0);
+  assert.equal(finalizations, 0);
+});
+
+test("finalization block reports implementation and verification PASS while preserving candidate", async () => {
+  const code = await runBootstrapCli(["--issue", "85"], {
+    runFinalizer: async () => {
+      const error = new Error("required CI FAIL") as Error & { code: string };
+      error.code = "CI_NOT_PASSING";
+      throw error;
+    },
+  }, async (options) => ({
+    issueNumber: options.issueNumber,
+    attempts: 1,
+    start: "2026-01-01T00:00:00.000Z",
+    end: "2026-01-01T00:00:00.000Z",
+    disposition: "pass",
+    branch: "agent/issue-85",
+    worktree: ".worktrees/issue-85",
+    revision: "r",
+    baselineRevision: "b",
+    candidate: { changedFiles: ["candidate.txt"] } as never,
+    dependencySetup: { action: "not-required" },
+    workerAttempts: [],
+    checks: [],
+    mechanicalPass: true,
+    candidateReadyForReview: true,
+    finalizationReady: true,
+    implementationOutcome: "implemented",
+    candidateHasDelta: true,
+  }));
+  assert.equal(code, 2);
 });
 
 test("rejects implicit multi-issue progression", async () => {

@@ -39,8 +39,8 @@ export function buildWorkerPrompt(issue: Issue, cwd: string, contextFiles: Array
   const roleInstruction = role === "review"
     ? "Review the exact candidate evidence for correctness and contract violations. Do not edit files, run mutating commands, merge, push, close issues, or claim acceptance. Return only the structured result contract: {\"verdict\":\"pass\"} or {\"verdict\":\"findings\",\"findings\":[{\"severity\":\"blocking\"|\"warning\",\"path\":\"optional\",\"summary\":\"concise bounded finding\"}]}. Do not include transcript, hidden reasoning, or unbounded prose."
     : role === "repair"
-      ? "This is one fresh repair attempt. Inspect the current worktree and repair only the reported deterministic failures. Do not merge, push, close the issue, release authority, or grade your own work."
-      : "Implement the issue completely in this worktree. Do not merge, push, close the issue, release authority, or grade your own work.";
+      ? "This is one fresh repair attempt. Inspect the current worktree and repair only the reported deterministic failures. Do not merge, push, close the issue, release authority, finalize, or grade your own work."
+      : "Implement the issue completely in this worktree. Do not merge, push, close the issue, release authority, finalize, or grade your own work.";
   const packet = [
     `You are the ${role} worker for pi-next issue #${issue.number}.`,
     roleInstruction,
