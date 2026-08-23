@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 
-import { BootstrapFinalizeError, classifyCiEvidence, classifyExternalVerificationAuthority, evaluateGhPrChecks, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation } from "../scripts/bootstrap-finalize.ts";
+import { BootstrapFinalizeError, classifyCiEvidence, classifyExternalVerificationAuthority, evaluateGhPrChecks, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation, type CommandRunner } from "../scripts/bootstrap-finalize.ts";
 
 const exec = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> { return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim(); }
@@ -58,6 +58,17 @@ async function externallyMergedCandidate(root: string, remote: string, issue: nu
   await git(root, "merge", "--ff-only", sha);
   await git(root, "push", "-q", "origin", "main");
   assert.equal(await git(remote, "rev-parse", "main"), sha);
+  return { worktree, sha, pr: { number: issue, headRefName: `agent/issue-${issue}`, headSha: sha, baseRefName: "main", state: "MERGED" as const, mergeCommitSha: sha } };
+}
+
+async function externallyMergedRemoteOnly(root: string, remote: string, issue: number, file = `feature-${issue}.txt`) {
+  const worktree = await dirtyCandidate(root, issue, file);
+  await git(worktree, "add", file);
+  await git(worktree, "commit", "-qm", `candidate ${issue}`);
+  const sha = await git(worktree, "rev-parse", "HEAD");
+  await git(worktree, "push", "-q", "-u", "origin", `agent/issue-${issue}`);
+  await git(remote, "update-ref", "refs/heads/main", sha);
+  assert.notEqual(await git(root, "rev-parse", "main"), sha);
   return { worktree, sha, pr: { number: issue, headRefName: `agent/issue-${issue}`, headSha: sha, baseRefName: "main", state: "MERGED" as const, mergeCommitSha: sha } };
 }
 
@@ -169,6 +180,96 @@ test("externally merged zero-diff candidate proves exact head reachability befor
     const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 118, authority });
     assert.equal(result.reachable, true);
     assert.equal(await git(f.remote, "merge-base", "--is-ancestor", sha, "main").then(() => "yes"), "yes");
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer fast-forwards a clean stale local main after reachability and cleanup", async () => {
+  const f = await fixture();
+  try {
+    const { sha, pr } = await externallyMergedRemoteOnly(f.root, f.remote, 133);
+    const authority = new FakeAuthority(f.root, 133);
+    authority.prs.push(pr);
+    const lines: string[] = [];
+    const commands: string[] = [];
+    const runner: CommandRunner = async (command, args, options) => {
+      commands.push([command, ...args].join(" "));
+      try {
+        const { stdout, stderr } = await exec(command, args, { cwd: options.cwd, encoding: "utf8" });
+        return { command, args, cwd: options.cwd, exitCode: 0, stdout, stderr };
+      } catch (error) {
+        const e = error as { code?: number; stdout?: string; stderr?: string };
+        return { command, args, cwd: options.cwd, exitCode: typeof e.code === "number" ? e.code : 1, stdout: e.stdout ?? "", stderr: e.stderr ?? String(error) };
+      }
+    };
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 133, authority, reporter: (line) => lines.push(line), runCommand: runner });
+    assert.ok(commands.some((command) => command.includes(" merge --ff-only origin/main")));
+    assert.equal(commands.some((command) => /\smerge\s(?!.*--ff-only)/.test(command)), false);
+    assert.equal(commands.some((command) => /\srebase\s/.test(command)), false);
+    assert.equal(commands.some((command) => /\sreset\s/.test(command)), false);
+    assert.equal(result.localMainSync?.status, "fast-forwarded");
+    assert.equal(await git(f.root, "rev-parse", "main"), sha);
+    assert.equal(await git(f.root, "rev-parse", "origin/main"), sha);
+    assert.ok(lines.indexOf("bootstrap finalize #133 · reachable from origin/main") < lines.indexOf("bootstrap finalize #133 · local main fast-forwarded"));
+    assert.ok(lines.indexOf("bootstrap finalize #133 · worktree removed") < lines.indexOf("bootstrap finalize #133 · local main fast-forwarded"));
+  } finally { await f.cleanup(); }
+});
+
+test("finalizer local-main sync is idempotent when main is already current", async () => {
+  const f = await fixture();
+  try {
+    const { sha, pr } = await externallyMergedCandidate(f.root, f.remote, 134);
+    const authority = new FakeAuthority(f.root, 134);
+    authority.prs.push(pr);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 134, authority });
+    assert.equal(result.localMainSync?.status, "already-current");
+    assert.equal(await git(f.root, "rev-parse", "main"), sha);
+  } finally { await f.cleanup(); }
+});
+
+test("dirty root checkout skips local-main sync without losing work or undoing finalization", async () => {
+  const f = await fixture();
+  try {
+    const { pr } = await externallyMergedRemoteOnly(f.root, f.remote, 135);
+    await writeFile(join(f.root, "README.md"), "local dirty work\n");
+    const authority = new FakeAuthority(f.root, 135);
+    authority.prs.push(pr);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 135, authority });
+    assert.equal(result.outcome, "finalized");
+    assert.equal(result.localMainSync?.status, "skipped");
+    assert.equal(result.localMainSync.reason, "dirty root checkout");
+    assert.equal(await git(f.root, "status", "--porcelain"), "M README.md");
+    assert.match(await git(f.root, "diff", "--", "README.md"), /local dirty work/);
+  } finally { await f.cleanup(); }
+});
+
+test("diverged or ahead local main is not reset, rebased, or merged during convenience sync", async () => {
+  const f = await fixture();
+  try {
+    const { pr } = await externallyMergedRemoteOnly(f.root, f.remote, 136);
+    await writeFile(join(f.root, "local.txt"), "unique local main\n");
+    await git(f.root, "add", "local.txt");
+    await git(f.root, "commit", "-qm", "unique local main");
+    const localMain = await git(f.root, "rev-parse", "main");
+    const authority = new FakeAuthority(f.root, 136);
+    authority.prs.push(pr);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 136, authority });
+    assert.equal(result.localMainSync?.status, "skipped");
+    assert.equal(await git(f.root, "rev-parse", "main"), localMain);
+    assert.equal(await git(f.root, "rev-list", "--parents", "-n", "1", "main").then((line) => line.split(" ").length), 2);
+  } finally { await f.cleanup(); }
+});
+
+test("root checkout on another branch is not switched while local main ref fast-forwards", async () => {
+  const f = await fixture();
+  try {
+    const { sha, pr } = await externallyMergedRemoteOnly(f.root, f.remote, 137);
+    await git(f.root, "switch", "-c", "operator-topic");
+    const authority = new FakeAuthority(f.root, 137);
+    authority.prs.push(pr);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 137, authority });
+    assert.equal(result.localMainSync?.status, "fast-forwarded");
+    assert.equal(await git(f.root, "branch", "--show-current"), "operator-topic");
+    assert.equal(await git(f.root, "rev-parse", "main"), sha);
   } finally { await f.cleanup(); }
 });
 

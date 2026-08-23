@@ -157,6 +157,13 @@ export interface WorkerFactoryInput {
 
 export type WorkerFactory = (input: WorkerFactoryInput) => Promise<WorkerSession>;
 
+export interface BootstrapFinalizerLocalMainSync {
+  status: "fast-forwarded" | "already-current" | "skipped";
+  reason?: string;
+  before?: string;
+  after?: string;
+}
+
 export interface BootstrapFinalizerReport {
   ok: boolean;
   issueNumber: number;
@@ -168,6 +175,7 @@ export interface BootstrapFinalizerReport {
   issueClosed: boolean;
   worktreeRemoved: boolean;
   localBranchRemoved: boolean;
+  localMainSync?: BootstrapFinalizerLocalMainSync;
   outcome: "finalized" | "already-satisfied" | "integrated-pending-verification";
   pendingExternalVerification?: boolean;
 }

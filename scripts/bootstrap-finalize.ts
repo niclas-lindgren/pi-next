@@ -28,7 +28,9 @@ export interface BootstrapFinalizeAuthority {
 }
 
 export interface BootstrapFinalizeOptions { cwd?: string; issueNumber?: number; authority?: BootstrapFinalizeAuthority; runCommand?: CommandRunner; candidatePaths?: string[]; reporter?: (line: string) => void; lifecycleLock?: BootstrapLifecycleLock; }
-export interface BootstrapFinalizeReport { ok: boolean; issueNumber: number; branch: string; candidateSha: string; pr?: number; merged: boolean; reachable: boolean; issueClosed: boolean; worktreeRemoved: boolean; localBranchRemoved: boolean; outcome: "finalized" | "already-satisfied" | "integrated-pending-verification"; pendingExternalVerification?: boolean; }
+export type LocalMainSyncStatus = "fast-forwarded" | "already-current" | "skipped";
+export interface LocalMainSyncResult { status: LocalMainSyncStatus; reason?: string; before?: string; after?: string; }
+export interface BootstrapFinalizeReport { ok: boolean; issueNumber: number; branch: string; candidateSha: string; pr?: number; merged: boolean; reachable: boolean; issueClosed: boolean; worktreeRemoved: boolean; localBranchRemoved: boolean; localMainSync?: LocalMainSyncResult; outcome: "finalized" | "already-satisfied" | "integrated-pending-verification"; pendingExternalVerification?: boolean; }
 
 export class BootstrapFinalizeError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "BootstrapFinalizeError"; } }
 
@@ -100,6 +102,42 @@ function exactMergedPr(prs: BootstrapFinalizePr[], candidateSha: string | undefi
   }
   if (merged.length > 1) throw new BootstrapFinalizeError("AMBIGUOUS_PR", "multiple merged PRs exist for the reusable issue branch without exact candidate identity");
   return merged[0];
+}
+
+async function synchronizeLocalMain(input: { root: string; issueNumber: number; runner: CommandRunner; reporter?: (line: string) => void }): Promise<LocalMainSyncResult> {
+  const report = (result: LocalMainSyncResult): LocalMainSyncResult => {
+    if (result.status === "skipped") input.reporter?.(`bootstrap finalize #${input.issueNumber} · local-main sync skipped: ${result.reason ?? "not safely fast-forwardable"}`);
+    else if (result.status === "already-current") input.reporter?.(`bootstrap finalize #${input.issueNumber} · local main already current`);
+    else input.reporter?.(`bootstrap finalize #${input.issueNumber} · local main fast-forwarded`);
+    return result;
+  };
+
+  const entries = parseWorktrees(await git(input.root, ["worktree", "list", "--porcelain"], input.runner));
+  const canonicalRoot = entries[0]?.path ?? input.root;
+  const rootStatus = await gitRaw(canonicalRoot, ["status", "--porcelain=v1"], input.runner);
+  if (rootStatus.trimEnd().length > 0) return report({ status: "skipped", reason: "dirty root checkout" });
+
+  const localMain = await tryGit(input.root, ["rev-parse", "--verify", "refs/heads/main"], input.runner);
+  const originMain = await tryGit(input.root, ["rev-parse", "--verify", "refs/remotes/origin/main"], input.runner);
+  if (!localMain) return report({ status: "skipped", reason: "local main is missing" });
+  if (!originMain) return report({ status: "skipped", reason: "origin/main is missing" });
+  if (localMain === originMain) return report({ status: "already-current", before: localMain, after: originMain });
+  if ((await tryGit(input.root, ["merge-base", "--is-ancestor", "refs/heads/main", "refs/remotes/origin/main"], input.runner)) === undefined) {
+    return report({ status: "skipped", reason: "local main is ahead or diverged", before: localMain, after: originMain });
+  }
+
+  const mainWorktrees = entries.filter((entry) => entry.branch === "main");
+  if (mainWorktrees.length > 1) return report({ status: "skipped", reason: "multiple main worktrees" });
+  const mainWorktree = mainWorktrees[0];
+  if (mainWorktree) {
+    const mainStatus = await gitRaw(mainWorktree.path, ["status", "--porcelain=v1"], input.runner);
+    if (mainStatus.trimEnd().length > 0) return report({ status: "skipped", reason: mainWorktree.path === canonicalRoot ? "dirty root checkout" : "dirty main checkout" });
+    await git(mainWorktree.path, ["merge", "--ff-only", "origin/main"], input.runner);
+  } else {
+    await git(input.root, ["update-ref", "refs/heads/main", "refs/remotes/origin/main", "refs/heads/main"], input.runner);
+  }
+  const after = await git(input.root, ["rev-parse", "refs/heads/main"], input.runner);
+  return report({ status: after === localMain ? "already-current" : "fast-forwarded", before: localMain, after });
 }
 
 async function cleanIntegratedWorkspace(input: { root: string; worktree?: string; branch: string; issueNumber: number; runner: CommandRunner; reporter?: (line: string) => void }): Promise<{ worktreeRemoved: boolean; localBranchRemoved: boolean }> {
@@ -225,9 +263,10 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     if (!issueClosed && externalDisposition === "clear") { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
     if (!issueClosed && externalDisposition === "pending") say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`);
     const cleanup = await cleanIntegratedWorkspace({ root, worktree, branch, issueNumber, runner, reporter: say });
+    const localMainSync = await synchronizeLocalMain({ root, issueNumber, runner, reporter: say });
     const pendingExternalVerification = !issueClosed && externalDisposition === "pending";
-    say(`bootstrap finalize #${issueNumber} · ${pendingExternalVerification ? "INTEGRATED_PENDING_VERIFICATION" : "PASS"}`);
-    return { ok: true, issueNumber, branch, candidateSha, pr: alreadyMerged.number, merged: true, reachable: true, issueClosed, ...cleanup, outcome: pendingExternalVerification ? "integrated-pending-verification" : "finalized", ...(pendingExternalVerification ? { pendingExternalVerification: true } : {}) };
+    say(`bootstrap finalize #${issueNumber} · ${pendingExternalVerification ? "INTEGRATED_PENDING_VERIFICATION" : localMainSync.status === "skipped" ? `PASS · local-main sync skipped: ${localMainSync.reason ?? "not safely fast-forwardable"}` : "PASS"}`);
+    return { ok: true, issueNumber, branch, candidateSha, pr: alreadyMerged.number, merged: true, reachable: true, issueClosed, ...cleanup, localMainSync, outcome: pendingExternalVerification ? "integrated-pending-verification" : "finalized", ...(pendingExternalVerification ? { pendingExternalVerification: true } : {}) };
   }
   if (!branchExists && !worktree) throw new BootstrapFinalizeError("MISSING_CANDIDATE", `no local ${branch} and no exact merged PR evidence`);
   if (!worktree) throw new BootstrapFinalizeError("MISSING_WORKTREE", `canonical worktree for ${branch} is missing before integration`);
@@ -250,7 +289,8 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     if ((await tryGit(root, ["merge-base", "--is-ancestor", branch, "origin/main"], runner)) !== undefined) { await git(root, ["branch", "-d", branch], runner); branchRemoved = true; }
     else throw new BootstrapFinalizeError("UNINTEGRATED_BRANCH", "local branch contains work not reachable from origin/main");
     try { if (existsSync(worktree)) await rm(worktree, { recursive: true, force: true }); } catch {}
-    return { ok: true, issueNumber, branch, candidateSha, merged: false, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: branchRemoved, outcome: "already-satisfied" };
+    const localMainSync = await synchronizeLocalMain({ root, issueNumber, runner, reporter: say });
+    return { ok: true, issueNumber, branch, candidateSha, merged: false, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: branchRemoved, localMainSync, outcome: "already-satisfied" };
   }
   for (const check of REQUIRED_CHECKS) await sh(worktree, check, runner);
   await writeVerifiedFinalizationCandidateProof({
@@ -297,9 +337,10 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
   if (!issueClosed && externalDisposition === "clear") { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
   if (!issueClosed && externalDisposition === "pending") say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`);
   const cleanup = await cleanIntegratedWorkspace({ root, worktree, branch, issueNumber, runner, reporter: say });
+  const localMainSync = await synchronizeLocalMain({ root, issueNumber, runner, reporter: say });
   const pendingExternalVerification = !issueClosed && externalDisposition === "pending";
-  say(`bootstrap finalize #${issueNumber} · ${pendingExternalVerification ? "INTEGRATED_PENDING_VERIFICATION" : "PASS"}`);
-  return { ok: true, issueNumber, branch, candidateSha, pr: pr.number, merged: true, reachable, issueClosed, ...cleanup, outcome: pendingExternalVerification ? "integrated-pending-verification" : "finalized", ...(pendingExternalVerification ? { pendingExternalVerification: true } : {}) };
+  say(`bootstrap finalize #${issueNumber} · ${pendingExternalVerification ? "INTEGRATED_PENDING_VERIFICATION" : localMainSync.status === "skipped" ? `PASS · local-main sync skipped: ${localMainSync.reason ?? "not safely fast-forwardable"}` : "PASS"}`);
+  return { ok: true, issueNumber, branch, candidateSha, pr: pr.number, merged: true, reachable, issueClosed, ...cleanup, localMainSync, outcome: pendingExternalVerification ? "integrated-pending-verification" : "finalized", ...(pendingExternalVerification ? { pendingExternalVerification: true } : {}) };
 }
 
 export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {}): Promise<BootstrapFinalizeReport> {
