@@ -12,13 +12,15 @@ export type CommandRunner = (command: string, args: string[], options: { cwd: st
 
 export interface BootstrapFinalizeIssue { number: number; title: string; body?: string; state: "OPEN" | "CLOSED"; updatedAt?: string; comments?: unknown[]; labels?: string[]; }
 export interface BootstrapFinalizePr { number: number; headRefName: string; headSha: string; baseRefName: string; state: "OPEN" | "MERGED" | "CLOSED"; mergeCommitSha?: string; }
-export type CheckConclusion = "PASS" | "FAIL" | "TIMEOUT" | "PENDING";
+export type CiState = "PASS" | "FAIL" | "PENDING" | "TIMEOUT" | "NONE" | "UNKNOWN";
+export type CheckConclusion = CiState | "MISSING";
+export interface CiEvaluation { state: CheckConclusion; reason?: string; }
 
 export interface BootstrapFinalizeAuthority {
   fetchIssue(issueNumber: number, cwd: string): Promise<BootstrapFinalizeIssue>;
   listPullRequests(branch: string, cwd: string): Promise<BootstrapFinalizePr[]>;
   createPullRequest(input: { issue: BootstrapFinalizeIssue; branch: string; headSha: string; cwd: string }): Promise<BootstrapFinalizePr>;
-  waitForChecks(input: { pr: BootstrapFinalizePr; headSha: string; cwd: string }): Promise<CheckConclusion>;
+  waitForChecks(input: { pr: BootstrapFinalizePr; headSha: string; cwd: string; issueNumber?: number; reporter?: (line: string) => void }): Promise<CheckConclusion | CiEvaluation>;
   mergePullRequest(input: { pr: BootstrapFinalizePr; headSha: string; cwd: string }): Promise<BootstrapFinalizePr>;
   closeIssue(issueNumber: number, cwd: string): Promise<void>;
 }
@@ -79,11 +81,70 @@ async function findWorktree(root: string, branch: string, issue: number, runner:
 async function changedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const s = await gitRaw(worktree, ["status", "--porcelain=v1"], runner); return [...new Set(s.split("\n").filter(Boolean).map((l) => l.slice(3).split(" -> ").pop()!))].sort(); }
 async function committedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const base = await git(worktree, ["merge-base", "HEAD", "origin/main"], runner); const out = await git(worktree, ["diff", "--name-only", `${base}..HEAD`], runner); return out.split("\n").filter(Boolean).sort(); }
 
+function normalizeCiEvaluation(value: CheckConclusion | CiEvaluation): CiEvaluation { return typeof value === "string" ? { state: value } : value; }
+function isNoChecksCliResult(result: CommandResult): boolean { return result.exitCode !== 0 && /no checks|no check runs|no status checks|no checks reported|not found/i.test(`${result.stdout}\n${result.stderr}`); }
+function classifyCheckRows(rows: Array<{ state?: string | null; conclusion?: string | null; bucket?: string | null }>): CiState {
+  if (rows.length === 0) return "NONE";
+  const values = rows.map((row) => `${row.state ?? ""} ${row.conclusion ?? ""} ${row.bucket ?? ""}`.trim());
+  if (values.some((value) => /fail|failure|error|cancel|timed[_ -]?out|action_required/i.test(value))) return "FAIL";
+  if (values.some((value) => /queued|pending|progress|running|waiting|requested|expected/i.test(value))) return "PENDING";
+  if (values.every((value) => /pass|success|skip|neutral|completed/i.test(value))) return "PASS";
+  return "UNKNOWN";
+}
+function parseRequiredStatusContexts(text: string): string[] { const raw = JSON.parse(text) as { contexts?: unknown; checks?: Array<{ context?: unknown }> }; return [...(Array.isArray(raw.contexts) ? raw.contexts : []), ...(Array.isArray(raw.checks) ? raw.checks.map((c) => c.context) : [])].filter((v): v is string => typeof v === "string" && v.length > 0); }
+
+export function classifyCiEvidence(input: { checkRows: Array<{ name?: string | null; state?: string | null; conclusion?: string | null; bucket?: string | null }>; requiredContexts?: string[]; checksUnavailable?: boolean; noChecksCliExit?: boolean }): CiEvaluation {
+  if (input.checksUnavailable) return { state: "UNKNOWN", reason: "CI provider unavailable" };
+  const requiredContexts = input.requiredContexts ?? [];
+  const state = classifyCheckRows(input.checkRows);
+  if (state === "NONE") return requiredContexts.length > 0 ? { state: "MISSING", reason: `required checks missing: ${requiredContexts.join(", ")}` } : { state: "NONE", reason: input.noChecksCliExit ? "no checks reported by GitHub CLI" : "no checks reported" };
+  if (requiredContexts.length === 0) return { state };
+  const rowsByName = new Map(input.checkRows.map((row) => [String((row as { name?: unknown }).name ?? row.state ?? ""), row]));
+  const missing = requiredContexts.filter((context) => !rowsByName.has(context));
+  if (missing.length > 0) return { state: "MISSING", reason: `required checks missing: ${missing.join(", ")}` };
+  return { state };
+}
+
 class GhAuthority implements BootstrapFinalizeAuthority {
   async fetchIssue(issueNumber: number, cwd: string): Promise<BootstrapFinalizeIssue> { const r = await runCommand("gh", ["issue", "view", String(issueNumber), "--json", "number,title,body,state,updatedAt,comments,labels"], { cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("AUTHORITY_FAILED", r.stderr || r.stdout); const raw = JSON.parse(r.stdout) as { number: number; title: string; body?: string; state?: string; updatedAt?: string; comments?: unknown[]; labels?: Array<{ name?: string } | string> }; const state: "OPEN" | "CLOSED" = raw.state === "CLOSED" ? "CLOSED" : "OPEN"; return { number: raw.number, title: raw.title, body: raw.body ?? "", state, updatedAt: raw.updatedAt, comments: raw.comments ?? [], labels: (raw.labels ?? []).map((l: { name?: string } | string) => typeof l === "string" ? l : l.name).filter((label): label is string => Boolean(label)) }; }
   async listPullRequests(branch: string, cwd: string): Promise<BootstrapFinalizePr[]> { const r = await runCommand("gh", ["pr", "list", "--head", branch, "--base", "main", "--state", "all", "--json", "number,headRefName,headRefOid,baseRefName,state,mergeCommit"], { cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("AUTHORITY_FAILED", r.stderr || r.stdout); return (JSON.parse(r.stdout) as Array<{ number: number; headRefName: string; headRefOid: string; baseRefName: string; state: string; mergeCommit?: { oid?: string } }>).map((p): BootstrapFinalizePr => ({ number: p.number, headRefName: p.headRefName, headSha: p.headRefOid, baseRefName: p.baseRefName, state: p.state === "MERGED" ? "MERGED" : p.state === "CLOSED" ? "CLOSED" : "OPEN", mergeCommitSha: p.mergeCommit?.oid })); }
   async createPullRequest(input: { issue: BootstrapFinalizeIssue; branch: string; headSha: string; cwd: string }): Promise<BootstrapFinalizePr> { const r = await runCommand("gh", ["pr", "create", "--base", "main", "--head", input.branch, "--title", commitMessage(input.issue), "--body", `Finalizes #${input.issue.number}.`], { cwd: input.cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("PR_FAILED", r.stderr || r.stdout); const prs = await this.listPullRequests(input.branch, input.cwd); return prs.find((p: BootstrapFinalizePr) => p.headSha === input.headSha && p.state === "OPEN") ?? prs[0]!; }
-  async waitForChecks(input: { pr: BootstrapFinalizePr; headSha: string; cwd: string }) { for (let i = 0; i < 20; i++) { const r = await runCommand("gh", ["pr", "checks", String(input.pr.number), "--json", "state"], { cwd: input.cwd }); if (r.exitCode !== 0) return "FAIL"; const states = JSON.parse(r.stdout) as Array<{ state: string }>; if (states.length === 0 || states.every((s) => /PASS|SUCCESS|SKIP/i.test(s.state))) return "PASS"; if (states.some((s) => /FAIL|ERROR|CANCEL/i.test(s.state))) return "FAIL"; await new Promise((res) => setTimeout(res, 5_000)); } return "TIMEOUT"; }
+  async waitForChecks(input: { pr: BootstrapFinalizePr; headSha: string; cwd: string; issueNumber?: number; reporter?: (line: string) => void }): Promise<CiEvaluation> {
+    const required = await this.requiredStatusContexts(input.cwd);
+    if (required === undefined) return { state: "UNKNOWN", reason: "required-check policy unavailable" };
+    const started = Date.now();
+    for (let i = 0; i < 20; i++) {
+      const r = await runCommand("gh", ["pr", "checks", String(input.pr.number), "--json", "name,state,conclusion,bucket"], { cwd: input.cwd });
+      let evaluation: CiEvaluation;
+      if (r.exitCode !== 0 && !isNoChecksCliResult(r)) return { state: "UNKNOWN", reason: (r.stderr || r.stdout).trim() || "gh pr checks unavailable" };
+      try {
+        const rows = r.exitCode === 0 ? JSON.parse(r.stdout) as Array<{ name?: string; state?: string; conclusion?: string; bucket?: string }> : [];
+        evaluation = classifyCiEvidence({ checkRows: rows, requiredContexts: required, noChecksCliExit: r.exitCode !== 0 });
+      } catch (error) { return { state: "UNKNOWN", reason: `could not parse gh pr checks output: ${error instanceof Error ? error.message : String(error)}` }; }
+      if (evaluation.state === "PENDING") {
+        const elapsed = Math.floor((Date.now() - started) / 1000);
+        input.reporter?.(`bootstrap finalize #${input.issueNumber ?? input.pr.number} · CI · waiting · elapsed=${elapsed}s`);
+        await new Promise((res) => setTimeout(res, 5_000));
+        continue;
+      }
+      return evaluation;
+    }
+    return { state: "TIMEOUT", reason: "required checks still pending after bounded polling" };
+  }
+  private async requiredStatusContexts(cwd: string): Promise<string[] | undefined> {
+    const repo = await runCommand("gh", ["repo", "view", "--json", "nameWithOwner"], { cwd });
+    if (repo.exitCode !== 0) return undefined;
+    let nameWithOwner = "";
+    try { nameWithOwner = (JSON.parse(repo.stdout) as { nameWithOwner?: string }).nameWithOwner ?? ""; } catch { return undefined; }
+    if (!nameWithOwner) return undefined;
+    const protection = await runCommand("gh", ["api", `repos/${nameWithOwner}/branches/main/protection/required_status_checks`], { cwd });
+    if (protection.exitCode !== 0) {
+      const text = `${protection.stdout}\n${protection.stderr}`;
+      if (/404|not found|branch not protected/i.test(text)) return [];
+      return undefined;
+    }
+    try { return parseRequiredStatusContexts(protection.stdout); } catch { return undefined; }
+  }
   async mergePullRequest(input: { pr: BootstrapFinalizePr; headSha: string; cwd: string }) { const r = await runCommand("gh", ["pr", "merge", String(input.pr.number), "--merge", "--delete-branch=false"], { cwd: input.cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("MERGE_FAILED", r.stderr || r.stdout); return { ...input.pr, state: "MERGED" as const }; }
   async closeIssue(issueNumber: number, cwd: string) { const r = await runCommand("gh", ["issue", "close", String(issueNumber), "--comment", "Finalized by bootstrap finalizer after merge reachability proof."], { cwd }); if (r.exitCode !== 0) throw new BootstrapFinalizeError("CLOSE_FAILED", r.stderr || r.stdout); }
 }
@@ -144,11 +205,14 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
   if (!pr) pr = await authority.createPullRequest({ issue, branch, headSha: candidateSha, cwd: root });
   say(`bootstrap finalize #${issueNumber} · PR #${pr.number} ready`);
   if (pr.state !== "MERGED") {
-    const checks = await authority.waitForChecks({ pr, headSha: candidateSha, cwd: root });
-    if (checks !== "PASS") throw new BootstrapFinalizeError("CI_NOT_PASSING", `required CI ${checks}`);
+    const checks = normalizeCiEvaluation(await authority.waitForChecks({ pr, headSha: candidateSha, cwd: root, issueNumber, reporter: say }));
+    if (checks.state === "NONE") say(`bootstrap finalize #${issueNumber} · CI · no required checks`);
+    else if (checks.state === "PASS") say(`bootstrap finalize #${issueNumber} · CI · PASS`);
+    else if (checks.state === "MISSING") throw new BootstrapFinalizeError("CI_MISSING", checks.reason ?? "required CI checks are missing");
+    else if (checks.state === "UNKNOWN") throw new BootstrapFinalizeError("CI_UNKNOWN", checks.reason ?? "required CI could not be evaluated");
+    else throw new BootstrapFinalizeError("CI_NOT_PASSING", `required CI ${checks.state}${checks.reason ? `: ${checks.reason}` : ""}`);
     const remoteHead = await git(root, ["ls-remote", "origin", `refs/heads/${branch}`], runner);
     if (!remoteHead.startsWith(candidateSha)) throw new BootstrapFinalizeError("CANDIDATE_CHANGED", "branch changed while waiting for CI");
-    say(`bootstrap finalize #${issueNumber} · CI PASS`);
     pr = await authority.mergePullRequest({ pr, headSha: candidateSha, cwd: root });
     say(`bootstrap finalize #${issueNumber} · merged ${pr.mergeCommitSha ?? ""}`.trim());
   }

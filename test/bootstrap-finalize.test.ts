@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 
-import { BootstrapFinalizeError, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr } from "../scripts/bootstrap-finalize.ts";
+import { BootstrapFinalizeError, classifyCiEvidence, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation } from "../scripts/bootstrap-finalize.ts";
 
 const exec = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> { return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim(); }
@@ -51,13 +51,25 @@ async function dirtyTrackedCandidate(root: string, issue: number, file = "README
 class FakeAuthority implements BootstrapFinalizeAuthority {
   issue: BootstrapFinalizeIssue;
   prs: BootstrapFinalizePr[] = [];
-  checks: "PASS" | "FAIL" = "PASS";
+  checks: CheckConclusion | CiEvaluation | Array<CheckConclusion | CiEvaluation> = "PASS";
   closed = false;
   constructor(private root: string, issueNumber: number) { this.issue = { number: issueNumber, title: "feat(finalize): add helper", state: "OPEN" }; }
   async fetchIssue() { return { ...this.issue, state: this.closed ? "CLOSED" as const : this.issue.state }; }
   async listPullRequests(branch: string) { return this.prs.filter((p) => p.headRefName === branch); }
   async createPullRequest(input: { branch: string; headSha: string }) { const pr = { number: this.prs.length + 1, headRefName: input.branch, headSha: input.headSha, baseRefName: "main", state: "OPEN" as const }; this.prs.push(pr); return pr; }
-  async waitForChecks() { return this.checks; }
+  async waitForChecks(input: { reporter?: (line: string) => void; issueNumber?: number }) {
+    if (Array.isArray(this.checks)) {
+      for (let i = 0; i < this.checks.length; i++) {
+        const value = this.checks[i]!;
+        if ((typeof value === "string" ? value : value.state) !== "PENDING") return value;
+        input.reporter?.(`bootstrap finalize #${input.issueNumber ?? this.issue.number} · CI · waiting · elapsed=${i}s`);
+      }
+      return "TIMEOUT" as const;
+    }
+    const value = this.checks;
+    if ((typeof value === "string" ? value : value.state) === "PENDING") input.reporter?.(`bootstrap finalize #${input.issueNumber ?? this.issue.number} · CI · waiting · elapsed=0s`);
+    return value;
+  }
   async mergePullRequest(input: { pr: BootstrapFinalizePr; headSha: string }) { await git(this.root, "fetch", "origin", input.pr.headRefName); await git(this.root, "switch", "main"); await git(this.root, "merge", "--ff-only", input.headSha); await git(this.root, "push", "-q", "origin", "main"); input.pr.state = "MERGED"; input.pr.mergeCommitSha = input.headSha; return input.pr; }
   async closeIssue() { this.closed = true; this.issue.state = "CLOSED"; }
 }
@@ -145,6 +157,80 @@ test("failed CI preserves worktree and prevents merge, closure, and cleanup", as
     assert.equal(await git(f.remote, "rev-parse", "main"), await git(f.root, "rev-parse", "origin/main"));
     assert.ok(await git(worktree, "status", "--porcelain") === "");
   } finally { await f.cleanup(); }
+});
+
+test("no checks configured or reported proceeds without reporting required CI FAIL", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 112);
+    const authority = new FakeAuthority(f.root, 112);
+    authority.checks = { state: "NONE", reason: "candidate efeb39b had no workflow runs/status contexts" };
+    const lines: string[] = [];
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 112, authority, reporter: (line) => lines.push(line) });
+    assert.equal(result.ok, true);
+    assert.ok(lines.includes("bootstrap finalize #112 · CI · no required checks"));
+    assert.doesNotMatch(lines.join("\n"), /required CI FAIL/);
+  } finally { await f.cleanup(); }
+});
+
+test("missing required checks fail with explicit CI_MISSING rather than ordinary CI_FAIL", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 101);
+    const authority = new FakeAuthority(f.root, 101);
+    authority.checks = { state: "MISSING", reason: "required checks missing: npm test" };
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 101, authority }), "CI_MISSING");
+    assert.equal(authority.closed, false);
+  } finally { await f.cleanup(); }
+});
+
+test("CI unknown transport state fails closed distinctly", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 101);
+    const authority = new FakeAuthority(f.root, 101);
+    authority.checks = { state: "UNKNOWN", reason: "gh pr checks unavailable" };
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 101, authority }), "CI_UNKNOWN");
+  } finally { await f.cleanup(); }
+});
+
+test("pending CI progress is observable and can resolve on a bounded retry", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 101);
+    const authority = new FakeAuthority(f.root, 101);
+    authority.checks = [{ state: "PENDING", reason: "queued" }, "PASS"];
+    const lines: string[] = [];
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 101, authority, reporter: (line) => lines.push(line) });
+    assert.equal(result.ok, true);
+    assert.ok(lines.some((line) => /CI · waiting · elapsed=0s/.test(line)));
+    assert.ok(lines.includes("bootstrap finalize #101 · CI · PASS"));
+  } finally { await f.cleanup(); }
+});
+
+test("unresolved pending CI times out and preserves the candidate", async () => {
+  const f = await fixture();
+  try {
+    const worktree = await dirtyCandidate(f.root, 101);
+    const authority = new FakeAuthority(f.root, 101);
+    authority.checks = [{ state: "PENDING", reason: "queued" }, { state: "PENDING", reason: "running" }];
+    const lines: string[] = [];
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 101, authority, reporter: (line) => lines.push(line) }), "CI_NOT_PASSING");
+    assert.ok(lines.some((line) => /CI · waiting · elapsed=0s/.test(line)));
+    assert.ok(lines.some((line) => /CI · waiting · elapsed=1s/.test(line)));
+    assert.ok(await git(worktree, "status", "--porcelain") === "");
+  } finally { await f.cleanup(); }
+});
+
+test("CI evidence classifier distinguishes absence, missing policy, failures, pending, pass, and unknown", () => {
+  assert.deepEqual(classifyCiEvidence({ checkRows: [], requiredContexts: [], noChecksCliExit: true }).state, "NONE");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [], requiredContexts: ["npm test"] }).state, "MISSING");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "FAIL" }], requiredContexts: ["npm test"] }).state, "FAIL");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "SUCCESS" }], requiredContexts: ["npm test"] }).state, "PASS");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "QUEUED" }], requiredContexts: ["npm test"] }).state, "PENDING");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", conclusion: "CANCELLED" }], requiredContexts: ["npm test"] }).state, "FAIL");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "???" }], requiredContexts: ["npm test"] }).state, "UNKNOWN");
+  assert.deepEqual(classifyCiEvidence({ checkRows: [], checksUnavailable: true }).state, "UNKNOWN");
 });
 
 test("first unstaged tracked candidate path preserves porcelain status columns", async () => {
