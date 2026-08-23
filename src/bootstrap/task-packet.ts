@@ -33,14 +33,22 @@ export async function loadContextFiles(cwd: string, issue: Issue): Promise<Array
   return files;
 }
 
+function workerContextFile(file: { path: string; content: string }, role: WorkerRole): { path: string; content: string } {
+  if (file.path !== "AGENTS.md" || role === "review") return file;
+  return {
+    ...file,
+    content: file.content.replace(/\n## Required issue loop\n[\s\S]*?(?=\n## Controller and recovery regression testing\n|$)/, "\n## Required issue loop\n\nLifecycle progression, authority refresh, promotion, closure, and cleanup are kernel-owned and are intentionally omitted from this coding-worker packet.\n"),
+  };
+}
+
 export function buildWorkerPrompt(issue: Issue, cwd: string, contextFiles: Array<{ path: string; content: string }>, role: WorkerRole, failureEvidence?: string, candidate?: string): string {
   const comments = issue.comments.length ? issue.comments.map(commentText).join("\n\n") : "(no comments)";
-  const context = contextFiles.map((file) => `--- BEGIN ${file.path} ---\n${file.content}\n--- END ${file.path} ---`).join("\n\n");
+  const context = contextFiles.map((file) => workerContextFile(file, role)).map((file) => `--- BEGIN ${file.path} ---\n${file.content}\n--- END ${file.path} ---`).join("\n\n");
   const roleInstruction = role === "review"
-    ? "Review the exact candidate evidence for correctness and contract violations. Do not edit files, run mutating commands, merge, push, close issues, or claim acceptance. Return only the structured result contract: {\"verdict\":\"pass\"} or {\"verdict\":\"findings\",\"findings\":[{\"severity\":\"blocking\"|\"warning\",\"path\":\"optional\",\"summary\":\"concise bounded finding\"}]}. Do not include transcript, hidden reasoning, or unbounded prose."
+    ? "Review the exact candidate evidence for correctness and contract violations. Do not edit files. Use the structured result contract: {\"verdict\":\"pass\"} or {\"verdict\":\"findings\",\"findings\":[{\"severity\":\"blocking\"|\"warning\",\"path\":\"optional\",\"summary\":\"concise bounded finding\"}]}."
     : role === "repair"
-      ? "This is one fresh repair attempt. Inspect the current worktree and repair only the reported deterministic failures. Do not merge, push, close the issue, release authority, finalize, or grade your own work."
-      : "Implement the issue completely in this worktree. Do not merge, push, close the issue, release authority, finalize, or grade your own work.";
+      ? "This is one fresh repair attempt. Inspect the current worktree and repair only the reported deterministic failures."
+      : "Implement the issue completely in this worktree.";
   const packet = [
     `You are the ${role} worker for pi-next issue #${issue.number}.`,
     roleInstruction,

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import type { WorkerAdapter, WorkerTask, WorkerTerminalResult } from "../coordination/worker-adapter.ts";
 import { piNextRuntimeIdentity } from "../version.ts";
+import { buildContextPacket, type BuiltContextPacket, type ContextStrategyId } from "./context-strategies.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +35,7 @@ export interface CanaryRunResult {
   adapter: { id: string; version: string; model?: string };
   harness: { name: "pi-next-worker-eval"; version: string; fixtureFormatVersion: number };
   usage?: WorkerTerminalResult["telemetry"]["usage"];
+  context?: Pick<BuiltContextPacket, "strategy" | "estimatedPromptTokens" | "repoMap" | "skills">;
   turns?: number;
   toolCalls?: number;
   retries: number;
@@ -54,6 +56,8 @@ export interface CanaryAggregateReport {
   humanInterventionRequired: boolean;
   totalTokens?: number;
   totalCost?: number;
+  totalEstimatedPromptTokens: number;
+  totalEstimatedSkillTokens: number;
   tokensPerVerifiedCompletion?: number;
   costPerVerifiedCompletion?: number;
   results: CanaryRunResult[];
@@ -177,16 +181,15 @@ async function grade(cwd: string, fixture: WorkerCanaryFixture): Promise<string[
   return failures;
 }
 
-function taskPrompt(fixture: WorkerCanaryFixture): string {
-  return `You are an implementation worker for an isolated disposable TypeScript/git canary fixture.\n\nTask: ${fixture.task}\n\nConstraints:\n- Work only in the supplied cwd.\n- Do not use gh, git push, git merge, branch/worktree operations, or lifecycle authority actions.\n- Worker prose is not graded; make the repository correct.\n- Prefer running npm test before stopping.\n`;
-}
+export interface CanaryRunOptions { contextStrategy?: ContextStrategyId }
 
-export async function runWorkerCanaryFixture(adapter: WorkerAdapter, fixture: WorkerCanaryFixture): Promise<CanaryRunResult> {
+export async function runWorkerCanaryFixture(adapter: WorkerAdapter, fixture: WorkerCanaryFixture, options: CanaryRunOptions = {}): Promise<CanaryRunResult> {
   const cwd = await mkdtemp(join(tmpdir(), `pi-next-canary-${fixture.id}-`));
   const started = Date.now();
   try {
     await writeFixture(cwd, fixture);
-    const task: WorkerTask = { cwd, prompt: taskPrompt(fixture), phase: "implementation", runId: `eval-${fixture.id}`, dispatch: { version: 1, role: "implementation", capabilities: { kind: "mutable-owner" } } as any };
+    const context = await buildContextPacket({ cwd, task: fixture.task, strategy: options.contextStrategy ?? "default", role: "implementation" });
+    const task: WorkerTask = { cwd, prompt: context.prompt, phase: "implementation", runId: `eval-${fixture.id}`, dispatch: { version: 1, role: "implementation", capabilities: { kind: "mutable-owner" }, contextStrategy: context.strategy, selectedSkills: context.skills.selected, loadedSkills: context.skills.loaded } as any };
     const worker = await adapter.run(task, new AbortController().signal);
     const graderFailures = await grade(cwd, fixture);
     const wallTimeMs = Date.now() - started;
@@ -200,6 +203,7 @@ export async function runWorkerCanaryFixture(adapter: WorkerAdapter, fixture: Wo
       adapter: { id: adapter.id, version: adapter.version, model: worker.telemetry.model },
       harness: { name: "pi-next-worker-eval", version: piNextRuntimeIdentity().version, fixtureFormatVersion: WORKER_CANARY_FIXTURE_FORMAT_VERSION },
       usage: worker.telemetry.usage,
+      context: { strategy: context.strategy, estimatedPromptTokens: context.estimatedPromptTokens, repoMap: context.repoMap, skills: context.skills },
       turns: worker.telemetry.activity?.modelRounds,
       toolCalls: worker.telemetry.activity?.toolCalls,
       retries: 0,
@@ -210,14 +214,16 @@ export async function runWorkerCanaryFixture(adapter: WorkerAdapter, fixture: Wo
   }
 }
 
-export async function runWorkerCanaryCorpus(adapter: WorkerAdapter, fixtures: readonly WorkerCanaryFixture[] = workerCanaryFixtures): Promise<CanaryAggregateReport> {
+export async function runWorkerCanaryCorpus(adapter: WorkerAdapter, fixtures: readonly WorkerCanaryFixture[] = workerCanaryFixtures, options: CanaryRunOptions = {}): Promise<CanaryAggregateReport> {
   const results: CanaryRunResult[] = [];
-  for (const fixture of fixtures) results.push(await runWorkerCanaryFixture(adapter, fixture));
+  for (const fixture of fixtures) results.push(await runWorkerCanaryFixture(adapter, fixture, options));
   const passed = results.filter((result) => result.passed).length;
   const totalTokens = results.some((r) => r.usage) ? results.reduce((sum, r) => sum + (r.usage?.totalTokens ?? 0), 0) : undefined;
   const totalCost = results.some((r) => r.usage) ? results.reduce((sum, r) => sum + (r.usage?.cost ?? 0), 0) : undefined;
   const totalTurns = results.some((r) => r.turns !== undefined) ? results.reduce((sum, r) => sum + (r.turns ?? 0), 0) : undefined;
   const totalToolCalls = results.some((r) => r.toolCalls !== undefined) ? results.reduce((sum, r) => sum + (r.toolCalls ?? 0), 0) : undefined;
+  const totalEstimatedPromptTokens = results.reduce((sum, r) => sum + (r.context?.estimatedPromptTokens ?? 0), 0);
+  const totalEstimatedSkillTokens = results.reduce((sum, r) => sum + (r.context?.skills.totalEstimatedTokens ?? 0), 0);
   return {
     generatedAt: new Date().toISOString(),
     adapter: { id: adapter.id, version: adapter.version },
@@ -230,6 +236,8 @@ export async function runWorkerCanaryCorpus(adapter: WorkerAdapter, fixtures: re
     totalToolCalls,
     totalRetries: results.reduce((sum, result) => sum + result.retries, 0),
     humanInterventionRequired: results.some((result) => result.humanInterventionRequired),
+    totalEstimatedPromptTokens,
+    totalEstimatedSkillTokens,
     totalTokens,
     totalCost,
     tokensPerVerifiedCompletion: totalTokens !== undefined && passed > 0 ? totalTokens / passed : undefined,

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { buildBoundedRepoMap, buildContextPacket, resolveSkillContext } from "../src/evaluation/context-strategies.ts";
 import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter.ts";
 import { runWorkerCanaryCorpus, runWorkerCanaryFixture, workerCanaryFixtures, WORKER_CANARY_FIXTURE_FORMAT_VERSION } from "../src/evaluation/worker-canaries.ts";
 
@@ -47,6 +52,7 @@ test("aggregate report includes tokens and cost per verified completion when ava
   const report = await runWorkerCanaryCorpus(adapter, [fixture]);
   assert.equal(report.passed, 1);
   assert.equal(report.totalTokens, 11);
+  assert.ok(report.totalEstimatedPromptTokens > 0);
   assert.equal(report.tokensPerVerifiedCompletion, 11);
   assert.equal(report.costPerVerifiedCompletion, 0.02);
 });
@@ -73,6 +79,47 @@ test("checked-in Pi baseline records a real graded corpus run", () => {
     assert.equal(typeof result.humanInterventionRequired, "boolean");
     assert.ok(!result.graderFailures?.some((failure: string) => /done|completed/i.test(failure)), "grader failures must be mechanical, not worker prose");
   }
+});
+
+test("context strategies keep unavailable payload out of worker prompt and telemetry", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-context-test-"));
+  try {
+    await mkdir(join(cwd, "src"), { recursive: true });
+    await writeFile(join(cwd, "src", "math.ts"), "export function add(a:number,b:number){return a-b}\n", "utf8");
+    const minimal = await buildContextPacket({ cwd, task: "Fix add and run tests", strategy: "minimal" });
+    assert.equal(minimal.skills.loaded.length, 0);
+    assert.equal(minimal.skills.totalEstimatedTokens, 0);
+    assert.ok(!minimal.prompt.includes("git push"), "minimal coding packet should not duplicate lifecycle authority prose");
+
+    const resolver = await buildContextPacket({ cwd, task: "Repair the failing regression test for add", strategy: "resolver" });
+    assert.ok(resolver.skills.available > resolver.skills.loaded.length);
+    assert.ok(resolver.skills.loaded.some((skill) => skill.id === "matt-pocock.tdd"));
+    assert.ok(resolver.skills.loaded.every((skill) => resolver.prompt.includes(skill.id)));
+    assert.ok(!resolver.prompt.includes("expanded.frontend-browser-checks"), "available but unselected expanded skills must add no payload");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("bounded repo map stays within explicit budget", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-repo-map-test-"));
+  try {
+    await mkdir(join(cwd, "src"), { recursive: true });
+    await writeFile(join(cwd, "src", "config.ts"), "export const DEFAULT_TIMEOUT_MS = 30000;\n", "utf8");
+    await writeFile(join(cwd, "README.md"), "Default worker timeout: 45000 ms.\n", "utf8");
+    const map = await buildBoundedRepoMap(cwd, "update config timeout from docs", { maxBytes: 180, maxFiles: 2 });
+    assert.ok(Buffer.byteLength(map, "utf8") <= 180);
+    assert.match(map, /Repo-map files included: [0-2]/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("verification discipline is explicit rather than globally mandatory", () => {
+  const baseline = resolveSkillContext({ role: "implementation", task: "Fix add", strategy: "resolver" });
+  assert.ok(!baseline.selected.some((skill) => skill.id === "superpowers.verification-before-completion"));
+  const explicit = resolveSkillContext({ role: "implementation", task: "Fix add", strategy: "verification-discipline" });
+  assert.ok(explicit.selected.some((skill) => skill.id === "superpowers.verification-before-completion"));
 });
 
 test("independent grader can pass a mechanically correct candidate", async () => {
