@@ -7,6 +7,7 @@ import { extractCommitEvidenceShas } from "./acceptance-verification";
 import { changeFiles, conflictFiles, stagedFiles, workingFingerprint } from "./change-state";
 import { failureReasonCode, recordLifecycleEvent } from "./lifecycle-telemetry";
 import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
+import { emitLifecycleCheckpoint } from "../../src/coordination/lifecycle-checkpoints.ts";
 import { syncProjectStatus, type ProjectStatusAuthority } from "./project-status";
 import { commitsReachableFromRef, formatUnreachableCommitDetails } from "./util-core";
 import { issueWorkspaceIdentity } from "./issue-authority.ts";
@@ -65,9 +66,13 @@ function safePath(path: string): string {
   return value;
 }
 
-async function commitExplicitPaths(cwd: string, paths: string[], message: string): Promise<string> {
+async function commitExplicitPaths(cwd: string, paths: string[], message: string): Promise<string | undefined> {
   const normalized = paths.map(safePath);
   await gitMutation(cwd, ["add", "--", ...normalized]);
+  const hasStagedChanges = await git(cwd, ["diff", "--cached", "--quiet", "--", ...normalized])
+    .then(() => false)
+    .catch(() => true);
+  if (!hasStagedChanges) return undefined;
   await gitMutation(cwd, ["commit", "-m", message]);
   return git(cwd, ["rev-parse", "--short", "HEAD"]);
 }
@@ -157,17 +162,29 @@ export async function checkpointCommit(
   const branch = await ensureCheckpointBranch(cwd, issueNumber, runId);
   const current = await git(cwd, ["branch", "--show-current"]);
   if (current === "main" || current === "master") throw new Error("Checkpoint commits cannot target the production branch");
-  const hash = await commitExplicitPaths(cwd, paths, message);
+  emitLifecycleCheckpoint("candidate_committed", "before");
+  const committedHash = await commitExplicitPaths(cwd, paths, message);
+  const hash = committedHash ?? (await git(cwd, ["rev-parse", "--short", "HEAD"]));
   if (!hash) throw new Error("Checkpoint produced no commit");
   const candidateSha = await git(cwd, ["rev-parse", "HEAD"]);
-  await gitMutation(cwd, ["push", "--set-upstream", "origin", `${branch}:${branch}`]);
   recordPiLifecycleJournal(journalCwd(cwd), {
     event: "candidate_committed",
     issueNumber,
     runId,
     idempotencyKey: `candidate:${issueNumber}:${candidateSha}`,
     payload: { branch, candidateSha },
-  });
+  }, { emitCheckpoint: false });
+  emitLifecycleCheckpoint("candidate_committed", "after");
+  emitLifecycleCheckpoint("candidate_pushed", "before");
+  await gitMutation(cwd, ["push", "--set-upstream", "origin", `${branch}:${branch}`]);
+  recordPiLifecycleJournal(journalCwd(cwd), {
+    event: "candidate_pushed",
+    issueNumber,
+    runId,
+    idempotencyKey: `candidate-pushed:${issueNumber}:${candidateSha}`,
+    payload: { branch, candidateSha },
+  }, { emitCheckpoint: false });
+  emitLifecycleCheckpoint("candidate_pushed", "after");
   recordLifecycleEvent(cwd, {
     event: "checkpoint_pushed",
     issueNumber,
@@ -221,6 +238,50 @@ export async function promoteCheckpoint(
 ): Promise<{ branch: string; mergeSha: string }> {
   const branch = checkpointBranchName(issueNumber, runId);
   try {
+    const currentAtEntry = await git(cwd, ["branch", "--show-current"]);
+    if (currentAtEntry === "main" || currentAtEntry === "master") {
+      await assertCleanGitState(cwd);
+      await gitMutation(cwd, ["fetch", "origin", "main"]);
+      const candidateSha = await git(cwd, ["rev-parse", branch]).catch(() => "");
+      const localHead = await git(cwd, ["rev-parse", "HEAD"]);
+      const localContainsCandidate = candidateSha
+        ? await git(cwd, ["merge-base", "--is-ancestor", candidateSha, localHead]).then(() => true).catch(() => false)
+        : false;
+      if (localContainsCandidate) {
+        const remoteContainsCandidate = await git(cwd, ["merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main"])
+          .then(() => true)
+          .catch(() => false);
+        if (!remoteContainsCandidate) {
+          emitLifecycleCheckpoint("promotion_pushed", "before");
+          await gitMutation(cwd, ["push", "origin", `${localHead}:main`]);
+          await gitMutation(cwd, ["fetch", "origin", "main"]);
+        }
+        const remoteMainSha = await git(cwd, ["rev-parse", "refs/remotes/origin/main"]);
+        recordPiLifecycleJournal(journalCwd(cwd), {
+          event: "promotion_pushed",
+          issueNumber,
+          runId,
+          idempotencyKey: `promotion-pushed:${issueNumber}:${candidateSha}:${remoteMainSha}`,
+          payload: { branch, candidateSha, mainSha: remoteMainSha },
+        }, { emitCheckpoint: false });
+        if (!remoteContainsCandidate) emitLifecycleCheckpoint("promotion_pushed", "after");
+        recordPiLifecycleJournal(journalCwd(cwd), {
+          event: "promotion_succeeded",
+          issueNumber,
+          runId,
+          idempotencyKey: `promotion-succeeded:${issueNumber}:${candidateSha}:${remoteMainSha}`,
+          payload: { branch, candidateSha, mergeSha: remoteMainSha, mainSha: remoteMainSha },
+        });
+        recordPiLifecycleJournal(journalCwd(cwd), {
+          event: "reachability_proven",
+          issueNumber,
+          runId,
+          idempotencyKey: `reachable:${issueNumber}:${candidateSha}:${remoteMainSha}`,
+          payload: { candidateSha, mainSha: remoteMainSha },
+        });
+        return { branch, mergeSha: remoteMainSha };
+      }
+    }
     const ready = await promotionReadiness(cwd, issueNumber, runId, expectedMainSha, verificationPath);
     recordPiLifecycleJournal(journalCwd(cwd), {
       event: "promotion_started",
@@ -239,10 +300,19 @@ export async function promoteCheckpoint(
     const currentMain = await git(cwd, ["rev-parse", "HEAD"]);
     if (currentMain !== ready.mainSha) throw new Error("Local main is not the freshly fetched main; refusing promotion");
     await gitMutation(cwd, ["merge", "--no-ff", "--no-edit", ready.branch]);
-    await gitMutation(cwd, ["push", "origin", "main:main"]);
     const mergeSha = await git(cwd, ["rev-parse", "HEAD"]);
+    emitLifecycleCheckpoint("promotion_pushed", "before");
+    await gitMutation(cwd, ["push", "origin", "main:main"]);
     await gitMutation(cwd, ["fetch", "origin", "main"]);
     const remoteMainSha = await git(cwd, ["rev-parse", "refs/remotes/origin/main"]);
+    recordPiLifecycleJournal(journalCwd(cwd), {
+      event: "promotion_pushed",
+      issueNumber,
+      runId,
+      idempotencyKey: `promotion-pushed:${issueNumber}:${ready.checkpointSha}:${remoteMainSha}`,
+      payload: { branch: ready.branch, candidateSha: ready.checkpointSha, mainSha: remoteMainSha },
+    }, { emitCheckpoint: false });
+    emitLifecycleCheckpoint("promotion_pushed", "after");
     await git(cwd, ["merge-base", "--is-ancestor", ready.checkpointSha, "refs/remotes/origin/main"]);
     recordPiLifecycleJournal(journalCwd(cwd), {
       event: "promotion_succeeded",

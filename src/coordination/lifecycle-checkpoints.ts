@@ -15,7 +15,9 @@ export const RECOVERY_LIFECYCLE_CHECKPOINTS = [
   "worker_finished",
   "verification_finished",
   "candidate_committed",
+  "candidate_pushed",
   "promotion_started",
+  "promotion_pushed",
   "promotion_succeeded",
   "reachability_proven",
   "authority_reconciled",
@@ -80,19 +82,29 @@ export const RECOVERY_LIFECYCLE_CHECKPOINT_COVERAGE = {
     invariant: "promotion remains blocked unless verification evidence is current and acceptable",
   },
   candidate_committed: {
-    description: "Candidate implementation is durable as a commit SHA.",
+    description: "Candidate implementation is durable as a local commit SHA before any externally visible branch push.",
     durableJournalEvent: true,
     invariant: "restart must not duplicate the candidate commit side effect",
+  },
+  candidate_pushed: {
+    description: "The canonical issue branch has been pushed to the configured remote.",
+    durableJournalEvent: true,
+    invariant: "restart reconciles the remote branch by SHA instead of duplicating candidate commit/push side effects",
   },
   promotion_started: {
     description: "Guarded finalization/promotion has begun.",
     durableJournalEvent: true,
     invariant: "promotion retries are idempotent or fail closed against Git/authority evidence",
   },
-  promotion_succeeded: {
-    description: "Integration/push side effect is durable enough to reconcile by SHA.",
+  promotion_pushed: {
+    description: "The integration commit has been pushed to the configured remote main.",
     durableJournalEvent: true,
-    invariant: "restart must not duplicate merge or push after durable integration evidence",
+    invariant: "restart must not duplicate merge or push after remote-main integration evidence",
+  },
+  promotion_succeeded: {
+    description: "Integration success has been durably recorded after the remote-main push.",
+    durableJournalEvent: true,
+    invariant: "restart must reconcile by SHA rather than repeating durable integration side effects",
   },
   reachability_proven: {
     description: "The candidate/integration SHA is proven reachable from the configured remote main.",

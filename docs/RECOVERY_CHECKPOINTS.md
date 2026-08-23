@@ -13,7 +13,9 @@ boundaries, not internal function-call probes:
 - `worker_finished`
 - `verification_finished`
 - `candidate_committed`
+- `candidate_pushed`
 - `promotion_started`
+- `promotion_pushed`
 - `promotion_succeeded`
 - `reachability_proven`
 - `authority_reconciled`

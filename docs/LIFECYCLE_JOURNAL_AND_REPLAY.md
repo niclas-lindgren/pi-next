@@ -39,8 +39,8 @@ lease_claimed / lease_rejected / lease_taken_over / lease_released
 workspace_prepared
 worker_started / worker_finished
 verification_finished
-candidate_committed
-promotion_started / promotion_succeeded
+candidate_committed / candidate_pushed
+promotion_started / promotion_pushed / promotion_succeeded
 reachability_proven
 authority_reconciled
 pending_verification_recorded / issue_closed
@@ -54,7 +54,7 @@ The existing `.pi/runtime/pi-next-lifecycle.json` remains a bounded rolling tele
 
 The WorkerAdapter compatibility boundary records `worker_started` **before** launching the child worker and `worker_finished` or a typed failure after settlement. Only adapter identity, phase, status/code/signal, and telemetry availability are recorded; prompt and worker output are never copied into the journal.
 
-Future lifecycle code that depends on a durable transition should append the corresponding journal fact before an irreversible follow-up side effect. Stable side effects should use an `idempotencyKey` when the transition has a natural identity (for example candidate/main reachability or terminal cleanup).
+Future lifecycle code that depends on a durable transition should append the corresponding journal fact at the semantically correct mutation boundary and before any later irreversible follow-up side effect. Stable side effects should use an `idempotencyKey` when the transition has a natural identity (for example candidate/main reachability or terminal cleanup). Candidate local commit and candidate branch push are separate facts; main promotion push and promotion success recording are separate facts.
 
 ## Replay model
 

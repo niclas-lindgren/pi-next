@@ -17,4 +17,4 @@ The position is `before` or `after`; the action is `throw`, `cancel`, or explici
 
 Every checkpoint must be listed in `RECOVERY_LIFECYCLE_CHECKPOINTS` and documented in `RECOVERY_LIFECYCLE_CHECKPOINT_COVERAGE`. New recovery-sensitive transitions must update that typed coverage and the crash/restart matrix in `test/lifecycle-checkpoints.test.ts`.
 
-The current checkpoints cover selection, lease ownership, workspace preparation, authority load/reconciliation, planning, worker dispatch/settlement, verification, candidate commit, promotion/push, reachability proof, pending verification, closure, lease release, and cleanup.
+The current checkpoints cover selection, lease ownership, workspace preparation, authority load/reconciliation, planning, worker dispatch/settlement, verification, local candidate commit, candidate branch push, promotion start, remote main push, promotion success recording, reachability proof, pending verification, closure, lease release, and cleanup. Candidate commit and branch push are deliberately separate so crash/restart tests exercise the real Git mutation boundary rather than only journal append helpers.

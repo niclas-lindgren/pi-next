@@ -1,6 +1,7 @@
 {
   "extensions/pi-next/acceptance-verification.ts": "legacy cohesive verification module predating this check; refactor separately",
   "extensions/pi-next/change-state.ts": "legacy workflow state helper predating this check; refactor separately",
+  "extensions/pi-next/checkpoint.ts": "legacy checkpoint/promotion module now exercising real recovery mutation boundaries; refactor separately",
   "extensions/pi-next/commands-recovery.ts": "legacy recovery command module predating this check; refactor separately",
   "extensions/pi-next/commands.ts": "legacy command module predating this check; refactor separately",
   "extensions/pi-next/commit-safety.ts": "legacy commit safety module predating this check; refactor separately",
