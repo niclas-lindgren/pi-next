@@ -77,6 +77,10 @@ export interface PiNextConfig {
     maxPlanTasksWarning: number;
   };
   workerWatchdog: WorkerWatchdogPolicyConfig;
+  monitor: {
+    pollIntervalMs: number;
+    maxBackoffMs: number;
+  };
   /** Bounded self-assessment policy. Runtime changes remain disabled outside
    * explicitly configured/reversible actions. */
   assessment: {
@@ -139,6 +143,7 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
       verification: { softIdleMs: 180_000, hardIdleMs: 900_000, hardWallMs: 3_600_000, terminationGraceMs: 5_000 },
     },
   },
+  monitor: { pollIntervalMs: 60_000, maxBackoffMs: 600_000 },
   assessment: {
     enabled: true,
     noProgressThreshold: 2,
@@ -200,7 +205,7 @@ function cloneDefaults(): PiNextConfig {
 
 export function validatePiNextConfig(value: unknown): PiNextConfig {
   const root = object(value, "config");
-  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview", "convergence", "workerWatchdog", "assessment"], "config");
+  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "adversarialReview", "convergence", "workerWatchdog", "monitor", "assessment"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
     throw new PiNextConfigError(`config.version must be ${PI_NEXT_CONFIG_VERSION}`);
   }
@@ -352,6 +357,21 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
   }
   const workerWatchdog = { default: watchdogDefault, roles };
 
+  const monitorValue = root.monitor === undefined
+    ? DEFAULT_PI_NEXT_CONFIG.monitor as unknown as Record<string, unknown>
+    : object(root.monitor, "config.monitor");
+  rejectUnknown(monitorValue, ["pollIntervalMs", "maxBackoffMs"], "config.monitor");
+  const monitorNumber = (key: keyof PiNextConfig["monitor"], fallback: number, min: number, max: number): number => {
+    const value = monitorValue[key] === undefined ? fallback : monitorValue[key];
+    if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw new PiNextConfigError(`config.monitor.${key} must be an integer between ${min} and ${max}`);
+    return value;
+  };
+  const monitor = {
+    pollIntervalMs: monitorNumber("pollIntervalMs", DEFAULT_PI_NEXT_CONFIG.monitor.pollIntervalMs, 1_000, 86_400_000),
+    maxBackoffMs: monitorNumber("maxBackoffMs", DEFAULT_PI_NEXT_CONFIG.monitor.maxBackoffMs, 1_000, 86_400_000),
+  };
+  if (monitor.maxBackoffMs < monitor.pollIntervalMs) throw new PiNextConfigError("config.monitor.maxBackoffMs must be at least pollIntervalMs");
+
   const assessmentValue: Record<string, unknown> = root.assessment === undefined
     ? DEFAULT_PI_NEXT_CONFIG.assessment as unknown as Record<string, unknown>
     : object(root.assessment, "config.assessment");
@@ -396,6 +416,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     adversarialReview: { enabled: reviewValue.enabled, requiredRisk: reviewValue.requiredRisk, maxRounds: reviewValue.maxRounds, axes: axesValue },
     convergence,
     workerWatchdog,
+    monitor,
     assessment,
   };
 }

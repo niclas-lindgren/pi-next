@@ -42,6 +42,12 @@ import {
   type IssueLeaseAuthority,
 } from "./issue-leases.ts";
 import {
+  formatMonitorStatus,
+  getMonitor,
+  startMonitor,
+  stopMonitor,
+} from "./monitor.ts";
+import {
   quarantineInheritedArtifacts,
   quarantineLegacyRootArtifacts,
   registerPiNextLoopCommand,
@@ -586,7 +592,7 @@ export function registerPiNextCommands(
   pi.registerCommand("pi-next", {
     description: "Run the GitHub-backed pi-next workflow",
     getArgumentCompletions: (prefix) => {
-      const values = ["auto", "fresh", "plan"].filter((value) =>
+      const values = ["auto", "fresh", "plan", "monitor start", "monitor stop", "monitor status"].filter((value) =>
         value.startsWith(prefix),
       );
       return values.length
@@ -596,6 +602,23 @@ export function registerPiNextCommands(
     handler: async (args, ctx) => {
       try {
         const trimmed = args.trim();
+        if (trimmed === "monitor start") {
+          const status = startMonitor(ctx, (next) => {
+            ctx.ui.setStatus("pi-next-monitor", formatMonitorStatus(next).replace(/\n/g, " · "));
+          });
+          notifySafely(ctx, formatMonitorStatus(status), "info");
+          return;
+        }
+        if (trimmed === "monitor stop") {
+          const status = stopMonitor(ctx);
+          ctx.ui.setStatus("pi-next-monitor", undefined);
+          notifySafely(ctx, status ? formatMonitorStatus(status) : "Monitor: stopped", "info");
+          return;
+        }
+        if (trimmed === "monitor" || trimmed === "monitor status") {
+          notifySafely(ctx, formatMonitorStatus(getMonitor(ctx.cwd, sessionIdentity(ctx))?.snapshot()), "info");
+          return;
+        }
         if (trimmed === "auto") {
           // Auto is the continuous entry point. Reuse the bounded loop
           // controller so plan creation is followed by task execution,

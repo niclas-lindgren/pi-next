@@ -41,6 +41,14 @@ This is not a feature-parity exercise. Pi-next should harvest proven mechanisms 
 | Codex | structured worker events/results; sandbox/security ideas; native model/harness optimization | evaluate behind adapter |
 | Claude Agent SDK | structured headless worker execution and cancellation; native Claude optimization | evaluate behind adapter |
 
+### Monitor wake-up decisions (issue #85)
+
+- **adopt-pattern** — event-loop coalescing from small workflow schedulers: monitor mode keeps at most one in-flight scheduler execution and treats authority observations as wake hints. Changes that arrive while work is active are folded into the next authoritative selection pass instead of spawning a parallel lifecycle.
+- **adopt-pattern** — bounded polling/backoff from rate-limit-aware clients: idle monitoring performs mechanical authority reads on a conservative cadence, switches to bounded exponential backoff for transient discovery failures, and performs a fresh full selector query after recovery rather than trusting cache hints.
+- **adopt-pattern** — idle/session separation from agent harnesses: the long-lived parent host stores only bounded operational monitor state; every implementation still runs through the existing WorkerAdapter child-worker path.
+- **adopt-pattern** — durable workflow wake semantics from Temporal/OpenHands: a wake-up is not ownership proof. The existing candidate selector and lease/CAS path remains authoritative after every wake.
+- **reject** — importing a daemon, webhook server, or workflow-orchestration framework merely to poll an authority.
+
 ### Worker canary harness decisions (issue #81)
 
 - **adopt** — SWE-bench's generator/grader separation: each canary builds a disposable fixture repository and task packet, invokes a `WorkerAdapter`, then runs hidden mechanical grader assertions. Worker terminal success or prose is recorded only as evidence and cannot mark PASS.
@@ -170,6 +178,7 @@ unit/type tests
   -> real-Git integration/fault injection
   -> small real-worker canary set
   -> consumer compatibility smoke
+  -> monitor-mode smoke (zero-token idle check, wake-on-work, graceful stop)
   -> release
 ```
 
