@@ -26,7 +26,7 @@ export interface BootstrapFinalizeAuthority {
 }
 
 export interface BootstrapFinalizeOptions { cwd?: string; issueNumber?: number; authority?: BootstrapFinalizeAuthority; runCommand?: CommandRunner; candidatePaths?: string[]; reporter?: (line: string) => void; }
-export interface BootstrapFinalizeReport { ok: boolean; issueNumber: number; branch: string; candidateSha: string; pr?: number; merged: boolean; reachable: boolean; issueClosed: boolean; worktreeRemoved: boolean; localBranchRemoved: boolean; outcome: "finalized" | "already-satisfied"; }
+export interface BootstrapFinalizeReport { ok: boolean; issueNumber: number; branch: string; candidateSha: string; pr?: number; merged: boolean; reachable: boolean; issueClosed: boolean; worktreeRemoved: boolean; localBranchRemoved: boolean; outcome: "finalized" | "already-satisfied" | "integrated-pending-verification"; pendingExternalVerification?: boolean; }
 
 export class BootstrapFinalizeError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "BootstrapFinalizeError"; } }
 
@@ -60,8 +60,8 @@ function record(value: unknown): value is Record<string, unknown> { return !!val
 function validatePendingMarker(value: unknown): PendingVerificationRecord { if (!record(value) || value.version !== 1 || value.status !== "awaiting_external_verification" || typeof value.integratedMainSha !== "string" || !/^[0-9a-f]{40}$/i.test(value.integratedMainSha) || !Array.isArray(value.criteria) || value.criteria.length === 0) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "malformed pending external verification authority marker"); for (const c of value.criteria) if (!record(c) || typeof c.id !== "string" || !c.id.trim() || typeof c.description !== "string" || !c.description.trim() || typeof c.environment !== "string" || !c.environment.trim()) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "malformed pending external verification authority marker"); return value as unknown as PendingVerificationRecord; }
 function validateResultMarker(value: unknown): PendingVerificationResult { if (!record(value) || value.version !== 1 || (value.status !== "passed" && value.status !== "failed") || typeof value.integratedMainSha !== "string" || !/^[0-9a-f]{40}$/i.test(value.integratedMainSha) || typeof value.evidence !== "string" || !value.evidence.trim()) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "malformed pending external verification result marker"); return value as unknown as PendingVerificationResult; }
 function structuredMarkers<T>(issue: BootstrapFinalizeIssue, marker: string, validate: (value: unknown) => T): T[] { const out: T[] = []; for (const c of issue.comments ?? []) { const body = typeof c === "object" && c && "body" in c ? String((c as { body?: unknown }).body ?? "").trim() : ""; if (!body.startsWith(`${marker}\n`)) continue; try { out.push(validate(JSON.parse(body.slice(marker.length).trim()))); } catch (error) { if (error instanceof BootstrapFinalizeError) throw error; throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "malformed pending external verification authority marker"); } } return out; }
-export function classifyExternalVerificationAuthority(issue: BootstrapFinalizeIssue): "pending" | "clear" { const pending = structuredMarkers(issue, PENDING_VERIFICATION_MARKER, validatePendingMarker); const results = structuredMarkers(issue, PENDING_VERIFICATION_RESULT_MARKER, validateResultMarker); if (pending.length === 0) return "clear"; const current = pending[pending.length - 1]!; if (pending.some((entry) => JSON.stringify(entry) !== JSON.stringify(current))) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "conflicting pending external verification authority markers"); if (results.length > 0) { const result = results[results.length - 1]!; if (results.some((entry) => JSON.stringify(entry) !== JSON.stringify(result))) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "conflicting pending external verification result markers"); if (result.integratedMainSha === current.integratedMainSha && (result.status === "passed" || result.status === "failed")) return "clear"; } return "pending"; }
-function isExternalPending(issue: BootstrapFinalizeIssue): boolean { return classifyExternalVerificationAuthority(issue) === "pending"; }
+function externalVerificationDisposition(issue: BootstrapFinalizeIssue): "pending" | "failed" | "clear" { const pending = structuredMarkers(issue, PENDING_VERIFICATION_MARKER, validatePendingMarker); const results = structuredMarkers(issue, PENDING_VERIFICATION_RESULT_MARKER, validateResultMarker); if (pending.length === 0) return "clear"; const current = pending[pending.length - 1]!; if (pending.some((entry) => JSON.stringify(entry) !== JSON.stringify(current))) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "conflicting pending external verification authority markers"); if (results.length > 0) { const result = results[results.length - 1]!; if (results.some((entry) => JSON.stringify(entry) !== JSON.stringify(result))) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_AUTHORITY_INVALID", "conflicting pending external verification result markers"); if (result.integratedMainSha === current.integratedMainSha && result.status === "passed") return "clear"; if (result.integratedMainSha === current.integratedMainSha && result.status === "failed") return "failed"; } return "pending"; }
+export function classifyExternalVerificationAuthority(issue: BootstrapFinalizeIssue): "pending" | "clear" { return externalVerificationDisposition(issue) === "pending" ? "pending" : "clear"; }
 function authorityFingerprint(issue: BootstrapFinalizeIssue): string { return JSON.stringify({ title: issue.title, body: issue.body ?? "", updatedAt: issue.updatedAt ?? "", labels: [...(issue.labels ?? [])].sort(), comments: issue.comments ?? [] }); }
 function commitMessage(issue: BootstrapFinalizeIssue): string { const title = issue.title.trim().replace(/\s+/g, " ").slice(0, 72); return `${title || "bootstrap candidate"} (#${issue.number})`; }
 
@@ -98,6 +98,24 @@ function exactMergedPr(prs: BootstrapFinalizePr[], candidateSha: string | undefi
   }
   if (merged.length > 1) throw new BootstrapFinalizeError("AMBIGUOUS_PR", "multiple merged PRs exist for the reusable issue branch without exact candidate identity");
   return merged[0];
+}
+
+async function cleanIntegratedWorkspace(input: { root: string; worktree?: string; branch: string; issueNumber: number; runner: CommandRunner; reporter?: (line: string) => void }): Promise<{ worktreeRemoved: boolean; localBranchRemoved: boolean }> {
+  let worktreeRemoved = false;
+  if (input.worktree) {
+    if ((await git(input.worktree, ["status", "--porcelain"], input.runner)) !== "") throw new BootstrapFinalizeError("UNIQUE_WORK_PRESENT", "refusing cleanup with dirty worktree");
+    await git(input.root, ["worktree", "remove", input.worktree], input.runner);
+    try { if (existsSync(input.worktree)) await rm(input.worktree, { recursive: true, force: true }); } catch {}
+    worktreeRemoved = true;
+    input.reporter?.(`bootstrap finalize #${input.issueNumber} · worktree removed`);
+  } else worktreeRemoved = true;
+
+  const branchExists = await tryGit(input.root, ["rev-parse", "--verify", input.branch], input.runner);
+  if (!branchExists) return { worktreeRemoved, localBranchRemoved: true };
+  if ((await tryGit(input.root, ["merge-base", "--is-ancestor", input.branch, "origin/main"], input.runner)) === undefined) throw new BootstrapFinalizeError("UNINTEGRATED_BRANCH", "local branch contains work not reachable from origin/main");
+  await git(input.root, ["branch", "-d", input.branch], input.runner);
+  input.reporter?.(`bootstrap finalize #${input.issueNumber} · local branch removed`);
+  return { worktreeRemoved, localBranchRemoved: true };
 }
 
 function normalizeCiEvaluation(value: CheckConclusion | CiEvaluation): CiEvaluation { return typeof value === "string" ? { state: value } : value; }
@@ -198,22 +216,15 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
     say(`bootstrap finalize #${issueNumber} · exact merged PR #${alreadyMerged.number} already reachable from origin/main`);
     const latest = await authority.fetchIssue(issueNumber, root);
     let issueClosed = latest.state === "CLOSED";
+    const externalDisposition = externalVerificationDisposition(latest);
     if (!issueClosed && authorityFingerprint(latest) !== initialAuthorityFingerprint) throw new BootstrapFinalizeError("STALE_AUTHORITY", "issue authority changed before closure");
-    if (!issueClosed && !isExternalPending(latest)) { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
-    if (!issueClosed && isExternalPending(latest)) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_PENDING", "pending external verification remains open after integration");
-    let worktreeRemoved = false;
-    if (worktree) {
-      if ((await git(worktree, ["status", "--porcelain"], runner)) !== "") throw new BootstrapFinalizeError("UNIQUE_WORK_PRESENT", "refusing cleanup with dirty worktree");
-      await git(root, ["worktree", "remove", worktree], runner);
-      try { if (existsSync(worktree)) await rm(worktree, { recursive: true, force: true }); } catch {}
-      worktreeRemoved = true;
-      say(`bootstrap finalize #${issueNumber} · worktree removed`);
-    } else worktreeRemoved = true;
-    let branchRemoved = false;
-    if (branchExists) { await git(root, ["branch", "-d", branch], runner); branchRemoved = true; say(`bootstrap finalize #${issueNumber} · local branch removed`); }
-    else branchRemoved = true;
-    say(`bootstrap finalize #${issueNumber} · PASS`);
-    return { ok: true, issueNumber, branch, candidateSha, pr: alreadyMerged.number, merged: true, reachable: true, issueClosed, worktreeRemoved, localBranchRemoved: branchRemoved, outcome: "finalized" };
+    if (!issueClosed && externalDisposition === "failed") throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_FAILED", "external verification failed; create a fresh implementation from current main");
+    if (!issueClosed && externalDisposition === "clear") { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
+    if (!issueClosed && externalDisposition === "pending") say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`);
+    const cleanup = await cleanIntegratedWorkspace({ root, worktree, branch, issueNumber, runner, reporter: say });
+    const pendingExternalVerification = !issueClosed && externalDisposition === "pending";
+    say(`bootstrap finalize #${issueNumber} · ${pendingExternalVerification ? "INTEGRATED_PENDING_VERIFICATION" : "PASS"}`);
+    return { ok: true, issueNumber, branch, candidateSha, pr: alreadyMerged.number, merged: true, reachable: true, issueClosed, ...cleanup, outcome: pendingExternalVerification ? "integrated-pending-verification" : "finalized", ...(pendingExternalVerification ? { pendingExternalVerification: true } : {}) };
   }
   if (!branchExists && !worktree) throw new BootstrapFinalizeError("MISSING_CANDIDATE", `no local ${branch} and no exact merged PR evidence`);
   if (!worktree) throw new BootstrapFinalizeError("MISSING_WORKTREE", `canonical worktree for ${branch} is missing before integration`);
@@ -270,18 +281,15 @@ export async function runBootstrapFinalize(options: BootstrapFinalizeOptions = {
   say(`bootstrap finalize #${issueNumber} · reachable from origin/main`);
   const latest = await authority.fetchIssue(issueNumber, root);
   let issueClosed = latest.state === "CLOSED";
+  const externalDisposition = externalVerificationDisposition(latest);
   if (!issueClosed && authorityFingerprint(latest) !== initialAuthorityFingerprint) throw new BootstrapFinalizeError("STALE_AUTHORITY", "issue authority changed before closure");
-  if (!issueClosed && !isExternalPending(latest)) { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
-  if (!issueClosed && isExternalPending(latest)) throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_PENDING", "pending external verification remains open after integration");
-  if ((await git(worktree, ["status", "--porcelain"], runner)) !== "") throw new BootstrapFinalizeError("UNIQUE_WORK_PRESENT", "refusing cleanup with dirty worktree");
-  await git(root, ["worktree", "remove", worktree], runner);
-  say(`bootstrap finalize #${issueNumber} · worktree removed`);
-  let branchRemoved = false;
-  if ((await tryGit(root, ["merge-base", "--is-ancestor", branch, "origin/main"], runner)) !== undefined) { await git(root, ["branch", "-d", branch], runner); branchRemoved = true; say(`bootstrap finalize #${issueNumber} · local branch removed`); }
-  else throw new BootstrapFinalizeError("UNINTEGRATED_BRANCH", "local branch contains work not reachable from origin/main");
-  try { if (existsSync(worktree)) await rm(worktree, { recursive: true, force: true }); } catch {}
-  say(`bootstrap finalize #${issueNumber} · PASS`);
-  return { ok: true, issueNumber, branch, candidateSha, pr: pr.number, merged: true, reachable, issueClosed, worktreeRemoved: true, localBranchRemoved: branchRemoved, outcome: "finalized" };
+  if (!issueClosed && externalDisposition === "failed") throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_FAILED", "external verification failed; create a fresh implementation from current main");
+  if (!issueClosed && externalDisposition === "clear") { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
+  if (!issueClosed && externalDisposition === "pending") say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`);
+  const cleanup = await cleanIntegratedWorkspace({ root, worktree, branch, issueNumber, runner, reporter: say });
+  const pendingExternalVerification = !issueClosed && externalDisposition === "pending";
+  say(`bootstrap finalize #${issueNumber} · ${pendingExternalVerification ? "INTEGRATED_PENDING_VERIFICATION" : "PASS"}`);
+  return { ok: true, issueNumber, branch, candidateSha, pr: pr.number, merged: true, reachable, issueClosed, ...cleanup, outcome: pendingExternalVerification ? "integrated-pending-verification" : "finalized", ...(pendingExternalVerification ? { pendingExternalVerification: true } : {}) };
 }
 
 function usage(): string { return `Usage: npm run bootstrap:finalize -- [--issue N]\n\nFinalize one mechanically-passing bootstrap candidate.\n\nOptions:\n  --issue N   finalize the explicit canonical agent/issue-N candidate\n  -h, --help  show this help\n`; }
