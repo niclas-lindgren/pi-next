@@ -125,7 +125,8 @@ function classifyCheckRows(rows: Array<{ state?: string | null; conclusion?: str
   const values = rows.map((row) => `${row.state ?? ""} ${row.conclusion ?? ""} ${row.bucket ?? ""}`.trim());
   if (values.some((value) => /fail|failure|error|cancel|timed[_ -]?out|action_required/i.test(value))) return "FAIL";
   if (values.some((value) => /queued|pending|progress|running|waiting|requested|expected/i.test(value))) return "PENDING";
-  if (values.every((value) => /pass|success|skip|neutral|completed/i.test(value))) return "PASS";
+  // Generic lifecycle states such as "completed" are not sufficient PASS evidence.
+  if (values.every((value) => /pass|success|skip|neutral/i.test(value))) return "PASS";
   return "UNKNOWN";
 }
 function parseRequiredStatusContexts(text: string): string[] { const raw = JSON.parse(text) as { contexts?: unknown; checks?: Array<{ context?: unknown }> }; return [...(Array.isArray(raw.contexts) ? raw.contexts : []), ...(Array.isArray(raw.checks) ? raw.checks.map((c) => c.context) : [])].filter((v): v is string => typeof v === "string" && v.length > 0); }
