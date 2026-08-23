@@ -172,11 +172,14 @@ export interface BootstrapFinalizerReport {
   pendingExternalVerification?: boolean;
 }
 
+import type { BootstrapLifecycleLock } from "./lifecycle-lock.js";
+
 export type BootstrapFinalizer = (options: {
   cwd?: string;
   issueNumber?: number;
   candidatePaths?: string[];
   reporter?: (line: string) => void;
+  lifecycleLock?: BootstrapLifecycleLock;
 }) => Promise<BootstrapFinalizerReport>;
 
 export interface BootstrapDependencies {
