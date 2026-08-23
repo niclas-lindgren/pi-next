@@ -48,7 +48,9 @@ export function buildWorkerPrompt(issue: Issue, cwd: string, contextFiles: Array
     ? "Review the exact candidate evidence for correctness and contract violations. Do not edit files. Use the structured result contract: {\"verdict\":\"pass\"} or {\"verdict\":\"findings\",\"findings\":[{\"severity\":\"blocking\"|\"warning\",\"path\":\"optional\",\"summary\":\"concise bounded finding\"}]}."
     : role === "repair"
       ? "This is one fresh repair attempt. Inspect the current worktree and repair only the reported deterministic failures."
-      : "Implement the issue completely in this worktree.";
+      : role === "implementation-retry"
+        ? "This is one fresh bounded implementation retry after a completed zero-delta attempt. Implement the issue completely in this worktree; do not merely inspect or report completion."
+        : "Implement the issue completely in this worktree.";
   const packet = [
     `You are the ${role} worker for pi-next issue #${issue.number}.`,
     roleInstruction,

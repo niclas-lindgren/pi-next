@@ -287,7 +287,7 @@ test("automatic repair stops after one failed repair verification and preserves 
   }
 });
 
-test("does not automatically repair an unproven no-change verification failure", async () => {
+test("does not automatically repair an unproven no-change verification failure after zero-delta retry exhaustion", async () => {
   const fixtureState = await fixture();
   try {
     const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
@@ -299,7 +299,8 @@ test("does not automatically repair an unproven no-change verification failure",
 
     assert.equal(report.disposition, "repairable-failure");
     assert.equal(report.repairOutcome, "ineligible");
-    assert.deepEqual(sessions.map((session) => session.role), ["implementation"]);
+    assert.equal(report.implementationOutcome, "retry-exhausted");
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation", "implementation-retry"]);
     assert.equal(report.candidateHasDelta, false);
   } finally {
     await fixtureState.cleanup();
@@ -1191,7 +1192,7 @@ test("exact verified candidate proof resumes finalization without relaunching im
   }
 });
 
-test("worker no-op with passing checks is explicit unproven no-change and non-finalizable without extra model calls", async () => {
+test("worker no-op with passing checks launches one fresh bounded implementation retry, then exhausts cleanly", async () => {
   const fixtureState = await fixture();
   try {
     const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
@@ -1201,12 +1202,45 @@ test("worker no-op with passing checks is explicit unproven no-change and non-fi
       { ...dependenciesFor(fixtureState.root, fakeFactory(sessions, async () => undefined), () => 0, []), reporter: (event) => events.push(event) },
     );
     assert.equal(report.disposition, "no-change");
-    assert.equal(report.implementationOutcome, "unproven-no-change");
+    assert.equal(report.implementationOutcome, "retry-exhausted");
+    assert.equal(report.implementationAttemptCount, 2);
+    assert.equal(report.implementationRetryBudgetExhausted, true);
+    assert.match(report.implementationRetryEligibleReason ?? "", /zero candidate delta/i);
     assert.equal(report.candidateHasDelta, false);
     assert.equal(report.finalizationReady, false);
-    assert.match(report.failureReason ?? "", /no candidate changes were produced/i);
-    assert.deepEqual(sessions.map((s) => s.role), ["implementation"]);
+    assert.match(report.failureReason ?? "", /retry budget exhausted/i);
+    assert.deepEqual(sessions.map((s) => s.role), ["implementation", "implementation-retry"]);
+    assert.notEqual(sessions[0], sessions[1]);
+    assert.match(sessions[1]!.prompt, /Previous implementation attempt returned completed but produced zero candidate changes/);
+    assert.match(sessions[1]!.prompt, /zero-delta proof/);
+    assert.doesNotMatch(sessions[1]!.prompt, /transcript|hidden reasoning/i);
     assert.match(events.at(-1)?.detail ?? "", /no candidate changes were produced/i);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("zero-delta implementation retry that produces a candidate verifies through the normal path", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (role, cwd, prompt) => {
+      if (role === "implementation-retry") {
+        assert.match(prompt, /issue remains open and satisfaction was not mechanically proven/i);
+        await writeFile(join(cwd, "retry-implemented.txt"), "implemented on retry\n");
+      }
+    });
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+    assert.equal(report.disposition, "pass");
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.implementationAttemptCount, 2);
+    assert.equal(report.implementationRetryBudgetExhausted, false);
+    assert.deepEqual(sessions.map((s) => s.role), ["implementation", "implementation-retry"]);
+    assert.deepEqual(report.workerAttempts.map((attempt) => attempt.role), ["implementation", "implementation-retry"]);
+    assert.ok(report.candidate.changedFiles.includes("retry-implemented.txt"));
   } finally {
     await fixtureState.cleanup();
   }

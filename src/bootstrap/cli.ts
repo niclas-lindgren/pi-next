@@ -47,7 +47,7 @@ export function exitCodeForDisposition(disposition: Disposition | "finalization-
 }
 
 function implementationPhase(report: BootstrapReport): "PASS" | "FAIL" | "BLOCKED" {
-  if (report.implementationOutcome === "failed") return report.disposition === "repairable-failure" ? "FAIL" : "BLOCKED";
+  if (report.implementationOutcome === "failed" || report.implementationOutcome === "retry-exhausted") return report.disposition === "repairable-failure" ? "FAIL" : "BLOCKED";
   return "PASS";
 }
 

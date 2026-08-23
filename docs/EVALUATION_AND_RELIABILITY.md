@@ -77,6 +77,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adopt-pattern** — deterministic recovery systems spend a fixed retry budget only after the failed step leaves a mechanically proven candidate and bounded failure evidence. The bootstrap supervisor now makes the already-existing one-shot repair budget the normal path: a fresh repair worker receives the task packet, current candidate evidence, and exact failed checks, then verification reruns once. Failed second verification exhausts the budget and preserves the candidate rather than looping.
 - **reject** — continuing the implementation conversation, repairing preflight/authority/no-change/finalization failures, or recursively launching workers. These states are either unsafe, unproven, or owned by separate recovery semantics.
 
+### Zero-delta implementation retry (issue #149)
+
+- **adopt-pattern** — bounded workflow retry controllers distinguish no-candidate generation failures from candidate verification failures. Pi-next now spends one separate fresh implementation retry only when a completed implementation worker produced mechanically proven zero delta, the issue is still open, satisfaction is unproven, and no repair/finalization phase has started.
+- **reject** — accepting unchanged deterministic checks as proof of satisfaction, reusing the first worker conversation, retrying provider/preflight/cancellation failures, or looping after the single zero-delta retry budget is exhausted.
+
 ### Bootstrap lifecycle lock decisions (issue #114)
 
 - **adopt-pattern** — local process lock managers commonly use an atomic lock directory plus bounded owner metadata and heartbeat. The bootstrap utility adopts that filesystem primitive in `.git/pi-next/bootstrap-lifecycle/issue-N.lock`, keeping coordination outside candidate contents and failing closed for live or ambiguous owners.

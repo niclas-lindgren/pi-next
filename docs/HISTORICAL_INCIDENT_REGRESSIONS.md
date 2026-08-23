@@ -34,6 +34,7 @@ Fixture file: [`test/fixtures/replay/historical-incidents.json`](../test/fixture
 | 13 | Crash after push before cleanup/final disposition | `historical: crash after push before cleanup and final disposition`; also `test/fixtures/replay/crash-boundaries.json` | Restart proves reachability and must not push/merge again. |
 | 14 | Stale worker tries to close after authority/ownership changed | `historical: stale worker cannot close after authority owner changed`; also finalizer/authority tests | Stale worker output cannot close or mutate after ownership/current-authority mismatch. |
 | 15 | Bootstrap finalizer collapsed nested untracked candidate directories to unknown paths (#141/#81) | `test/bootstrap-finalize.test.ts` (`#81 bootstrap path shape finalizes without untracked directory placeholders`) | Verification handoff and finalization use the same file-level candidate path identity; unrelated paths still fail closed. |
+| 16 | Completed implementation worker produced zero candidate delta while checks passed for unchanged repo (#146/#149) | `test/bootstrap-self-host.test.ts` (`worker no-op with passing checks launches one fresh bounded implementation retry, then exhausts cleanly`; `zero-delta implementation retry that produces a candidate verifies through the normal path`) | A zero-delta unproven completed implementation spends exactly one fresh implementation retry instead of requiring a second operator command, without treating unchanged checks as satisfaction proof. |
 
 ## Fixture policy
 
