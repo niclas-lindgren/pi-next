@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 
-import { BootstrapFinalizeError, classifyCiEvidence, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation } from "../scripts/bootstrap-finalize.ts";
+import { BootstrapFinalizeError, classifyCiEvidence, evaluateGhPrChecks, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation } from "../scripts/bootstrap-finalize.ts";
 
 const exec = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> { return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim(); }
@@ -321,6 +321,36 @@ test("CI evidence classifier distinguishes absence, missing policy, failures, pe
   assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", conclusion: "CANCELLED" }], requiredContexts: ["npm test"] }).state, "FAIL");
   assert.deepEqual(classifyCiEvidence({ checkRows: [{ name: "npm test", state: "???" }], requiredContexts: ["npm test"] }).state, "UNKNOWN");
   assert.deepEqual(classifyCiEvidence({ checkRows: [], checksUnavailable: true }).state, "UNKNOWN");
+});
+
+test("gh pr checks adapter uses supported fields and treats no-check CLI non-zero as NONE", async () => {
+  const calls: string[][] = [];
+  const result = await evaluateGhPrChecks({
+    cwd: "/tmp/repo",
+    prNumber: 112,
+    requiredContexts: [],
+    runCommand: async (command, args, options) => {
+      calls.push([command, ...args]);
+      assert.equal(options.cwd, "/tmp/repo");
+      if (args.includes("name,state,conclusion,bucket")) {
+        return { command, args, cwd: options.cwd, exitCode: 1, stdout: "", stderr: `Unknown JSON field: "conclusion"\nAvailable fields:\n  bucket\n  completedAt\n  description\n  event\n  link\n  name\n  startedAt\n  state\n  workflow\n` };
+      }
+      assert.ok(args.includes("name,state,bucket"));
+      return { command, args, cwd: options.cwd, exitCode: 1, stdout: "", stderr: "no checks reported on the 'agent/issue-107' branch" };
+    },
+  });
+  assert.deepEqual(result, { state: "NONE", reason: "no checks reported by GitHub CLI" });
+  assert.deepEqual(calls, [["gh", "pr", "checks", "112", "--json", "name,state,bucket"]]);
+});
+
+test("gh pr checks adapter classifies actual supported bucket field without conclusion", async () => {
+  const result = await evaluateGhPrChecks({
+    cwd: "/tmp/repo",
+    prNumber: 101,
+    requiredContexts: ["npm test"],
+    runCommand: async (command, args, options) => ({ command, args, cwd: options.cwd, exitCode: 0, stdout: JSON.stringify([{ name: "npm test", state: "COMPLETED", bucket: "fail" }]), stderr: "" }),
+  });
+  assert.equal(result.state, "FAIL");
 });
 
 test("first unstaged tracked candidate path preserves porcelain status columns", async () => {
