@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { acquireBootstrapLifecycleLock, type BootstrapLifecycleLock } from "../src/bootstrap/lifecycle-lock.js";
 import { writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.js";
+import { emitLifecycleCheckpoint } from "../src/coordination/lifecycle-checkpoints.js";
 
 const execFileAsync = promisify(execFile);
 const REQUIRED_CHECKS = ["npm run typecheck", "npm test"] as const;
@@ -144,6 +145,12 @@ async function cleanIntegratedWorkspace(input: { root: string; worktree?: string
   let worktreeRemoved = false;
   if (input.worktree) {
     if ((await git(input.worktree, ["status", "--porcelain"], input.runner)) !== "") throw new BootstrapFinalizeError("UNIQUE_WORK_PRESENT", "refusing cleanup with dirty worktree");
+  }
+  const branchExistsBeforeCleanup = await tryGit(input.root, ["rev-parse", "--verify", input.branch], input.runner);
+  if (branchExistsBeforeCleanup && (await tryGit(input.root, ["merge-base", "--is-ancestor", input.branch, "origin/main"], input.runner)) === undefined) throw new BootstrapFinalizeError("UNINTEGRATED_BRANCH", "local branch contains work not reachable from origin/main");
+
+  emitLifecycleCheckpoint("workspace_cleaned", "before");
+  if (input.worktree) {
     await git(input.root, ["worktree", "remove", input.worktree], input.runner);
     try { if (existsSync(input.worktree)) await rm(input.worktree, { recursive: true, force: true }); } catch {}
     worktreeRemoved = true;
@@ -151,10 +158,10 @@ async function cleanIntegratedWorkspace(input: { root: string; worktree?: string
   } else worktreeRemoved = true;
 
   const branchExists = await tryGit(input.root, ["rev-parse", "--verify", input.branch], input.runner);
-  if (!branchExists) return { worktreeRemoved, localBranchRemoved: true };
-  if ((await tryGit(input.root, ["merge-base", "--is-ancestor", input.branch, "origin/main"], input.runner)) === undefined) throw new BootstrapFinalizeError("UNINTEGRATED_BRANCH", "local branch contains work not reachable from origin/main");
+  if (!branchExists) { emitLifecycleCheckpoint("workspace_cleaned", "after"); return { worktreeRemoved, localBranchRemoved: true }; }
   await git(input.root, ["branch", "-d", input.branch], input.runner);
   input.reporter?.(`bootstrap finalize #${input.issueNumber} · local branch removed`);
+  emitLifecycleCheckpoint("workspace_cleaned", "after");
   return { worktreeRemoved, localBranchRemoved: true };
 }
 
@@ -254,14 +261,17 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     const candidateReachable = (await tryGit(root, ["merge-base", "--is-ancestor", candidateSha, "origin/main"], runner)) !== undefined;
     const mergeReachable = (await tryGit(root, ["merge-base", "--is-ancestor", alreadyMerged.mergeCommitSha!, "origin/main"], runner)) !== undefined;
     if (!candidateReachable || !mergeReachable) throw new BootstrapFinalizeError("REACHABILITY_FAILED", "exact merged candidate is not durably reachable from origin/main");
+    emitLifecycleCheckpoint("reachability_proven", "after");
     say(`bootstrap finalize #${issueNumber} · exact merged PR #${alreadyMerged.number} already reachable from origin/main`);
+    emitLifecycleCheckpoint("authority_reconciled", "before");
     const latest = await authority.fetchIssue(issueNumber, root);
     let issueClosed = latest.state === "CLOSED";
     const externalDisposition = externalVerificationDisposition(latest);
     if (!issueClosed && authorityFingerprint(latest) !== initialAuthorityFingerprint) throw new BootstrapFinalizeError("STALE_AUTHORITY", "issue authority changed before closure");
+    emitLifecycleCheckpoint("authority_reconciled", "after");
     if (!issueClosed && externalDisposition === "failed") throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_FAILED", "external verification failed; create a fresh implementation from current main");
-    if (!issueClosed && externalDisposition === "clear") { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
-    if (!issueClosed && externalDisposition === "pending") say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`);
+    if (!issueClosed && externalDisposition === "clear") { emitLifecycleCheckpoint("issue_closed", "before"); await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); emitLifecycleCheckpoint("issue_closed", "after"); }
+    if (!issueClosed && externalDisposition === "pending") { say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`); emitLifecycleCheckpoint("pending_verification_recorded", "after"); }
     const cleanup = await cleanIntegratedWorkspace({ root, worktree, branch, issueNumber, runner, reporter: say });
     const localMainSync = await synchronizeLocalMain({ root, issueNumber, runner, reporter: say });
     const pendingExternalVerification = !issueClosed && externalDisposition === "pending";
@@ -328,14 +338,17 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
   await git(root, ["fetch", "origin", "main", "--quiet"], runner);
   const reachable = (await tryGit(root, ["merge-base", "--is-ancestor", candidateSha, "origin/main"], runner)) !== undefined;
   if (!reachable) throw new BootstrapFinalizeError("REACHABILITY_FAILED", "candidate is not reachable from origin/main");
+  emitLifecycleCheckpoint("reachability_proven", "after");
   say(`bootstrap finalize #${issueNumber} · reachable from origin/main`);
+  emitLifecycleCheckpoint("authority_reconciled", "before");
   const latest = await authority.fetchIssue(issueNumber, root);
   let issueClosed = latest.state === "CLOSED";
   const externalDisposition = externalVerificationDisposition(latest);
   if (!issueClosed && authorityFingerprint(latest) !== initialAuthorityFingerprint) throw new BootstrapFinalizeError("STALE_AUTHORITY", "issue authority changed before closure");
+  emitLifecycleCheckpoint("authority_reconciled", "after");
   if (!issueClosed && externalDisposition === "failed") throw new BootstrapFinalizeError("EXTERNAL_VERIFICATION_FAILED", "external verification failed; create a fresh implementation from current main");
-  if (!issueClosed && externalDisposition === "clear") { await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); }
-  if (!issueClosed && externalDisposition === "pending") say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`);
+  if (!issueClosed && externalDisposition === "clear") { emitLifecycleCheckpoint("issue_closed", "before"); await authority.closeIssue(issueNumber, root); issueClosed = true; say(`bootstrap finalize #${issueNumber} · issue closed`); emitLifecycleCheckpoint("issue_closed", "after"); }
+  if (!issueClosed && externalDisposition === "pending") { say(`bootstrap finalize #${issueNumber} · external verification pending · issue remains open`); emitLifecycleCheckpoint("pending_verification_recorded", "after"); }
   const cleanup = await cleanIntegratedWorkspace({ root, worktree, branch, issueNumber, runner, reporter: say });
   const localMainSync = await synchronizeLocalMain({ root, issueNumber, runner, reporter: say });
   const pendingExternalVerification = !issueClosed && externalDisposition === "pending";

@@ -17,6 +17,7 @@ import {
   type IssueLease,
   type IssueLeaseAuthority,
 } from "../src/coordination/index.ts";
+import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
 
 /**
  * Proves that `src/coordination/**` preserves the lease record format and
@@ -106,6 +107,23 @@ describe("lease record format compatibility", () => {
     assert.equal(renewed.worktree, ".worktrees/issue-583");
 
     await releaseIssueLease(authority, renewed);
+    assert.equal(await authority.read(583), undefined);
+  });
+
+  test("lease release checkpoint retries idempotently after durable authority removal", async () => {
+    const authority = new MemoryAuthority();
+    const lease = parseIssueLease(GOLDEN_LEASE_583_RECORD);
+    authority.leases.set(583, lease);
+
+    await assert.rejects(
+      withLifecycleFaultInjection({ checkpoint: "lease_released", position: "after" }, () => releaseIssueLease(authority, lease)),
+      (error: unknown) => error instanceof LifecycleCheckpointFault
+        && error.checkpoint === "lease_released"
+        && error.position === "after",
+    );
+    assert.equal(await authority.read(583), undefined);
+
+    await releaseIssueLease(authority, lease);
     assert.equal(await authority.read(583), undefined);
   });
 

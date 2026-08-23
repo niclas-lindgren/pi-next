@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 
 import { BootstrapFinalizeError, classifyCiEvidence, classifyExternalVerificationAuthority, evaluateGhPrChecks, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation, type CommandRunner } from "../scripts/bootstrap-finalize.ts";
+import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
 
 const exec = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> { return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim(); }
@@ -79,6 +80,7 @@ class FakeAuthority implements BootstrapFinalizeAuthority {
   closed = false;
   createdPrs = 0;
   mergedPrs = 0;
+  closeCalls = 0;
   waitedForChecks = 0;
   constructor(private root: string, issueNumber: number) { this.issue = { number: issueNumber, title: "feat(finalize): add helper", state: "OPEN" }; }
   async fetchIssue() { return { ...this.issue, state: this.closed ? "CLOSED" as const : this.issue.state }; }
@@ -99,7 +101,7 @@ class FakeAuthority implements BootstrapFinalizeAuthority {
     return value;
   }
   async mergePullRequest(input: { pr: BootstrapFinalizePr; headSha: string }) { this.mergedPrs++; await git(this.root, "fetch", "origin", input.pr.headRefName); await git(this.root, "switch", "main"); await git(this.root, "merge", "--ff-only", input.headSha); await git(this.root, "push", "-q", "origin", "main"); input.pr.state = "MERGED"; input.pr.mergeCommitSha = input.headSha; return input.pr; }
-  async closeIssue() { this.closed = true; this.issue.state = "CLOSED"; }
+  async closeIssue() { this.closeCalls++; this.closed = true; this.issue.state = "CLOSED"; }
 }
 
 async function rejectsCode(promise: Promise<unknown>, code: string) {
@@ -180,6 +182,99 @@ test("externally merged zero-diff candidate proves exact head reachability befor
     const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 118, authority });
     assert.equal(result.reachable, true);
     assert.equal(await git(f.remote, "merge-base", "--is-ancestor", sha, "main").then(() => "yes"), "yes");
+  } finally { await f.cleanup(); }
+});
+
+test("crash after reachability before authority reconciliation resumes without duplicate merge or premature close", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 201);
+    const authority = new FakeAuthority(f.root, 201);
+    await assert.rejects(
+      withLifecycleFaultInjection({ checkpoint: "authority_reconciled", position: "before" }, () =>
+        runBootstrapFinalize({ cwd: f.root, issueNumber: 201, authority }),
+      ),
+      (error: unknown) => error instanceof LifecycleCheckpointFault
+        && error.checkpoint === "authority_reconciled"
+        && error.position === "before",
+    );
+    assert.equal(authority.mergedPrs, 1);
+    assert.equal(authority.closeCalls, 0);
+    assert.equal(await git(f.remote, "merge-base", "--is-ancestor", "agent/issue-201", "main").then(() => "yes"), "yes");
+    assert.ok(await git(f.root, "worktree", "list", "--porcelain").then((text) => text.includes("issue-201")));
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 201, authority });
+    assert.equal(result.issueClosed, true);
+    assert.equal(result.worktreeRemoved, true);
+    assert.equal(authority.mergedPrs, 1);
+    assert.equal(authority.closeCalls, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("crash after close before cleanup resumes without duplicate close", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 202);
+    const authority = new FakeAuthority(f.root, 202);
+    await assert.rejects(
+      withLifecycleFaultInjection({ checkpoint: "issue_closed", position: "after" }, () =>
+        runBootstrapFinalize({ cwd: f.root, issueNumber: 202, authority }),
+      ),
+      LifecycleCheckpointFault,
+    );
+    assert.equal(authority.closeCalls, 1);
+    assert.ok(await git(f.root, "worktree", "list", "--porcelain").then((text) => text.includes("issue-202")));
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 202, authority });
+    assert.equal(result.issueClosed, true);
+    assert.equal(result.worktreeRemoved, true);
+    assert.equal(authority.closeCalls, 1);
+    assert.equal(authority.mergedPrs, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("pending external verification crash before cleanup does not close or resurrect implementation", async () => {
+  const f = await fixture();
+  try {
+    const { sha, pr } = await externallyMergedCandidate(f.root, f.remote, 203);
+    const authority = new FakeAuthority(f.root, 203);
+    authority.prs.push(pr);
+    authority.issue.comments = [{ body: `<!-- pi-next-pending-verification -->\n${JSON.stringify({ version: 1, status: "awaiting_external_verification", criteria: [{ id: "deploy", description: "deploy", environment: "staging" }], integratedMainSha: sha })}` }];
+    await assert.rejects(
+      withLifecycleFaultInjection({ checkpoint: "workspace_cleaned", position: "before" }, () =>
+        runBootstrapFinalize({ cwd: f.root, issueNumber: 203, authority }),
+      ),
+      LifecycleCheckpointFault,
+    );
+    assert.equal(authority.closeCalls, 0);
+    assert.ok(await git(f.root, "worktree", "list", "--porcelain").then((text) => text.includes("issue-203")));
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 203, authority });
+    assert.equal(result.outcome, "integrated-pending-verification");
+    assert.equal(result.issueClosed, false);
+    assert.equal(result.worktreeRemoved, true);
+    assert.equal(authority.createdPrs, 0);
+    assert.equal(authority.mergedPrs, 0);
+    assert.equal(authority.closeCalls, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("cleanup retry preserves unique dirty work after interruption", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 204);
+    const authority = new FakeAuthority(f.root, 204);
+    await assert.rejects(
+      withLifecycleFaultInjection({ checkpoint: "workspace_cleaned", position: "before" }, () =>
+        runBootstrapFinalize({ cwd: f.root, issueNumber: 204, authority }),
+      ),
+      LifecycleCheckpointFault,
+    );
+    const worktree = join(f.root, ".worktrees", "issue-204");
+    await writeFile(join(worktree, "unique.txt"), "preserve me\n");
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 204, authority }), "UNIQUE_WORK_PRESENT");
+    assert.equal(await git(worktree, "status", "--porcelain"), "?? unique.txt");
+    assert.equal(authority.closeCalls, 1);
   } finally { await f.cleanup(); }
 });
 
