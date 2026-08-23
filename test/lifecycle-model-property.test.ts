@@ -3,6 +3,9 @@ import { test } from "node:test";
 
 import fc, { type AsyncCommand } from "fast-check";
 
+import { runBootstrap } from "../src/bootstrap/supervisor.ts";
+import type { CommandRunner, WorkerFactory } from "../src/bootstrap/types.ts";
+
 import {
   authorityFingerprint,
   claimIssueLease,
@@ -12,6 +15,8 @@ import {
   LeaseConflictError,
   type AuthorityWorkItem,
 } from "../src/coordination/index.ts";
+import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
+import { cleanupCompletedIssueWorktree } from "../extensions/pi-next/main-refresh.ts";
 import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter.ts";
 import {
   createDisposableGitFixture,
@@ -52,6 +57,9 @@ interface LifecycleModel {
   unrelatedClaimBlocked: boolean;
   duplicateTerminalSideEffect: boolean;
   workerLaunches: number;
+  closeWasAuthorized: boolean;
+  staleMutationSucceeded: boolean;
+  cleanupRanBeforeReachability: boolean;
   trace: string[];
 }
 
@@ -61,10 +69,12 @@ interface RealLifecycle {
   authority: InMemoryWorkAuthority;
   clock: ManualScenarioClock;
   worker: ScriptedWorkerAdapter;
+  activeWorker?: { controller: AbortController; result: Promise<unknown> };
   worktree?: string;
   candidateSha?: string;
   verifiedFingerprint?: string;
   verifiedIntegratedMain?: string;
+  terminalAttempts: number;
 }
 
 function leaseInput(issueNumber: number, runId: string, clock: ManualScenarioClock) {
@@ -110,6 +120,9 @@ function initialModel(): LifecycleModel {
     unrelatedClaimBlocked: false,
     duplicateTerminalSideEffect: false,
     workerLaunches: 0,
+    closeWasAuthorized: false,
+    staleMutationSucceeded: false,
+    cleanupRanBeforeReachability: false,
     trace: [],
   };
 }
@@ -126,6 +139,7 @@ async function createReal(): Promise<RealLifecycle> {
     authority: new InMemoryWorkAuthority([item(ISSUE), item(OTHER_ISSUE)]),
     clock: new ManualScenarioClock(),
     worker: new ScriptedWorkerAdapter([{ behavior: "success" }, { behavior: "success" }, { behavior: "success" }]),
+    terminalAttempts: 0,
   };
 }
 
@@ -163,17 +177,40 @@ async function invariant(m: LifecycleModel, r: RealLifecycle, condition: unknown
   throw new Error(`${message}\nmodel=${modelSnapshot(m)}\nreal=${await realSnapshot(r)}`);
 }
 
+function failingPreflightRunner(): CommandRunner {
+  return async (command, args, options) => ({
+    command,
+    args,
+    cwd: options.cwd,
+    exitCode: 1,
+    stdout: "",
+    stderr: "static preflight failed",
+    durationMs: 0,
+  });
+}
+
+function countingBootstrapWorkerFactory(counter: { launches: number }): WorkerFactory {
+  return async () => {
+    counter.launches += 1;
+    return {
+      async prompt() {},
+      subscribe() { return () => {}; },
+      dispose() {},
+    };
+  };
+}
+
 async function assertCoreInvariants(m: LifecycleModel, r: RealLifecycle): Promise<void> {
   const live = await r.leases.read(ISSUE);
   const freshOwners = live && Date.parse(live.expiresAt) > r.clock.now().getTime() ? [live.runId] : [];
   await invariant(m, r, freshOwners.length <= 1, "core invariant 1 violated: at most one fresh authoritative owner");
 
-  await invariant(m, r, !(m.lease !== "ours" && m.workerActive), "core invariant 2 violated: foreign/stale worker continued after ownership loss");
+  await invariant(m, r, !m.staleMutationSucceeded, "core invariant 2 violated: foreign/stale worker mutated or closed after ownership loss");
 
   await invariant(
     m,
     r,
-    !m.closed || (m.authority === "unchanged" && m.verification === "pass" && m.lease === "ours"),
+    !m.closed || m.closeWasAuthorized,
     "core invariant 3 violated: issue closed without current authority and required verification",
   );
   await invariant(
@@ -187,7 +224,7 @@ async function assertCoreInvariants(m: LifecycleModel, r: RealLifecycle): Promis
   await invariant(m, r, !m.duplicateTerminalSideEffect, "core invariant 7 violated: durable restart/retry duplicated a terminal side effect");
   await invariant(m, r, !(m.pendingRecorded && m.closed), "core invariant 8 violated: pending external verification became false PASS/Done");
   await invariant(m, r, !(m.preflightFailed && m.workerLaunches > 0), "core invariant 9 violated: static preflight failure launched workers");
-  await invariant(m, r, !m.closed || m.integratedReachable, "core invariant 10 violated: cleanup/close happened before reachability");
+  await invariant(m, r, !m.cleanupRanBeforeReachability && (!m.closed || m.integratedReachable), "core invariant 10 violated: cleanup/close happened before reachability");
 }
 
 abstract class LifecycleCommand implements AsyncCommand<LifecycleModel, RealLifecycle> {
@@ -269,7 +306,14 @@ class MakeDirtyCommand extends LifecycleCommand {
 class StaticPreflightFailCommand extends LifecycleCommand {
   check(m: Readonly<LifecycleModel>) { return m.lease === "ours" && !m.workerActive && m.workerLaunches === 0; }
   async run(m: LifecycleModel, r: RealLifecycle) {
+    const launched = { launches: 0 };
+    await assert.rejects(() => runBootstrap({ issueNumber: ISSUE, cwd: r.git.repo, allowRepair: false, review: false, timeoutMs: 1 }, {
+      runCommand: failingPreflightRunner(),
+      createWorker: countingBootstrapWorkerFactory(launched),
+      fetchIssue: async () => ({ number: ISSUE, title: "Issue", body: "body", comments: [], state: "OPEN" }),
+    }));
     m.preflightFailed = true;
+    m.workerLaunches += launched.launches;
     await this.done(m, r, this.toString());
   }
   toString() { return "staticPreflightFail()"; }
@@ -279,7 +323,11 @@ class StartWorkerCommand extends LifecycleCommand {
   check(m: Readonly<LifecycleModel>) { return m.lease === "ours" && m.workspace !== "absent" && !m.workerActive && !m.preflightFailed; }
   async run(m: LifecycleModel, r: RealLifecycle) {
     const controller = new AbortController();
-    await r.worker.run({ cwd: r.worktree!, prompt: "scripted", issueNumber: ISSUE, runId: m.owner, phase: "implementation" }, controller.signal);
+    const liveWorker = new ScriptedWorkerAdapter([{ behavior: "wait-for-cancel" }]);
+    r.activeWorker = {
+      controller,
+      result: liveWorker.run({ cwd: r.worktree!, prompt: "scripted", issueNumber: ISSUE, runId: m.owner, phase: "implementation" }, controller.signal),
+    };
     m.workerLaunches += 1;
     m.workerActive = true;
     m.work = "active";
@@ -291,6 +339,9 @@ class StartWorkerCommand extends LifecycleCommand {
 class FinishWorkerCommand extends LifecycleCommand {
   check(m: Readonly<LifecycleModel>) { return m.workerActive && m.lease === "ours"; }
   async run(m: LifecycleModel, r: RealLifecycle) {
+    r.activeWorker?.controller.abort();
+    await r.activeWorker?.result;
+    r.activeWorker = undefined;
     await r.git.write(r.worktree!, "candidate.txt", `candidate after ${m.trace.length}\n`);
     m.workerActive = false;
     m.workspace = "canonical-dirty";
@@ -303,11 +354,45 @@ class FinishWorkerCommand extends LifecycleCommand {
 class FailOrCancelWorkerCommand extends LifecycleCommand {
   check(m: Readonly<LifecycleModel>) { return m.workerActive; }
   async run(m: LifecycleModel, r: RealLifecycle) {
+    r.activeWorker?.controller.abort();
+    await r.activeWorker?.result;
+    r.activeWorker = undefined;
     m.workerActive = false;
     m.work = "open";
     await this.done(m, r, this.toString());
   }
   toString() { return "failOrCancelWorker()"; }
+}
+
+class StaleWorkerMutationAttemptCommand extends LifecycleCommand {
+  check(m: Readonly<LifecycleModel>) { return m.workerActive && m.lease !== "ours" && m.workspace !== "absent"; }
+  async run(m: LifecycleModel, r: RealLifecycle) {
+    const before = await r.authority.get(String(ISSUE));
+    const beforeHead = await r.git.git(r.git.repo, "rev-parse", "refs/remotes/origin/main");
+    try {
+      await finalizeIssue(r.leases, r.authority, {
+        cwd: r.git.repo,
+        issueNumber: ISSUE,
+        agent: "pi-next",
+        runId: m.owner,
+        sessionId: `${m.owner}-session`,
+        issueUpdatedAt: "2026-08-22T12:00:00.000Z",
+        candidateSha: r.candidateSha ?? beforeHead,
+        verifiedAuthorityFingerprint: r.verifiedFingerprint ?? authorityFingerprint(before),
+      });
+    } catch {
+      // Expected: the production finalizer rejects stale/foreign ownership before mutation/close.
+    }
+    const after = await r.authority.get(String(ISSUE));
+    const afterHead = await r.git.git(r.git.repo, "rev-parse", "refs/remotes/origin/main");
+    m.staleMutationSucceeded = before.state !== after.state || before.comments.length !== after.comments.length || beforeHead !== afterHead;
+    r.activeWorker?.controller.abort();
+    await r.activeWorker?.result;
+    r.activeWorker = undefined;
+    m.workerActive = false;
+    await this.done(m, r, this.toString());
+  }
+  toString() { return "staleWorkerMutationAttempt()"; }
 }
 
 class AuthorityChangeCommand extends LifecycleCommand {
@@ -377,6 +462,7 @@ class PromoteCloseCommand extends LifecycleCommand {
         m.integratedReachable = true;
         if (result.closed) {
           m.closed = true;
+          m.closeWasAuthorized = m.authority === "unchanged" && m.verification === "pass" && m.lease === "ours";
           m.work = "completed";
         }
         if (result.authorityChanged || result.leaseLostAfterMerge || result.requiresReverification) {
@@ -439,11 +525,57 @@ class CrashResumeCommand extends LifecycleCommand {
       const resumed = await ensureIssueWorktree(r.git.repo, ISSUE, undefined, { ownership: { lease: live, authority: r.leases } });
       assert.equal(resumed, r.worktree);
     }
-    // Durable retry must not duplicate terminal side effects.
-    if (m.closed) {
+    if (m.candidate === "committed" && m.verification === "pass" && m.authority === "unchanged") {
       const commentsBefore = (await r.authority.get(String(ISSUE))).comments.length;
-      await assertCoreInvariants(m, r);
-      m.duplicateTerminalSideEffect = (await r.authority.get(String(ISSUE))).comments.length !== commentsBefore;
+      r.terminalAttempts += 1;
+      await assert.rejects(
+        () => withLifecycleFaultInjection({ checkpoint: "reachability_proven", position: "after" }, () => finalizeIssue(r.leases, r.authority, {
+          cwd: r.git.repo,
+          issueNumber: ISSUE,
+          agent: "pi-next",
+          runId: m.owner,
+          sessionId: `${m.owner}-session`,
+          issueUpdatedAt: "2026-08-22T12:00:00.000Z",
+          candidateSha: r.candidateSha!,
+          verifiedAuthorityFingerprint: r.verifiedFingerprint!,
+        })),
+        LifecycleCheckpointFault,
+      );
+      const integratedMain = await r.git.git(r.git.repo, "rev-parse", "refs/remotes/origin/main");
+      const retry = await finalizeIssue(r.leases, r.authority, {
+        cwd: r.git.repo,
+        issueNumber: ISSUE,
+        agent: "pi-next",
+        runId: m.owner,
+        sessionId: `${m.owner}-session`,
+        issueUpdatedAt: "2026-08-22T12:00:00.000Z",
+        candidateSha: r.candidateSha!,
+        verifiedAuthorityFingerprint: r.verifiedFingerprint!,
+        verifiedIntegratedMain: integratedMain,
+      });
+      r.terminalAttempts += 1;
+      m.candidate = "integrated";
+      m.integratedReachable = true;
+      if (retry.closed) {
+        m.closed = true;
+        m.closeWasAuthorized = true;
+        m.work = "completed";
+      }
+      m.duplicateTerminalSideEffect = (await r.authority.get(String(ISSUE))).comments.length > commentsBefore + (retry.closed ? 1 : 0);
+    } else if (m.closed) {
+      const commentsBefore = (await r.authority.get(String(ISSUE))).comments.length;
+      const retry = await finalizeIssue(r.leases, r.authority, {
+        cwd: r.git.repo,
+        issueNumber: ISSUE,
+        agent: "pi-next",
+        runId: m.owner,
+        sessionId: `${m.owner}-session`,
+        issueUpdatedAt: "2026-08-22T12:00:00.000Z",
+        candidateSha: r.candidateSha!,
+        verifiedAuthorityFingerprint: r.verifiedFingerprint ?? "",
+        verifiedIntegratedMain: await r.git.git(r.git.repo, "rev-parse", "refs/remotes/origin/main"),
+      });
+      m.duplicateTerminalSideEffect = retry.closed || (await r.authority.get(String(ISSUE))).comments.length !== commentsBefore;
     }
     await this.done(m, r, this.toString());
   }
@@ -454,14 +586,20 @@ class CleanupCommand extends LifecycleCommand {
   check(m: Readonly<LifecycleModel>) { return m.workspace !== "absent"; }
   async run(m: LifecycleModel, r: RealLifecycle) {
     const unique = m.workspace === "canonical-dirty" || m.candidate === "committed";
-    if (!unique && m.candidate === "integrated") {
-      // This property intentionally models ordering only; destructive deletion is left to
-      // existing real-Git cleanup tests. Here we assert it would only be reachable after integration.
+    if (m.candidate === "integrated" && m.integratedReachable) {
+      await cleanupCompletedIssueWorktree(r.git.repo, r.worktree!, ISSUE);
       m.workspace = "absent";
-    } else if (unique) {
-      m.cleanupDeletedUnique = false;
-      const status = await r.git.git(r.worktree!, "status", "--porcelain=v1", "--untracked-files=all");
-      await invariant(m, r, status.trim().length > 0 || m.candidate === "committed", "unique work disappeared during cleanup guard");
+    } else {
+      const beforeStatus = r.worktree
+        ? await r.git.git(r.worktree, "status", "--porcelain=v1", "--untracked-files=all").catch(() => "missing")
+        : "missing";
+      await assert.rejects(() => cleanupCompletedIssueWorktree(r.git.repo, r.worktree!, ISSUE));
+      const afterStatus = r.worktree
+        ? await r.git.git(r.worktree, "status", "--porcelain=v1", "--untracked-files=all").catch(() => "missing")
+        : "missing";
+      m.cleanupDeletedUnique = unique && afterStatus === "missing";
+      m.cleanupRanBeforeReachability = !m.integratedReachable && afterStatus === "missing";
+      await invariant(m, r, beforeStatus === afterStatus, "cleanup guard changed unintegrated workspace state");
     }
     await this.done(m, r, this.toString());
   }
@@ -494,6 +632,7 @@ function commandsArbitrary() {
     fc.constant(new StartWorkerCommand()),
     fc.constant(new FinishWorkerCommand()),
     fc.constant(new FailOrCancelWorkerCommand()),
+    fc.constant(new StaleWorkerMutationAttemptCommand()),
     fc.constant(new AuthorityChangeCommand()),
     fc.constant(new CommitCandidateCommand()),
     fc.constant(new VerifyPassCommand()),
@@ -516,6 +655,8 @@ test("property: generated lifecycle sequences preserve authority, verification, 
       try {
         await fc.asyncModelRun(() => ({ model: initialModel(), real }), cmds);
       } finally {
+        real.activeWorker?.controller.abort();
+        await real.activeWorker?.result.catch(() => undefined);
         await real.git.cleanup();
       }
     }),
