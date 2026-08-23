@@ -12,7 +12,7 @@ import { hasExactVerifiedFinalizationCandidate } from "./finalization-proof.js";
 
 function parseArgs(args: string[]): BootstrapCliOptions {
   let issueNumber: number | undefined;
-  let allowRepair = false;
+  let allowRepair = true;
   let review = false;
   let verifyOnly = false;
   let nextOnly = false;
@@ -22,6 +22,7 @@ function parseArgs(args: string[]): BootstrapCliOptions {
     const arg = args[index];
     if (arg === "--issue") issueNumber = Number(args[++index]);
     else if (arg === "--repair") allowRepair = true;
+    else if (arg === "--no-repair") allowRepair = false;
     else if (arg === "--review") review = true;
     else if (arg === "--verify-only" || arg === "--resume") verifyOnly = true;
     else if (arg === "--next-only") nextOnly = true;
@@ -48,6 +49,19 @@ function verificationPhase(report: BootstrapReport): "PASS" | "FAIL" {
   return report.mechanicalPass ? "PASS" : "FAIL";
 }
 
+function repairPhase(report: BootstrapReport): BootstrapLifecycleReport["repair"] {
+  if (!report.repairOutcome && report.mechanicalPass) return "NOT_NEEDED";
+  switch (report.repairOutcome) {
+    case "not-needed": return "NOT_NEEDED";
+    case "disabled": return "DISABLED";
+    case "completed": return "COMPLETED";
+    case "exhausted": return "EXHAUSTED";
+    case "failed": return "FAILED";
+    case "ineligible":
+    default: return "INELIGIBLE";
+  }
+}
+
 export async function runBootstrapLifecycle(
   options: BootstrapLifecycleOptions,
   dependencies: BootstrapDependencies = {},
@@ -70,11 +84,14 @@ export async function runBootstrapLifecycle(
       disposition: implementationReport.disposition,
       implementation: implementationPhase(implementationReport),
       verification: verificationPhase(implementationReport),
+      repair: repairPhase(implementationReport),
+      candidatePreserved: implementationReport.repairBudgetExhausted || undefined,
       implementationReport,
     };
     await lifecycleLock.update("verification");
     if (!options.finalize || options.verifyOnly || !implementationReport.mechanicalPass || (!implementationReport.finalizationReady && !resumeFinalizationOnly)) {
       emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "skipped", detail: !options.finalize ? "disabled" : options.verifyOnly ? "verify-only" : !implementationReport.mechanicalPass ? "verification-failed" : "not-ready" });
+      if (implementationReport.repairBudgetExhausted) emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: FAIL; repair: EXHAUSTED; candidate preserved" });
       return { ...base, finalization: "SKIPPED" };
     }
     await lifecycleLock.update("finalization");

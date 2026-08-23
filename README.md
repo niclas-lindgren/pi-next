@@ -179,7 +179,7 @@ It prepares the canonical `.worktrees/issue-75` / `agent/issue-75` workspace, in
 npm run bootstrap:self-host -- --issue 75 --verify-only
 ```
 
-`--resume` is an alias for `--verify-only`; `--repair` may add one bounded repair only after verification fails. A read-only review can be enabled with `--review`; `--queue` is intentionally not supported.
+`--resume` is an alias for `--verify-only`; one bounded fresh repair is attempted by default after an eligible deterministic verification failure (`--no-repair` opts out, and `--repair` remains a compatibility alias). A read-only review can be enabled with `--review`; `--queue` is intentionally not supported.
 
 ### Release automation
 
