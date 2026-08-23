@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 
-import { BootstrapFinalizeError, classifyCiEvidence, evaluateGhPrChecks, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation } from "../scripts/bootstrap-finalize.ts";
+import { BootstrapFinalizeError, classifyCiEvidence, classifyExternalVerificationAuthority, evaluateGhPrChecks, main as bootstrapFinalizeMain, runBootstrapFinalize, type BootstrapFinalizeAuthority, type BootstrapFinalizeIssue, type BootstrapFinalizePr, type CheckConclusion, type CiEvaluation } from "../scripts/bootstrap-finalize.ts";
 
 const exec = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> { return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim(); }
@@ -169,6 +169,35 @@ test("externally merged zero-diff candidate proves exact head reachability befor
     const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 118, authority });
     assert.equal(result.reachable, true);
     assert.equal(await git(f.remote, "merge-base", "--is-ancestor", sha, "main").then(() => "yes"), "yes");
+  } finally { await f.cleanup(); }
+});
+
+test("issue 119 prose mentioning pending external verification does not block exact merged recovery", async () => {
+  const f = await fixture();
+  try {
+    const { pr } = await externallyMergedCandidate(f.root, f.remote, 119);
+    const authority = new FakeAuthority(f.root, 119);
+    authority.issue.body = [
+      "honor pending external verification and changed-authority rules",
+      "",
+      "pending external verification remains open and cleanup behavior follows repository lifecycle policy",
+    ].join("\n");
+    authority.prs.push(pr);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 119, authority });
+    assert.equal(result.issueClosed, true);
+    assert.equal(authority.closed, true);
+  } finally { await f.cleanup(); }
+});
+
+test("explicit structured pending external verification marker leaves integrated issue open", async () => {
+  const f = await fixture();
+  try {
+    const { pr } = await externallyMergedCandidate(f.root, f.remote, 122);
+    const authority = new FakeAuthority(f.root, 122);
+    authority.issue.comments = [{ id: "pending", body: pendingMarker }];
+    authority.prs.push(pr);
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 122, authority }), "EXTERNAL_VERIFICATION_PENDING");
+    assert.equal(authority.closed, false);
   } finally { await f.cleanup(); }
 });
 
@@ -378,6 +407,44 @@ test("automatic candidate discovery ignores stale already-integrated issue branc
     const result = await runBootstrapFinalize({ cwd: f.root, authority });
     assert.equal(result.issueNumber, 101);
   } finally { await f.cleanup(); }
+});
+
+function externalIssue(body: string, comments: unknown[] = []): BootstrapFinalizeIssue { return { number: 119, title: "authority regression", state: "OPEN", body, comments }; }
+const pendingRecord = { version: 1, status: "awaiting_external_verification", criteria: [{ id: "deploy", description: "verify deployed revision", environment: "production" }], integratedMainSha: "a".repeat(40) };
+const pendingMarker = `<!-- pi-next-pending-verification -->\n${JSON.stringify(pendingRecord)}`;
+const passedMarker = `<!-- pi-next-pending-verification-result -->\n${JSON.stringify({ version: 1, integratedMainSha: pendingRecord.integratedMainSha, status: "passed", evidence: "operator approved" })}`;
+
+test("external verification classifier ignores ordinary prose, checklists, code fences, and historical discussion", () => {
+  assert.equal(classifyExternalVerificationAuthority(externalIssue("This spec says pending external verification remains open after integration.")), "clear");
+  assert.equal(classifyExternalVerificationAuthority(externalIssue("## Tests\n- pending external verification remains open and cleanup behavior follows policy")), "clear");
+  assert.equal(classifyExternalVerificationAuthority(externalIssue("```text\npending external verification\nawaiting external verification\npost-deploy verification\n```")), "clear");
+  assert.equal(classifyExternalVerificationAuthority(externalIssue("", [{ id: "c1", body: "Historical note: pending external verification used to be phrase-matched." }])), "clear");
+});
+
+test("external verification classifier requires an explicit structured pending marker", () => {
+  assert.equal(classifyExternalVerificationAuthority(externalIssue("", [{ id: "p", body: pendingMarker }])), "pending");
+  assert.equal(classifyExternalVerificationAuthority(externalIssue("Unrelated prose says pending external verification.", [{ id: "p", body: pendingMarker }])), "pending");
+});
+
+test("external verification classifier fails closed for malformed or conflicting markers", () => {
+  assert.throws(() => classifyExternalVerificationAuthority(externalIssue("", [{ id: "bad", body: "<!-- pi-next-pending-verification -->\nnot json" }])), (error) => error instanceof BootstrapFinalizeError && error.code === "EXTERNAL_VERIFICATION_AUTHORITY_INVALID");
+  const other = { ...pendingRecord, integratedMainSha: "b".repeat(40) };
+  assert.throws(() => classifyExternalVerificationAuthority(externalIssue("", [{ id: "p1", body: pendingMarker }, { id: "p2", body: `<!-- pi-next-pending-verification -->\n${JSON.stringify(other)}` }])), (error) => error instanceof BootstrapFinalizeError && error.code === "EXTERNAL_VERIFICATION_AUTHORITY_INVALID");
+});
+
+test("external verification classifier clears pending state with authoritative result marker", () => {
+  assert.equal(classifyExternalVerificationAuthority(externalIssue("", [{ id: "p", body: pendingMarker }, { id: "r", body: passedMarker }])), "clear");
+});
+
+test("external verification classifier reproduces issue 119 false-positive body as clear without model calls", () => {
+  const body = [
+    "honor pending external verification and changed-authority rules",
+    "",
+    "```text",
+    "pending external verification remains open and cleanup behavior follows repository lifecycle policy",
+    "```",
+  ].join("\n");
+  assert.equal(classifyExternalVerificationAuthority(externalIssue(body)), "clear");
 });
 
 test("bootstrap finalizer --help reports usage without touching repository state", async () => {

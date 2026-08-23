@@ -17,8 +17,8 @@ import {
 } from "./authority-read-policy.ts";
 
 const execFileAsync = promisify(execFile);
-const PENDING_VERIFICATION_MARKER = "<!-- pi-next-pending-verification -->";
-const PENDING_VERIFICATION_RESULT_MARKER = "<!-- pi-next-pending-verification-result -->";
+export const PENDING_VERIFICATION_MARKER = "<!-- pi-next-pending-verification -->";
+export const PENDING_VERIFICATION_RESULT_MARKER = "<!-- pi-next-pending-verification-result -->";
 
 function pendingVerificationComment(record: PendingVerificationRecord): string {
   return `${PENDING_VERIFICATION_MARKER}\n${JSON.stringify(record)}`;
@@ -203,26 +203,65 @@ function parseComments(raw: unknown): AuthorityComment[] {
     : [];
 }
 
-function markedJson<T>(comments: readonly AuthorityComment[], marker: string): T | undefined {
-  for (let index = comments.length - 1; index >= 0; index -= 1) {
-    const body = comments[index].body;
-    const markerIndex = body.indexOf(marker);
-    if (markerIndex < 0) continue;
-    try {
-      return JSON.parse(body.slice(markerIndex + marker.length).trim()) as T;
-    } catch {
-      // A malformed lifecycle marker is intentionally not treated as evidence.
-      return undefined;
+export class PendingVerificationAuthorityError extends Error {
+  readonly code = "pending_verification_authority_invalid";
+  constructor(message: string) {
+    super(message);
+    this.name = "PendingVerificationAuthorityError";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function validatePendingVerificationRecord(value: unknown): PendingVerificationRecord {
+  if (!isRecord(value)) throw new PendingVerificationAuthorityError("pending verification marker JSON must be an object");
+  if (value.version !== 1 || value.status !== "awaiting_external_verification") throw new PendingVerificationAuthorityError("pending verification marker has unsupported version or status");
+  if (typeof value.integratedMainSha !== "string" || !/^[0-9a-f]{40}$/i.test(value.integratedMainSha)) throw new PendingVerificationAuthorityError("pending verification marker has invalid integratedMainSha");
+  if (!Array.isArray(value.criteria) || value.criteria.length === 0) throw new PendingVerificationAuthorityError("pending verification marker must include criteria");
+  for (const criterion of value.criteria) {
+    if (!isRecord(criterion) || typeof criterion.id !== "string" || !criterion.id.trim() || typeof criterion.description !== "string" || !criterion.description.trim() || typeof criterion.environment !== "string" || !criterion.environment.trim()) {
+      throw new PendingVerificationAuthorityError("pending verification marker has invalid criteria");
     }
   }
-  return undefined;
+  return value as unknown as PendingVerificationRecord;
+}
+
+function validatePendingVerificationResult(value: unknown): PendingVerificationResult {
+  if (!isRecord(value)) throw new PendingVerificationAuthorityError("pending verification result marker JSON must be an object");
+  if (value.version !== 1 || (value.status !== "passed" && value.status !== "failed")) throw new PendingVerificationAuthorityError("pending verification result marker has unsupported version or status");
+  if (typeof value.integratedMainSha !== "string" || !/^[0-9a-f]{40}$/i.test(value.integratedMainSha)) throw new PendingVerificationAuthorityError("pending verification result marker has invalid integratedMainSha");
+  if (typeof value.evidence !== "string" || !value.evidence.trim()) throw new PendingVerificationAuthorityError("pending verification result marker must include evidence");
+  return value as unknown as PendingVerificationResult;
+}
+
+function strictMarkedJson<T>(comments: readonly AuthorityComment[], marker: string, validate: (value: unknown) => T): T | undefined {
+  const matches: T[] = [];
+  for (const comment of comments) {
+    const body = comment.body.trim();
+    if (!body.startsWith(`${marker}\n`)) continue;
+    const jsonText = body.slice(marker.length).trim();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      throw new PendingVerificationAuthorityError(`malformed structured authority marker: ${marker}`);
+    }
+    matches.push(validate(parsed));
+  }
+  if (matches.length === 0) return undefined;
+  const latest = matches[matches.length - 1]!;
+  const latestText = JSON.stringify(latest);
+  if (matches.some((entry) => JSON.stringify(entry) !== latestText)) throw new PendingVerificationAuthorityError(`conflicting structured authority markers: ${marker}`);
+  return latest;
 }
 
 export function pendingVerificationState(
   item: Pick<AuthorityWorkItem, "comments" | "pendingVerification" | "pendingVerificationResult">,
 ): { pending?: PendingVerificationRecord; result?: PendingVerificationResult } {
-  const pending = item.pendingVerification ?? markedJson<PendingVerificationRecord>(item.comments, PENDING_VERIFICATION_MARKER);
-  const result = item.pendingVerificationResult ?? markedJson<PendingVerificationResult>(item.comments, PENDING_VERIFICATION_RESULT_MARKER);
+  const pending = item.pendingVerification ?? strictMarkedJson<PendingVerificationRecord>(item.comments, PENDING_VERIFICATION_MARKER, validatePendingVerificationRecord);
+  const result = item.pendingVerificationResult ?? strictMarkedJson<PendingVerificationResult>(item.comments, PENDING_VERIFICATION_RESULT_MARKER, validatePendingVerificationResult);
   return { pending, result };
 }
 
@@ -231,8 +270,7 @@ export function isAwaitingExternalVerification(
   item: Pick<AuthorityWorkItem, "comments" | "pendingVerification" | "pendingVerificationResult">,
 ): boolean {
   const { pending, result } = pendingVerificationState(item);
-  if (!pending) return item.comments.some((comment) => comment.body.includes(PENDING_VERIFICATION_MARKER));
-  if (pending.status !== "awaiting_external_verification") return false;
+  if (!pending) return false;
   return !result || result.integratedMainSha !== pending.integratedMainSha || !["passed", "failed"].includes(result.status);
 }
 
@@ -241,8 +279,8 @@ function fromGitHub(raw: Record<string, unknown>): AuthorityWorkItem {
   const number = Number(raw.number || 0);
   const priority = labels.find((label) => label.startsWith("priority:"))?.slice("priority:".length).trim();
   const comments = parseComments(raw.comments);
-  const pendingVerification = markedJson<PendingVerificationRecord>(comments, PENDING_VERIFICATION_MARKER);
-  const pendingVerificationResult = markedJson<PendingVerificationResult>(comments, PENDING_VERIFICATION_RESULT_MARKER);
+  const pendingVerification = strictMarkedJson<PendingVerificationRecord>(comments, PENDING_VERIFICATION_MARKER, validatePendingVerificationRecord);
+  const pendingVerificationResult = strictMarkedJson<PendingVerificationResult>(comments, PENDING_VERIFICATION_RESULT_MARKER, validatePendingVerificationResult);
   return {
     id: Number.isSafeInteger(number) && number > 0 ? String(number) : String(raw.id || ""),
     number: Number.isSafeInteger(number) && number > 0 ? number : undefined,
