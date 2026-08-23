@@ -29,6 +29,7 @@
   "exports": {
     ".": "./extensions/pi-next.ts",
     "./coordination": "./src/coordination/index.ts",
+    "./lifecycle": "./src/lifecycle/index.ts",
     "./config": "./src/coordination/config.ts",
     "./dispatch": "./src/coordination/worker-dispatch.ts",
     "./review": "./src/coordination/adversarial-review.ts",

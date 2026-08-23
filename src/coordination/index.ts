@@ -14,3 +14,4 @@ export * from "./finalize.ts";
 export * from "./lifecycle-journal.ts";
 export * from "./lifecycle-checkpoints.ts";
 export * from "./cli.ts";
+export * from "../lifecycle/index.js";

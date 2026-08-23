@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-export type BootstrapLifecycleOperation = "self-host" | "finalize";
+export type BootstrapLifecycleOperation = "self-host" | "finalize" | "bootstrap" | "explicit" | "auto" | "monitor";
 export type BootstrapLifecyclePhase = "acquired" | "preflight" | "worker" | "verification" | "finalization" | "cleanup" | string;
 
 export interface BootstrapLifecycleLockRecord {
