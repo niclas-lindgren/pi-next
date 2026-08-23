@@ -77,6 +77,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adopt-pattern** — deterministic recovery systems spend a fixed retry budget only after the failed step leaves a mechanically proven candidate and bounded failure evidence. The bootstrap supervisor now makes the already-existing one-shot repair budget the normal path: a fresh repair worker receives the task packet, current candidate evidence, and exact failed checks, then verification reruns once. Failed second verification exhausts the budget and preserves the candidate rather than looping.
 - **reject** — continuing the implementation conversation, repairing preflight/authority/no-change/finalization failures, or recursively launching workers. These states are either unsafe, unproven, or owned by separate recovery semantics.
 
+### Unified lifecycle kernel decisions (issue #146)
+
+- **adopt-pattern** — durable workflow kernels expose one typed single-work-item primitive and make entry points schedulers/adapters over it. Pi-next now promotes the bootstrap lifecycle mechanics into a production-owned `lifecycle` API with a canonical run/issue/phase projection consumed by bootstrap and available to explicit, auto, and monitor schedulers.
+- **reject** — making `/pi-next auto` or bootstrap infer current truth from stale historical controller records, PLAN files, or worker UI. These remain evidence/projections; the lifecycle kernel result/projection is the current state contract.
+
 ### Bootstrap lifecycle lock decisions (issue #114)
 
 - **adopt-pattern** — local process lock managers commonly use an atomic lock directory plus bounded owner metadata and heartbeat. The bootstrap utility adopts that filesystem primitive in `.git/pi-next/bootstrap-lifecycle/issue-N.lock`, keeping coordination outside candidate contents and failing closed for live or ambiguous owners.

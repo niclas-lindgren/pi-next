@@ -5,10 +5,8 @@ import { redact, emitProgress } from "./utils.js";
 import { createCliProgressReporter } from "./reporter.js";
 import { resolveNextIssue } from "./roadmap.js";
 import { runBootstrap } from "./supervisor.js";
-import { runCommand } from "./command-runner.js";
-import { runBootstrapFinalize } from "../../scripts/bootstrap-finalize.ts";
-import { acquireBootstrapLifecycleLock, BootstrapLifecycleLockError } from "./lifecycle-lock.js";
-import { hasExactVerifiedFinalizationCandidate } from "./finalization-proof.js";
+import { BootstrapLifecycleLockError } from "./lifecycle-lock.js";
+import { runSingleIssueLifecycle } from "../lifecycle/kernel.js";
 
 function parseArgs(args: string[]): BootstrapCliOptions {
   let issueNumber: number | undefined;
@@ -46,84 +44,28 @@ export function exitCodeForDisposition(disposition: Disposition | "finalization-
   return disposition === "pass" || disposition === "already-satisfied" ? 0 : disposition === "repairable-failure" ? 1 : 2;
 }
 
-function implementationPhase(report: BootstrapReport): "PASS" | "FAIL" | "BLOCKED" {
-  if (report.implementationOutcome === "failed") return report.disposition === "repairable-failure" ? "FAIL" : "BLOCKED";
-  return "PASS";
-}
-
-function verificationPhase(report: BootstrapReport): "PASS" | "FAIL" {
-  return report.mechanicalPass ? "PASS" : "FAIL";
-}
-
-function repairPhase(report: BootstrapReport): BootstrapLifecycleReport["repair"] {
-  if (!report.repairOutcome && report.mechanicalPass) return "NOT_NEEDED";
-  switch (report.repairOutcome) {
-    case "not-needed": return "NOT_NEEDED";
-    case "disabled": return "DISABLED";
-    case "completed": return "COMPLETED";
-    case "exhausted": return "EXHAUSTED";
-    case "failed": return "FAILED";
-    case "ineligible":
-    default: return "INELIGIBLE";
-  }
-}
-
 export async function runBootstrapLifecycle(
   options: BootstrapLifecycleOptions,
   dependencies: BootstrapDependencies = {},
   execute: (options: BootstrapOptions, dependencies?: BootstrapDependencies) => Promise<BootstrapReport> = runBootstrap,
 ): Promise<BootstrapLifecycleReport> {
-  const reporter = dependencies.reporter;
-  const runner = dependencies.runCommand ?? runCommand;
-  const cwd = resolve(options.cwd ?? process.cwd());
-  const rootResult = await runner("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { cwd });
-  if (rootResult.exitCode !== 0) throw new BootstrapError(`could not resolve repository root: ${(rootResult.stderr || rootResult.stdout).trim()}`);
-  const commonDirResult = await runner("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd });
-  if (commonDirResult.exitCode !== 0) throw new BootstrapError(`could not resolve repository git directory: ${(commonDirResult.stderr || commonDirResult.stdout).trim()}`);
-  const lifecycleLock = await acquireBootstrapLifecycleLock({ root: rootResult.stdout.trim(), gitCommonDir: commonDirResult.stdout.trim(), issueNumber: options.issueNumber, operation: "self-host", phase: "preflight", heartbeatMs: dependencies.heartbeatMs });
-  try {
-    const resumeFinalizationOnly = options.finalize && !options.verifyOnly && await hasExactVerifiedFinalizationCandidate({ root: rootResult.stdout.trim(), gitCommonDir: commonDirResult.stdout.trim(), issueNumber: options.issueNumber, runCommand: runner });
-    await lifecycleLock.update(resumeFinalizationOnly ? "finalization" : "worker");
-    const implementationReport = await execute(resumeFinalizationOnly ? { ...options, verifyOnly: true } : options, dependencies);
-    const base: Omit<BootstrapLifecycleReport, "finalization"> = {
-      issueNumber: implementationReport.issueNumber,
-      disposition: implementationReport.disposition,
-      implementation: implementationPhase(implementationReport),
-      verification: verificationPhase(implementationReport),
-      repair: repairPhase(implementationReport),
-      candidatePreserved: implementationReport.repairBudgetExhausted || undefined,
-      implementationReport,
-    };
-    await lifecycleLock.update("verification");
-    if (!options.finalize || options.verifyOnly || !implementationReport.mechanicalPass || (!implementationReport.finalizationReady && !resumeFinalizationOnly)) {
-      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "skipped", detail: !options.finalize ? "disabled" : options.verifyOnly ? "verify-only" : !implementationReport.mechanicalPass ? "verification-failed" : "not-ready" });
-      if (implementationReport.repairBudgetExhausted) emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: FAIL; repair: EXHAUSTED; candidate preserved" });
-      return { ...base, finalization: "SKIPPED" };
-    }
-    await lifecycleLock.update("finalization");
-    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "start" });
-    try {
-      const runFinalizer = dependencies.runFinalizer ?? ((input) => runBootstrapFinalize(input));
-      const finalizationReport = await runFinalizer({
-        cwd: options.cwd,
-        issueNumber: options.issueNumber,
-        candidatePaths: implementationReport.candidate.changedFiles,
-        reporter: (line) => emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "activity", detail: line }),
-        lifecycleLock,
-      });
-      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "pass" });
-      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "pass", detail: finalizationReport.pendingExternalVerification ? "implementation: PASS; verification: PASS; integration: PASS; external verification: PENDING; cleanup: PASS" : "implementation: PASS; verification: PASS; finalization: PASS" });
-      return { ...base, disposition: "pass", finalization: "PASS", finalizationReport };
-    } catch (error) {
-      const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "FINALIZATION_FAILED";
-      const reason = redact(error instanceof Error ? error.message : String(error));
-      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "finalization", state: "blocked", detail: code });
-      emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: PASS; finalization: BLOCKED; candidate preserved" });
-      return { ...base, disposition: "finalization-blocked", finalization: "BLOCKED", candidatePreserved: true, finalizationFailure: { code, reason } };
-    }
-  } finally {
-    await lifecycleLock.release();
-  }
+  const result = await runSingleIssueLifecycle({
+    ...options,
+    entry: "bootstrap",
+    workItem: { issueNumber: options.issueNumber },
+  }, dependencies, execute);
+  return {
+    issueNumber: result.issueNumber,
+    disposition: result.disposition,
+    implementation: result.implementation,
+    verification: result.verification,
+    finalization: result.finalization,
+    candidatePreserved: result.candidatePreserved,
+    repair: result.repair,
+    implementationReport: result.implementationReport,
+    finalizationReport: result.finalizationReport,
+    finalizationFailure: result.finalizationFailure,
+  };
 }
 
 function printSelection(selection: NextIssueSelection): void {
