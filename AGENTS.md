@@ -137,6 +137,12 @@ deletion commands.
 
 ## Controller and recovery regression testing
 
+A real lifecycle/controller/recovery bug is not considered fully fixed until its
+outer-path ordering is captured as a deterministic scenario, replay fixture, or
+property regression where technically feasible. Use the historical incident
+corpus/index in `docs/HISTORICAL_INCIDENT_REGRESSIONS.md` and add sanitized
+fixtures or equivalent linked outer-path tests as part of the bug-fix workflow.
+
 Changes to scheduling, recovery, leases, PLAN handling, checkpoints,
 convergence, lifecycle, worker supervision, adapter dispatch,
 command/session orchestration, or persisted event/replay state must include a

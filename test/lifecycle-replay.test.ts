@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
@@ -7,6 +8,7 @@ import {
   readLifecycleJournal,
 } from "../src/coordination/lifecycle-journal.ts";
 import {
+  evaluateLifecycleReplayFixture,
   evaluateLifecycleReplaySuite,
   planLifecycleRecovery,
 } from "../src/evaluation/lifecycle-replay.ts";
@@ -14,6 +16,7 @@ import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter
 import { createDisposableGitFixture } from "./helpers/git-fixture.ts";
 
 const replaySuite = resolve(process.cwd(), "test/fixtures/replay/crash-boundaries.json");
+const historicalSuite = resolve(process.cwd(), "test/fixtures/replay/historical-incidents.json");
 
 test("initial crash-boundary replay corpus is deterministic and complete", () => {
   const results = evaluateLifecycleReplaySuite(replaySuite);
@@ -28,6 +31,35 @@ test("initial crash-boundary replay corpus is deterministic and complete", () =>
     "cleanup_workspace",
     "contained",
   ]);
+});
+
+test("historical incident replay corpus covers sanitized pi-next regressions", () => {
+  const results = evaluateLifecycleReplaySuite(historicalSuite);
+  assert.equal(results.length, 14);
+  assert.deepEqual(results.map((result) => result.ok), Array(14).fill(true));
+  assert.ok(results.every((result) => result.name.startsWith("historical: ")));
+
+  const corpus = JSON.parse(readFileSync(historicalSuite, "utf8")) as {
+    cases: Array<{ name: string; provenance?: string; invariant?: string }>;
+  };
+  const names = new Set<string>();
+  for (const fixture of corpus.cases) {
+    assert.match(fixture.name, /^historical: /);
+    assert.ok(!names.has(fixture.name), `duplicate historical fixture ${fixture.name}`);
+    names.add(fixture.name);
+    assert.ok((fixture.provenance ?? "").length >= 20, `${fixture.name} missing provenance`);
+    assert.ok((fixture.invariant ?? "").length >= 20, `${fixture.name} missing invariant`);
+    const sanitized = `${fixture.name}\n${fixture.provenance}\n${fixture.invariant}`;
+    assert.doesNotMatch(sanitized, /BEGIN (?:CURRENT COMMENTS|ISSUE)|ghp_|github_pat_|sk-[A-Za-z0-9]|PRIVATE|transcript/i);
+  }
+
+  const failing = JSON.parse(readFileSync(historicalSuite, "utf8")) as { cases: unknown[]; version: 1 };
+  const broken = structuredClone(failing.cases[0]) as { expect: { nextAction: string } };
+  broken.expect.nextAction = "claim_lease";
+  const failed = evaluateLifecycleReplayFixture(broken);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.name, "historical: missing loop_result requires safe reconciliation");
+  assert.match(failed.error ?? "", /expected nextAction=claim_lease/);
 });
 
 test("post-push replay uses scripted worker plus disposable real Git and never repeats promotion", async () => {

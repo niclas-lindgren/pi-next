@@ -1,0 +1,233 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "version": 1,
+      "name": "historical: missing loop_result requires safe reconciliation",
+      "provenance": "Normalized from a pi-next auto run where the worker session ended before recording loop_result.",
+      "invariant": "A missing worker terminal result is never treated as success; recovery reconciles durable state before retrying or mutating.",
+      "runId": "hist-missing-loop-result",
+      "issueNumber": 801,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-801" } },
+        { "event": "worker_started", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true },
+      "expect": { "nextAction": "reconcile_worker_result", "mustNotRepeat": ["claim_lease", "prepare_workspace", "start_worker"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: worker exit code 1 keeps bounded diagnostics",
+      "provenance": "Normalized from a worker process failure that returned code 1 without enough model diagnostics.",
+      "invariant": "The non-zero worker result is preserved as an issue-local failure with code/stage diagnostics instead of being collapsed into an ambiguous loop stop.",
+      "runId": "hist-worker-code-1",
+      "issueNumber": 802,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-802" } },
+        { "event": "worker_started", "payload": { "adapterId": "scripted", "adapterVersion": "1", "phase": "implementation" } },
+        { "event": "worker_finished", "payload": { "adapterId": "scripted", "adapterVersion": "1", "phase": "implementation", "ok": false, "code": 1, "summary": "process exited before structured completion" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "worker", "reasonCode": "worker_exit_1", "summary": "bounded stderr digest unavailable" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained", "mustNotRepeat": ["start_worker", "run_worker"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: stale controller.lock is recovered but fresh lock fails closed",
+      "provenance": "Normalized from recovery around controller.lock records whose owner process freshness differed across restarts.",
+      "invariant": "A stale local controller lock cannot block owned recovery, while an ambiguous or fresh controller owner must not be stolen silently.",
+      "runId": "hist-controller-lock",
+      "issueNumber": 803,
+      "events": [
+        { "event": "baseline_imported", "payload": { "source": "controller.lock", "summary": "stale pid classified dead; fresh pid would be contained" } },
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-803" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true },
+      "expect": { "nextAction": "start_worker", "mustNotRepeat": ["claim_lease", "prepare_workspace"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: two harnesses racing same issue loses claim locally",
+      "provenance": "Normalized from concurrent harnesses selecting the same open issue before one lease CAS won.",
+      "invariant": "The loser of a newly selected candidate claim race skips only that candidate and must not create a second fresh owner or stop unrelated scheduling.",
+      "runId": "hist-claim-race",
+      "issueNumber": 804,
+      "events": [
+        { "event": "candidate_selected", "payload": { "workItemId": "804", "source": "scheduler" } },
+        { "event": "lease_rejected", "payload": { "agent": "other-harness", "reasonCode": "fresh_owner" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "lease-claim", "reasonCode": "fresh_owner" } }
+      ],
+      "observed": { "leaseOwned": false, "workspaceExists": false, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained" }
+    },
+    {
+      "version": 1,
+      "name": "historical: issue already leased by fresh owner is skipped",
+      "provenance": "Normalized from discovery finding an otherwise eligible issue with a fresh foreign lease.",
+      "invariant": "A fresh existing owner prevents local mutation and remains a candidate-local skip, not an ownership takeover.",
+      "runId": "hist-fresh-owner",
+      "issueNumber": 805,
+      "events": [
+        { "event": "candidate_selected", "payload": { "workItemId": "805", "source": "scheduler" } },
+        { "event": "lease_rejected", "payload": { "agent": "foreign-fresh-owner", "reasonCode": "fresh_owner" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "candidate-selection", "reasonCode": "leased_elsewhere" } }
+      ],
+      "observed": { "leaseOwned": false, "workspaceExists": false, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained" }
+    },
+    {
+      "version": 1,
+      "name": "historical: canonical worktree takeover after prior agent parked release",
+      "provenance": "Normalized from a parked/released prior agent leaving a canonical worktree that the current owner had to resume safely.",
+      "invariant": "Takeover is allowed only through live ownership and the canonical .worktrees/issue-N identity; preserved work is resumed rather than discarded.",
+      "runId": "hist-canonical-takeover",
+      "issueNumber": 806,
+      "events": [
+        { "event": "baseline_imported", "payload": { "source": "parked-agent", "worktree": ".worktrees/issue-806", "summary": "prior owner released" } },
+        { "event": "lease_taken_over", "payload": { "agent": "pi-next", "worktree": ".worktrees/issue-806", "branch": "agent/issue-806" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-806", "branch": "agent/issue-806" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true },
+      "expect": { "nextAction": "start_worker", "mustNotRepeat": ["claim_lease", "prepare_workspace"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: PLAN summary narrower than current authority",
+      "provenance": "Normalized from a local PLAN whose summary omitted newer authority/comment requirements.",
+      "invariant": "Persisted PLAN text is recovery evidence, never authority; live authority widening forces reconciliation before implementation continues.",
+      "runId": "hist-plan-narrower-authority",
+      "issueNumber": 807,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-807" } },
+        { "event": "plan_ready", "payload": { "source": "PLAN.md", "summary": "local summary is narrower than authority" } },
+        { "event": "authority_loaded", "payload": { "authorityFingerprint": "live-authority-v2", "changed": true } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "plan-reconciliation", "reasonCode": "authority_widened" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained", "mustNotRepeat": ["claim_lease", "prepare_workspace"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: authority changes after implementation before closure",
+      "provenance": "Normalized from a finalization window where comments/authority changed after verification but before issue closure.",
+      "invariant": "A fresh pre-close authority change prevents closure of the old candidate and requires reconciliation against new requirements.",
+      "runId": "hist-authority-change-before-close",
+      "issueNumber": 808,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-808" } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "8888888888888888888888888888888888888888" } },
+        { "event": "candidate_committed", "payload": { "candidateSha": "8888888888888888888888888888888888888888" } },
+        { "event": "promotion_succeeded", "payload": { "candidateSha": "8888888888888888888888888888888888888888", "mergeSha": "8080808080808080808080808080808080808080" } },
+        { "event": "reachability_proven", "payload": { "candidateSha": "8888888888888888888888888888888888888888", "mainSha": "8080808080808080808080808080808080808080" } },
+        { "event": "authority_reconciled", "payload": { "authorityFingerprint": "authority-v2", "changed": true } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "pre-close-authority", "reasonCode": "authority_changed" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained", "mustNotRepeat": ["promote_candidate", "prove_reachability"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: workflow-only commit budget cannot block finalization",
+      "provenance": "Normalized from a workflow-only/lifecycle commit budget collision during correctness-required terminal processing.",
+      "invariant": "Optimization budgets may coalesce bookkeeping but cannot prevent reachability, authority reconciliation, closure/pending disposition, cleanup, or lease release.",
+      "runId": "hist-workflow-budget-finalization",
+      "issueNumber": 809,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-809" } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "9999999999999999999999999999999999999999" } },
+        { "event": "candidate_committed", "payload": { "candidateSha": "9999999999999999999999999999999999999999" } },
+        { "event": "promotion_succeeded", "payload": { "candidateSha": "9999999999999999999999999999999999999999", "mergeSha": "9090909090909090909090909090909090909090" } },
+        { "event": "reachability_proven", "payload": { "candidateSha": "9999999999999999999999999999999999999999", "mainSha": "9090909090909090909090909090909090909090" } },
+        { "event": "authority_reconciled", "payload": { "authorityFingerprint": "authority-809", "changed": false } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true },
+      "expect": { "nextAction": "record_pending_or_close", "mustNotRepeat": ["promote_candidate", "prove_reachability", "reconcile_authority"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: completed candidate on main while external verification pending",
+      "provenance": "Normalized from a candidate already reachable from main where hosted/external verification had not yet returned.",
+      "invariant": "Main reachability is not equivalent to external verification pass; pending status remains explicit and cleanup is idempotent.",
+      "runId": "hist-main-pending-external-verification",
+      "issueNumber": 810,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-810" } },
+        { "event": "reachability_proven", "payload": { "candidateSha": "1010101010101010101010101010101010101010", "mainSha": "1111111111111111111111111111111111111111" } },
+        { "event": "authority_reconciled", "payload": { "authorityFingerprint": "authority-810", "changed": false } },
+        { "event": "pending_verification_recorded", "payload": { "mainSha": "1111111111111111111111111111111111111111", "criteriaIds": ["external-ci"] } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true, "pendingVerificationRecorded": true },
+      "expect": { "nextAction": "cleanup_workspace", "mustNotRepeat": ["record_pending_or_close", "promote_candidate"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: blocked issue does not stop loop when eligible work remains",
+      "provenance": "Normalized from a scheduler pass that stopped after a blocked/deferred issue although another eligible issue existed.",
+      "invariant": "Blocked or deferred disposition is issue-local; the scheduler records containment and continues to the next eligible candidate.",
+      "runId": "hist-blocked-continue",
+      "issueNumber": 811,
+      "events": [
+        { "event": "candidate_selected", "payload": { "workItemId": "811", "source": "scheduler" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "scheduler", "reasonCode": "blocked_has_successor", "summary": "continue with next eligible issue" } }
+      ],
+      "observed": { "leaseOwned": false, "workspaceExists": false, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained" }
+    },
+    {
+      "version": 1,
+      "name": "historical: invalid consumer integration fails before worker launch",
+      "provenance": "Normalized from a missing/invalid consumer integration that was discovered only after an expensive worker started.",
+      "invariant": "Static consumer integration preflight failures are classified before worker launch and consume no model/provider credentials.",
+      "runId": "hist-invalid-consumer-preflight",
+      "issueNumber": 812,
+      "events": [
+        { "event": "candidate_selected", "payload": { "workItemId": "812", "source": "scheduler" } },
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "consumer-preflight", "reasonCode": "invalid_integration" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": false, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained", "mustNotRepeat": ["claim_lease"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: crash after push before cleanup and final disposition",
+      "provenance": "Normalized from a crash after main was pushed but before reachability, authority disposition, and cleanup completed.",
+      "invariant": "Restart proves existing Git reachability and continues terminal reconciliation; it must not merge or push the candidate again.",
+      "runId": "hist-crash-after-push-before-cleanup",
+      "issueNumber": 813,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-813" } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "1313131313131313131313131313131313131313" } },
+        { "event": "candidate_committed", "payload": { "candidateSha": "1313131313131313131313131313131313131313" } },
+        { "event": "promotion_started", "payload": { "candidateSha": "1313131313131313131313131313131313131313" } },
+        { "event": "promotion_succeeded", "payload": { "candidateSha": "1313131313131313131313131313131313131313", "mergeSha": "3131313131313131313131313131313131313131" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true },
+      "expect": { "nextAction": "reconcile_reachability", "mustNotRepeat": ["promote_candidate"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: stale worker cannot close after authority owner changed",
+      "provenance": "Normalized from a stale worker result arriving after ownership/current authority changed.",
+      "invariant": "Stale worker output is rejected at finalization; it cannot close or mutate an issue after ownership or live authority no longer matches.",
+      "runId": "hist-stale-worker-close",
+      "issueNumber": 814,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "old-worker" } },
+        { "event": "worker_started", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation" } },
+        { "event": "lease_rejected", "payload": { "agent": "new-owner", "reasonCode": "authority_changed" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "finalization", "reasonCode": "stale_worker_authority_changed" } }
+      ],
+      "observed": { "leaseOwned": false, "workspaceExists": true, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained", "mustNotRepeat": ["claim_lease", "start_worker"] }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "historical: short stable incident name",
+  "provenance": "Sanitized one-sentence source note; no prompts, transcripts, secrets, credentials, or raw private issue text.",
+  "invariant": "The lifecycle/controller/recovery invariant that previously failed and must be independently graded.",
+  "runId": "hist-short-name",
+  "issueNumber": 900,
+  "events": [
+    { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+    { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-900", "branch": "agent/issue-900" } },
+    { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "replace-with-stage", "reasonCode": "replace_with_reason" } }
+  ],
+  "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true, "contained": true },
+  "expect": { "nextAction": "contained", "mustNotRepeat": ["claim_lease", "prepare_workspace"] }
+}
