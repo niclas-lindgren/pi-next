@@ -132,6 +132,35 @@ test("bootstrap and production entries share stale-proof finalization-blocked di
   } finally { await f.cleanup(); }
 });
 
+test("bootstrap and production entries share dirty-baseline finalization divergence outcome", async () => {
+  const f = await fixture();
+  try {
+    const execute = async () => report(158, {
+      candidate: {
+        ...report(158).candidate,
+        headRevision: "a".repeat(40),
+        baselineRevision: "a".repeat(40),
+        originMainRevision: "b".repeat(40),
+        dirty: true,
+        committedChanges: false,
+        uncommittedChanges: true,
+        changedFiles: ["README.md", "new-source.ts"],
+      },
+    });
+    const runFinalizer = async () => {
+      const error = new Error("origin/main advanced with unrelated commits during finalize; re-verify against current main");
+      (error as Error & { code: string }).code = "REQUIRES_REVERIFICATION";
+      throw error;
+    };
+    const bootstrap = await runBootstrapLifecycle({ cwd: f.root, issueNumber: 158, allowRepair: true, review: false, finalize: true }, { runFinalizer }, execute);
+    const production = await runSingleIssueLifecycle({ cwd: f.root, workItem: { issueNumber: 158 }, allowRepair: true, review: false, finalize: true, entry: "auto", runId: "auto-158" }, { runFinalizer }, execute);
+    assert.equal(bootstrap.disposition, "finalization-blocked");
+    assert.equal(production.disposition, "finalization-blocked");
+    assert.deepEqual(bootstrap.finalizationFailure, production.finalizationFailure);
+    assert.equal(production.candidatePreserved, true);
+  } finally { await f.cleanup(); }
+});
+
 test("canonical projection prevents Campsty #647-style footer/worker contradiction", async () => {
   const f = await fixture();
   try {

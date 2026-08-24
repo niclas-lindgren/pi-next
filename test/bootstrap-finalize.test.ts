@@ -54,6 +54,14 @@ async function dirtyTrackedCandidate(root: string, issue: number, file = "README
   return path;
 }
 
+async function advanceOriginMain(root: string, file: string, content: string, message = "advance main") {
+  await writeFile(join(root, file), content);
+  await git(root, "add", file);
+  await git(root, "commit", "-qm", message);
+  await git(root, "push", "-q", "origin", "main");
+  return git(root, "rev-parse", "HEAD");
+}
+
 async function commitFileCandidate(root: string, issue: number, file: string, content: string) {
   const path = await cleanCandidate(root, issue);
   await writeFile(join(path, file), content);
@@ -182,6 +190,80 @@ test("bootstrap finalizer commits, pushes directly to main, proves reachability,
     assert.match(await git(f.remote, "log", "--oneline", "main"), /feat\(finalize\): add helper \(#101\)/);
     assert.equal((await authority.get("101")).state, "closed");
     assert.ok(lines.some((line) => line.endsWith("PASS")));
+  } finally { await f.cleanup(); }
+});
+
+test("advanced main cannot make a dirty baseline HEAD look integrated (#157 incident shape)", async () => {
+  const f = await fixture();
+  try {
+    const issue = 157;
+    const worktree = await cleanCandidate(f.root, issue);
+    const baseline = await git(worktree, "rev-parse", "HEAD");
+    await writeFile(join(worktree, "README.md"), "dirty tracked candidate\n");
+    await writeFile(join(worktree, "new-source.ts"), "export const candidate = true;\n");
+    const advancedMain = await advanceOriginMain(f.root, "unrelated.txt", "main advanced\n");
+    assert.notEqual(baseline, advancedMain);
+    assert.equal(await git(f.root, "merge-base", "--is-ancestor", baseline, "origin/main").then(() => "yes"), "yes");
+
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+    await rejectsCode(
+      runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, candidatePaths: ["README.md", "new-source.ts"] }),
+      "REQUIRES_REVERIFICATION",
+    );
+
+    const candidate = await git(worktree, "rev-parse", "HEAD");
+    assert.notEqual(candidate, baseline);
+    assert.equal(await git(worktree, "status", "--porcelain"), "");
+    assert.equal(await git(f.remote, "merge-base", "--is-ancestor", candidate, "main").then(() => "yes"), "yes");
+    assert.equal(await git(f.remote, "show", "main:README.md"), "dirty tracked candidate");
+    assert.equal(await git(f.remote, "show", "main:new-source.ts"), "export const candidate = true;");
+    assert.equal((await authority.get(String(issue))).state, "open");
+    assert.ok(await git(f.root, "worktree", "list", "--porcelain").then((text) => text.includes("issue-157")));
+    assert.ok(await git(f.root, "rev-parse", "--verify", `agent/issue-${issue}`));
+  } finally { await f.cleanup(); }
+});
+
+test("clean old baseline branch is not completed merely because main advanced", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1581;
+    const worktree = await cleanCandidate(f.root, issue);
+    const baseline = await git(worktree, "rev-parse", "HEAD");
+    await advanceOriginMain(f.root, "unrelated.txt", "main advanced\n");
+    assert.equal(await git(f.root, "merge-base", "--is-ancestor", baseline, "origin/main").then(() => "yes"), "yes");
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority }), "NO_CHANGE_CANDIDATE");
+
+    assert.equal(await git(worktree, "rev-parse", "HEAD"), baseline);
+    assert.equal(await git(worktree, "status", "--porcelain"), "");
+    assert.equal((await authority.get(String(issue))).state, "open");
+    assert.ok(await git(f.root, "rev-parse", "--verify", `agent/issue-${issue}`));
+  } finally { await f.cleanup(); }
+});
+
+test("durable proof bound to baseline HEAD cannot override newer dirty worktree state", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1582;
+    const worktree = await cleanCandidate(f.root, issue);
+    const baseline = await git(worktree, "rev-parse", "HEAD");
+    await writeProof(f.root, issue, baseline, ["README.md"]);
+    await writeFile(join(worktree, "README.md"), "new dirty candidate\n");
+    await writeFile(join(worktree, "candidate-extra.ts"), "export const extra = 1;\n");
+    await advanceOriginMain(f.root, "unrelated.txt", "main advanced\n");
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    await rejectsCode(
+      runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, candidatePaths: ["README.md", "candidate-extra.ts"] }),
+      "REQUIRES_REVERIFICATION",
+    );
+
+    const candidate = await git(worktree, "rev-parse", "HEAD");
+    assert.notEqual(candidate, baseline);
+    assert.equal((await readVerifiedFinalizationCandidateProof(await gitCommonDir(f.root), issue))?.candidateSha, candidate);
+    assert.equal(await git(f.remote, "show", "main:README.md"), "new dirty candidate");
+    assert.equal((await authority.get(String(issue))).state, "open");
   } finally { await f.cleanup(); }
 });
 
@@ -762,14 +844,18 @@ test("failed external verification does not close and allows a fresh branch from
   } finally { await f.cleanup(); }
 });
 
-test("dirty unique work appearing after direct integration blocks cleanup", async () => {
+test("dirty unique work appearing after direct integration is promoted as a newer exact candidate before cleanup", async () => {
   const f = await fixture();
   try {
-    const { worktree } = await directlyIntegratedCandidate(f.root, f.remote, 119);
+    const { worktree, sha: integratedCandidate } = await directlyIntegratedCandidate(f.root, f.remote, 119);
     await writeFile(join(worktree, "unique.txt"), "do not delete\n");
     const authority = new InMemoryWorkAuthority([workItem(119)]);
-    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 119, authority }), "UNIQUE_WORK_PRESENT");
-    assert.equal(await git(worktree, "status", "--porcelain"), "?? unique.txt");
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 119, authority }), "REQUIRES_REVERIFICATION");
+    const newerCandidate = await git(worktree, "rev-parse", "HEAD");
+    assert.notEqual(newerCandidate, integratedCandidate);
+    assert.equal(await git(worktree, "status", "--porcelain"), "");
+    assert.equal(await git(f.remote, "show", "main:unique.txt"), "do not delete");
+    assert.equal((await authority.get("119")).state, "open");
   } finally { await f.cleanup(); }
 });
 

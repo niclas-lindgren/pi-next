@@ -228,6 +228,24 @@
       ],
       "observed": { "leaseOwned": false, "workspaceExists": true, "authorityOpen": true, "contained": true },
       "expect": { "nextAction": "contained", "mustNotRepeat": ["claim_lease", "start_worker"] }
+    },
+    {
+      "version": 1,
+      "name": "historical: dirty baseline branch was mistaken for integrated candidate",
+      "provenance": "Normalized from issue #157: origin/main advanced while the canonical issue worktree held dirty tracked and untracked candidate files on the old baseline HEAD.",
+      "invariant": "Dirty canonical candidate state takes precedence over raw HEAD ancestry; closure and cleanup cannot run while the exact dirty candidate is not the integrated SHA/tree.",
+      "runId": "hist-dirty-baseline-advanced-main",
+      "issueNumber": 815,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "pi-next" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-815", "branch": "agent/issue-815", "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "event": "worker_started", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation" } },
+        { "event": "worker_finished", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation", "ok": true } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "event": "failure_recorded", "payload": { "scope": "issue-local", "stage": "finalization", "reasonCode": "dirty_head_reachable_is_not_candidate_integration" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true, "contained": true },
+      "expect": { "nextAction": "contained", "mustNotRepeat": ["claim_lease", "prepare_workspace", "start_worker", "verify_candidate", "promote_candidate"] }
     }
   ]
 }

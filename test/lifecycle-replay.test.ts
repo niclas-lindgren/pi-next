@@ -35,8 +35,8 @@ test("initial crash-boundary replay corpus is deterministic and complete", () =>
 
 test("historical incident replay corpus covers sanitized pi-next regressions", () => {
   const results = evaluateLifecycleReplaySuite(historicalSuite);
-  assert.equal(results.length, 14);
-  assert.deepEqual(results.map((result) => result.ok), Array(14).fill(true));
+  assert.equal(results.length, 15);
+  assert.deepEqual(results.map((result) => result.ok), Array(15).fill(true));
   assert.ok(results.every((result) => result.name.startsWith("historical: ")));
 
   const corpus = JSON.parse(readFileSync(historicalSuite, "utf8")) as {
