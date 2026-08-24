@@ -108,7 +108,10 @@ export function registerUpdateTool(pi: ExtensionAPI) {
         reason: Type.String(),
       }),
       Type.Object({ action: Type.Literal("continue_clear") }),
-      Type.Object({ action: Type.Literal("archive") }),
+      Type.Object({
+        action: Type.Literal("archive"),
+        runId: Type.String({ minLength: 1 }),
+      }),
       Type.Object({
         action: Type.Literal("loop_result"),
         runId: Type.String(),
@@ -275,13 +278,13 @@ export function registerUpdateTool(pi: ExtensionAPI) {
         };
       }
 
-      const archived = await archiveAndCommit(ctx.cwd);
+      const archived = await archiveAndCommit(ctx.cwd, params.runId);
       recordTransition(ctx.cwd, archived.issue, "lifecycle");
       return {
         content: [
           {
             type: "text",
-            text: `Archived issue #${archived.issue} plan to ${archived.archive}\nCommitted ${archived.hash}`,
+            text: `Archived issue #${archived.issue} plan to ${archived.archive}\nCommitted ${archived.hash}\nRequested finalization; a controller step will merge and close once it re-verifies.`,
           },
         ],
         details: {

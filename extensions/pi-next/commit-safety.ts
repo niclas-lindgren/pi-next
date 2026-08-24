@@ -7,6 +7,7 @@ import {
   verificationReportAuthorityErrors,
 } from "./acceptance-verification.ts";
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
+import { requestArchiveFinalization } from "./checkpoint.ts";
 import { pendingPlanRepair } from "./execution-boundary.ts";
 import {
   acceptanceCriteria,
@@ -392,6 +393,7 @@ export function archivePlanFiles(cwd: string, planPath: string, issue: number): 
 
 export async function archiveAndCommit(
   cwd: string,
+  runId: string,
 ): Promise<{ archive: string; hash: string; issue: number; authorityFingerprint: string }> {
   const ready = await assertArchiveReady(cwd);
   const localPs = psDir(cwd);
@@ -432,10 +434,10 @@ export async function archiveAndCommit(
   }
 
   try {
-    await gitMutation(cwd, ["push", "origin", "HEAD:main"]);
+    await requestArchiveFinalization(cwd, ready.issue, runId, hash, ready.authorityFingerprint);
   } catch (error) {
     throw new Error(
-      `Archive commit ${hash} was created locally but could not be pushed to origin/main; the closure boundary cannot trust an unpushed archive commit. ${errorOutput(error)}`,
+      `Archive commit ${hash} was created locally but the finalization request could not be recorded; the closure boundary cannot trust an unrequested archive commit. ${errorOutput(error)}`,
     );
   }
   return { archive, hash, issue: ready.issue, authorityFingerprint: ready.authorityFingerprint };

@@ -239,6 +239,38 @@ export async function promotionReadiness(
  * of `main` - the worker no longer merges or pushes main directly (#146);
  * `finalizeRequestedPromotion()` is the controller-side step that does.
  */
+/**
+ * Shared tail of every worker-side finalization request (checkpoint
+ * promotion and, since #146, archive completion): writes the durable
+ * promotion-request marker `finalizeRequestedPromotion()` resolves, and
+ * emits the same journal/checkpoint/telemetry events either caller needs.
+ * The marker format and controller-side resolution are intentionally one
+ * mechanism for both request origins - see requestArchiveFinalization()
+ * below.
+ */
+async function recordPromotionRequest(
+  cwd: string,
+  issueNumber: number,
+  runId: string,
+  branch: string,
+  checkpointSha: string,
+  mainSha: string,
+  fingerprint: string,
+): Promise<void> {
+  const gitCommonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  emitLifecycleCheckpoint("promotion_requested", "before");
+  await writePromotionRequest({ gitCommonDir, issueNumber, runId, branch, checkpointSha, mainSha, fingerprint });
+  recordPiLifecycleJournal(journalCwd(cwd), {
+    event: "promotion_requested",
+    issueNumber,
+    runId,
+    idempotencyKey: `promotion-requested:${issueNumber}:${checkpointSha}:${mainSha}`,
+    payload: { branch, candidateSha: checkpointSha, mainSha },
+  }, { emitCheckpoint: false });
+  emitLifecycleCheckpoint("promotion_requested", "after");
+  recordLifecycleEvent(cwd, { event: "promotion_requested", issueNumber, runId, branch, outcome: "success" });
+}
+
 export async function requestPromotion(
   cwd: string,
   issueNumber: number,
@@ -249,33 +281,48 @@ export async function requestPromotion(
   const branch = checkpointBranchName(issueNumber, runId);
   try {
     const ready = await promotionReadiness(cwd, issueNumber, runId, expectedMainSha, verificationPath);
-    const gitCommonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    emitLifecycleCheckpoint("promotion_requested", "before");
-    await writePromotionRequest({
-      gitCommonDir,
-      issueNumber,
-      runId,
-      branch: ready.branch,
-      checkpointSha: ready.checkpointSha,
-      mainSha: ready.mainSha,
-      fingerprint: ready.fingerprint,
-    });
-    recordPiLifecycleJournal(journalCwd(cwd), {
-      event: "promotion_requested",
-      issueNumber,
-      runId,
-      idempotencyKey: `promotion-requested:${issueNumber}:${ready.checkpointSha}:${ready.mainSha}`,
-      payload: { branch: ready.branch, candidateSha: ready.checkpointSha, mainSha: ready.mainSha },
-    }, { emitCheckpoint: false });
-    emitLifecycleCheckpoint("promotion_requested", "after");
-    recordLifecycleEvent(cwd, {
-      event: "promotion_requested",
-      issueNumber,
-      runId,
-      branch: ready.branch,
-      outcome: "success",
-    });
+    await recordPromotionRequest(cwd, issueNumber, runId, ready.branch, ready.checkpointSha, ready.mainSha, ready.fingerprint);
     return { branch: ready.branch, checkpointSha: ready.checkpointSha };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    recordLifecycleEvent(cwd, {
+      event: "promotion_failed",
+      issueNumber,
+      runId,
+      branch,
+      outcome: "failure",
+      reasonCode: failureReasonCode(message),
+    });
+    throw error;
+  }
+}
+
+/**
+ * Worker-callable: records a durable finalization request for an already-
+ * created archive commit (see extensions/pi-next/commit-safety.ts's
+ * archiveAndCommit), reusing the exact promotion-request marker and
+ * controller-side resolution (finalizeRequestedPromotion -> finalizeIssue())
+ * checkpoint promotion already uses. Unifies the two prior separate
+ * completion paths (#146): the worker no longer pushes to main or closes
+ * the issue on either path - only the controller does, via one finalizer.
+ * `checkpointSha` here is the archive commit's own hash, not a checkpoint
+ * branch tip; `checkpointBranchName()` returns the shared leased issue
+ * branch regardless of origin, so both request kinds land on the same
+ * `agent/issue-N` branch finalizeIssue() expects.
+ */
+export async function requestArchiveFinalization(
+  cwd: string,
+  issueNumber: number,
+  runId: string,
+  archiveCommitSha: string,
+  fingerprint: string,
+): Promise<{ branch: string; checkpointSha: string }> {
+  const branch = checkpointBranchName(issueNumber, runId);
+  try {
+    await gitMutation(cwd, ["fetch", "origin", "main"]);
+    const mainSha = await git(cwd, ["rev-parse", "refs/remotes/origin/main"]);
+    await recordPromotionRequest(cwd, issueNumber, runId, branch, archiveCommitSha, mainSha, fingerprint);
+    return { branch, checkpointSha: archiveCommitSha };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     recordLifecycleEvent(cwd, {

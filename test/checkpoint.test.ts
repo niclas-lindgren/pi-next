@@ -9,6 +9,7 @@ import {
   checkpointBranchName,
   checkpointCommit,
   finalizeRequestedPromotion,
+  requestArchiveFinalization,
   requestPromotion,
 } from "../extensions/pi-next/checkpoint.ts";
 import { workingFingerprint } from "../extensions/pi-next/change-state.ts";
@@ -235,6 +236,42 @@ test("requestPromotion records readiness without touching main; finalizeRequeste
 
     // No request left to resolve on a second call.
     assert.equal(await finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY), undefined);
+  } finally {
+    await cleanup(state.fixture);
+  }
+});
+
+test("requestArchiveFinalization records the same kind of request as requestPromotion; finalizeRequestedPromotion resolves either", async () => {
+  const state = await fixture();
+  try {
+    await writeFile(`${state.workspace}/archived.txt`, "archive boundary\n");
+    await git(state.workspace, "add", "archived.txt");
+    await git(state.workspace, "commit", "-m", "chore(agent): archive issue #638 plan");
+    const archiveCommitSha = await git(state.workspace, "rev-parse", "HEAD");
+    const fingerprint = await workingFingerprint(state.workspace);
+
+    // The worker no longer pushes to main directly on the archive path
+    // either - it only records the same durable request checkpoint
+    // promotion uses (#146 unification).
+    await requestArchiveFinalization(state.workspace, 638, "run-archive", archiveCommitSha, fingerprint);
+    assert.equal(await git(state.workspace, "branch", "--show-current"), "agent/issue-638");
+    assert.equal(await git(state.repo, "branch", "--show-current"), "main");
+    assert.equal(
+      await git(state.workspace, "merge-base", "--is-ancestor", archiveCommitSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
+      "no",
+    );
+
+    const leaseAuthority = freshLeaseAuthority(638);
+    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
+    const result = await finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY);
+
+    assert.ok(result);
+    assert.equal(result!.closed, true);
+    assert.equal(
+      await git(state.repo, "merge-base", "--is-ancestor", archiveCommitSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
+      "yes",
+    );
+    assert.equal((await workAuthority.get("638")).state, "closed");
   } finally {
     await cleanup(state.fixture);
   }
