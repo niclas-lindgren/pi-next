@@ -11,6 +11,10 @@ import { emitLifecycleCheckpoint } from "../../src/coordination/lifecycle-checkp
 import { syncProjectStatus, type ProjectStatusAuthority } from "./project-status";
 import { commitsReachableFromRef, formatUnreachableCommitDetails } from "./util-core";
 import { issueWorkspaceIdentity } from "./issue-authority.ts";
+import { clearPromotionRequest, readPromotionRequest, writePromotionRequest } from "./promotion-request.ts";
+import { finalizeIssue, FinalizeError } from "../../src/coordination/finalize.ts";
+import type { IssueLeaseAuthority } from "../../src/coordination/issue-leases.ts";
+import { authorityFingerprint, type WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -228,123 +232,50 @@ export async function promotionReadiness(
   return { branch, checkpointSha, mainSha, fingerprint };
 }
 
-export async function promoteCheckpoint(
+/**
+ * Worker-callable: records a durable request to promote the checkpoint
+ * branch, after confirming the same STATUS:PASS/fingerprint/commit-evidence
+ * readiness `promotionReadiness()` always required. Performs no git mutation
+ * of `main` - the worker no longer merges or pushes main directly (#146);
+ * `finalizeRequestedPromotion()` is the controller-side step that does.
+ */
+export async function requestPromotion(
   cwd: string,
   issueNumber: number,
   runId: string,
   expectedMainSha: string,
   verificationPath: string,
-  lifecycle: { projectStatus?: ProjectStatusAuthority } = {},
-): Promise<{ branch: string; mergeSha: string }> {
+): Promise<{ branch: string; checkpointSha: string }> {
   const branch = checkpointBranchName(issueNumber, runId);
   try {
-    const currentAtEntry = await git(cwd, ["branch", "--show-current"]);
-    if (currentAtEntry === "main" || currentAtEntry === "master") {
-      await assertCleanGitState(cwd);
-      await gitMutation(cwd, ["fetch", "origin", "main"]);
-      const candidateSha = await git(cwd, ["rev-parse", branch]).catch(() => "");
-      const localHead = await git(cwd, ["rev-parse", "HEAD"]);
-      const localContainsCandidate = candidateSha
-        ? await git(cwd, ["merge-base", "--is-ancestor", candidateSha, localHead]).then(() => true).catch(() => false)
-        : false;
-      if (localContainsCandidate) {
-        const remoteContainsCandidate = await git(cwd, ["merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main"])
-          .then(() => true)
-          .catch(() => false);
-        if (!remoteContainsCandidate) {
-          emitLifecycleCheckpoint("promotion_pushed", "before");
-          await gitMutation(cwd, ["push", "origin", `${localHead}:main`]);
-          await gitMutation(cwd, ["fetch", "origin", "main"]);
-        }
-        const remoteMainSha = await git(cwd, ["rev-parse", "refs/remotes/origin/main"]);
-        recordPiLifecycleJournal(journalCwd(cwd), {
-          event: "promotion_pushed",
-          issueNumber,
-          runId,
-          idempotencyKey: `promotion-pushed:${issueNumber}:${candidateSha}:${remoteMainSha}`,
-          payload: { branch, candidateSha, mainSha: remoteMainSha },
-        }, { emitCheckpoint: false });
-        if (!remoteContainsCandidate) emitLifecycleCheckpoint("promotion_pushed", "after");
-        recordPiLifecycleJournal(journalCwd(cwd), {
-          event: "promotion_succeeded",
-          issueNumber,
-          runId,
-          idempotencyKey: `promotion-succeeded:${issueNumber}:${candidateSha}:${remoteMainSha}`,
-          payload: { branch, candidateSha, mergeSha: remoteMainSha, mainSha: remoteMainSha },
-        });
-        recordPiLifecycleJournal(journalCwd(cwd), {
-          event: "reachability_proven",
-          issueNumber,
-          runId,
-          idempotencyKey: `reachable:${issueNumber}:${candidateSha}:${remoteMainSha}`,
-          payload: { candidateSha, mainSha: remoteMainSha },
-        });
-        return { branch, mergeSha: remoteMainSha };
-      }
-    }
     const ready = await promotionReadiness(cwd, issueNumber, runId, expectedMainSha, verificationPath);
-    recordPiLifecycleJournal(journalCwd(cwd), {
-      event: "promotion_started",
+    const gitCommonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    emitLifecycleCheckpoint("promotion_requested", "before");
+    await writePromotionRequest({
+      gitCommonDir,
       issueNumber,
       runId,
-      idempotencyKey: `promotion-started:${issueNumber}:${ready.checkpointSha}:${ready.mainSha}`,
+      branch: ready.branch,
+      checkpointSha: ready.checkpointSha,
+      mainSha: ready.mainSha,
+      fingerprint: ready.fingerprint,
+    });
+    recordPiLifecycleJournal(journalCwd(cwd), {
+      event: "promotion_requested",
+      issueNumber,
+      runId,
+      idempotencyKey: `promotion-requested:${issueNumber}:${ready.checkpointSha}:${ready.mainSha}`,
       payload: { branch: ready.branch, candidateSha: ready.checkpointSha, mainSha: ready.mainSha },
-    });
-    const localMain = await git(cwd, ["rev-parse", "refs/heads/main"]).catch(() => "");
-    if (localMain !== ready.mainSha) {
-      await gitMutation(cwd, ["switch", "main"]);
-      await gitMutation(cwd, ["merge", "--ff-only", "refs/remotes/origin/main"]);
-    } else {
-      await gitMutation(cwd, ["switch", "main"]);
-    }
-    const currentMain = await git(cwd, ["rev-parse", "HEAD"]);
-    if (currentMain !== ready.mainSha) throw new Error("Local main is not the freshly fetched main; refusing promotion");
-    await gitMutation(cwd, ["merge", "--no-ff", "--no-edit", ready.branch]);
-    const mergeSha = await git(cwd, ["rev-parse", "HEAD"]);
-    emitLifecycleCheckpoint("promotion_pushed", "before");
-    await gitMutation(cwd, ["push", "origin", "main:main"]);
-    await gitMutation(cwd, ["fetch", "origin", "main"]);
-    const remoteMainSha = await git(cwd, ["rev-parse", "refs/remotes/origin/main"]);
-    recordPiLifecycleJournal(journalCwd(cwd), {
-      event: "promotion_pushed",
-      issueNumber,
-      runId,
-      idempotencyKey: `promotion-pushed:${issueNumber}:${ready.checkpointSha}:${remoteMainSha}`,
-      payload: { branch: ready.branch, candidateSha: ready.checkpointSha, mainSha: remoteMainSha },
     }, { emitCheckpoint: false });
-    emitLifecycleCheckpoint("promotion_pushed", "after");
-    await git(cwd, ["merge-base", "--is-ancestor", ready.checkpointSha, "refs/remotes/origin/main"]);
-    recordPiLifecycleJournal(journalCwd(cwd), {
-      event: "promotion_succeeded",
-      issueNumber,
-      runId,
-      idempotencyKey: `promotion-succeeded:${issueNumber}:${ready.checkpointSha}:${mergeSha}`,
-      payload: { branch: ready.branch, candidateSha: ready.checkpointSha, mergeSha, mainSha: remoteMainSha },
-    });
-    recordPiLifecycleJournal(journalCwd(cwd), {
-      event: "reachability_proven",
-      issueNumber,
-      runId,
-      idempotencyKey: `reachable:${issueNumber}:${ready.checkpointSha}:${remoteMainSha}`,
-      payload: { candidateSha: ready.checkpointSha, mainSha: remoteMainSha },
-    });
-    if (lifecycle.projectStatus) {
-      await syncProjectStatus(cwd, lifecycle.projectStatus, {
-        issueNumber,
-        status: "Done",
-        runId,
-        branch,
-      });
-    }
+    emitLifecycleCheckpoint("promotion_requested", "after");
     recordLifecycleEvent(cwd, {
-      event: "promotion_succeeded",
+      event: "promotion_requested",
       issueNumber,
       runId,
-      branch,
+      branch: ready.branch,
       outcome: "success",
-      deployRelevant: true,
     });
-    return { branch, mergeSha };
+    return { branch: ready.branch, checkpointSha: ready.checkpointSha };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     recordLifecycleEvent(cwd, {
@@ -352,6 +283,104 @@ export async function promoteCheckpoint(
       issueNumber,
       runId,
       branch,
+      outcome: "failure",
+      reasonCode: failureReasonCode(message),
+    });
+    throw error;
+  }
+}
+
+/**
+ * Controller-callable: resolves a pending `requestPromotion()` record (if
+ * any) by calling the canonical `finalizeIssue()` kernel primitive
+ * (src/coordination/finalize.ts) - the merge/push/reachability/authority-
+ * close sequence the worker itself no longer performs. `cwd` must be the
+ * coordination root checked out on `main` (finalizeIssue()'s own
+ * invariant), not the worker's issue worktree. Returns `undefined` when no
+ * promotion is pending, so callers can treat it as a no-op check.
+ */
+export async function finalizeRequestedPromotion(
+  cwd: string,
+  issueNumber: number,
+  leaseAuthority: IssueLeaseAuthority,
+  workAuthority: WorkAuthorityAdapter,
+  identity: { agent: string; runId: string; sessionId: string },
+  lifecycle: { projectStatus?: ProjectStatusAuthority } = {},
+): Promise<{ branch: string; mergeSha: string; closed: boolean } | undefined> {
+  const gitCommonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const request = await readPromotionRequest(gitCommonDir, issueNumber);
+  if (!request) return undefined;
+
+  try {
+    const issue = await workAuthority.get(String(issueNumber));
+    const finalizeInput = {
+      cwd,
+      issueNumber,
+      agent: identity.agent,
+      runId: identity.runId,
+      sessionId: identity.sessionId,
+      candidateSha: request.checkpointSha,
+      issueUpdatedAt: issue.updatedAt ?? "",
+      verifiedAuthorityFingerprint: authorityFingerprint(issue),
+    };
+    recordPiLifecycleJournal(journalCwd(cwd), {
+      event: "promotion_started",
+      issueNumber,
+      runId: identity.runId,
+      idempotencyKey: `promotion-started:${issueNumber}:${request.checkpointSha}:${request.mainSha}`,
+      payload: { branch: request.branch, candidateSha: request.checkpointSha, mainSha: request.mainSha },
+    });
+    let result = await finalizeIssue(leaseAuthority, workAuthority, finalizeInput);
+    // See scripts/bootstrap-finalize.ts for the same round-trip: a candidate
+    // already reachable from origin/main (nothing new to integrate in this
+    // call) requires proving it against the exact mergeSha finalizeIssue
+    // itself just reported before it will close.
+    if (result.requiresReverification) {
+      result = await finalizeIssue(leaseAuthority, workAuthority, { ...finalizeInput, verifiedIntegratedMain: result.mergeSha });
+    }
+    if (result.requiresReverification) {
+      throw new Error(`origin/main advanced with unrelated commits during finalize; re-verify against current main (mergeSha=${result.mergeSha}) before retrying`);
+    }
+
+    recordPiLifecycleJournal(journalCwd(cwd), {
+      event: "promotion_succeeded",
+      issueNumber,
+      runId: identity.runId,
+      idempotencyKey: `promotion-succeeded:${issueNumber}:${request.checkpointSha}:${result.mergeSha}`,
+      payload: { branch: request.branch, candidateSha: request.checkpointSha, mergeSha: result.mergeSha, mainSha: result.mergeSha },
+    });
+    recordPiLifecycleJournal(journalCwd(cwd), {
+      event: "reachability_proven",
+      issueNumber,
+      runId: identity.runId,
+      idempotencyKey: `reachable:${issueNumber}:${request.checkpointSha}:${result.mergeSha}`,
+      payload: { candidateSha: request.checkpointSha, mainSha: result.mergeSha },
+    });
+    await clearPromotionRequest(gitCommonDir, issueNumber);
+    if (result.closed && lifecycle.projectStatus) {
+      await syncProjectStatus(cwd, lifecycle.projectStatus, {
+        issueNumber,
+        status: "Done",
+        runId: identity.runId,
+        branch: request.branch,
+      });
+    }
+    recordLifecycleEvent(cwd, {
+      event: "promotion_finalized",
+      issueNumber,
+      runId: identity.runId,
+      branch: request.branch,
+      outcome: "success",
+      deployRelevant: result.closed,
+    });
+    return { branch: request.branch, mergeSha: result.mergeSha, closed: result.closed };
+  } catch (error) {
+    const message = error instanceof FinalizeError ? error.message : error instanceof Error ? error.message : String(error);
+    recordLifecycleEvent(cwd, {
+      event: "promotion_failed",
+      issueNumber,
+      runId: identity.runId,
+      branch: request.branch,
       outcome: "failure",
       reasonCode: failureReasonCode(message),
     });

@@ -12,7 +12,7 @@ import {
 import {
   checkpointBranchName,
   checkpointCommit,
-  promoteCheckpoint,
+  requestPromotion,
 } from "./checkpoint.ts";
 import type { CommitKind } from "./workflow-commit-policy.ts";
 
@@ -47,7 +47,7 @@ export function registerGitTool(pi: ExtensionAPI) {
         message: Type.String(),
       }),
       Type.Object({
-        action: Type.Literal("promote"),
+        action: Type.Literal("request_promotion"),
         issueNumber: Type.Integer({ minimum: 1 }),
         runId: Type.String({ minLength: 1 }),
         expectedMainSha: Type.String({ minLength: 1 }),
@@ -77,8 +77,8 @@ export function registerGitTool(pi: ExtensionAPI) {
         };
       }
 
-      if (params.action === "promote") {
-        const result = await promoteCheckpoint(
+      if (params.action === "request_promotion") {
+        const result = await requestPromotion(
           ctx.cwd,
           params.issueNumber,
           params.runId,
@@ -86,8 +86,8 @@ export function registerGitTool(pi: ExtensionAPI) {
           required(params.verificationPath, "verificationPath"),
         );
         return {
-          content: [{ type: "text", text: `Promoted ${result.branch} to main at ${result.mergeSha}` }],
-          details: { promoted: true, ...result },
+          content: [{ type: "text", text: `Requested promotion of ${result.branch} at ${result.checkpointSha}; a controller step will merge and close once it re-verifies.` }],
+          details: { requested: true, ...result },
         };
       }
 

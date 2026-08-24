@@ -9,7 +9,8 @@ export type IssueFailureStage =
   | "worktree-handoff"
   | "workspace-validation"
   | "resume"
-  | "execution";
+  | "execution"
+  | "finalization";
 
 export type FailureScope = "issue-local" | "loop-global";
 

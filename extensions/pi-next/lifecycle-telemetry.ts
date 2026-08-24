@@ -9,6 +9,8 @@ const MAX_EVENTS = 200;
 export type LifecycleEventName =
   | "checkpoint_pushed"
   | "checkpoint_recovered"
+  | "promotion_requested"
+  | "promotion_finalized"
   | "promotion_succeeded"
   | "promotion_failed"
   | "build_classified"

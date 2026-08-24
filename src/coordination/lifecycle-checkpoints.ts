@@ -16,6 +16,7 @@ export const RECOVERY_LIFECYCLE_CHECKPOINTS = [
   "verification_finished",
   "candidate_committed",
   "candidate_pushed",
+  "promotion_requested",
   "promotion_started",
   "promotion_pushed",
   "promotion_succeeded",
@@ -90,6 +91,11 @@ export const RECOVERY_LIFECYCLE_CHECKPOINT_COVERAGE = {
     description: "The canonical issue branch has been pushed to the configured remote.",
     durableJournalEvent: true,
     invariant: "restart reconciles the remote branch by SHA instead of duplicating candidate commit/push side effects",
+  },
+  promotion_requested: {
+    description: "The worker recorded a durable request to promote its verified checkpoint; it never merges or pushes main itself (#146).",
+    durableJournalEvent: true,
+    invariant: "a promotion request is mechanical evidence for the controller to act on, never authority to merge/close on its own",
   },
   promotion_started: {
     description: "Guarded finalization/promotion has begun.",

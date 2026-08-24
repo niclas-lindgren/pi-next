@@ -8,13 +8,17 @@ import { test } from "node:test";
 import {
   checkpointBranchName,
   checkpointCommit,
-  promoteCheckpoint,
+  finalizeRequestedPromotion,
+  requestPromotion,
 } from "../extensions/pi-next/checkpoint.ts";
 import { workingFingerprint } from "../extensions/pi-next/change-state.ts";
 import { piLifecycleJournalFile } from "../extensions/pi-next/lifecycle-journal.ts";
 import { readLifecycleJournal } from "../src/coordination/lifecycle-journal.ts";
 import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
 import { createDisposableGitFixture, type DisposableGitFixture } from "./helpers/git-fixture.ts";
+import { createIssueLease } from "../src/coordination/issue-authority.ts";
+import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordination/work-authority.ts";
+import { MemoryIssueLeaseAuthority } from "./helpers/lifecycle-scenario.ts";
 
 const exec = promisify(execFile);
 
@@ -176,45 +180,67 @@ async function writePassingVerification(cwd: string): Promise<string> {
   return verificationPath;
 }
 
-test("promoteCheckpoint resumes after local merge before remote main push without duplicate merge", async () => {
+const IDENTITY = { agent: "pi-next", runId: "run-638-loop", sessionId: "run-638-loop-session" };
+
+function freshLeaseAuthority(issueNumber: number): MemoryIssueLeaseAuthority {
+  const now = new Date();
+  const authority = new MemoryIssueLeaseAuthority();
+  authority.seed(createIssueLease({
+    issueNumber,
+    agent: IDENTITY.agent,
+    runId: IDENTITY.runId,
+    sessionId: IDENTITY.sessionId,
+    acquiredAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(),
+  }));
+  return authority;
+}
+
+function workItem(issueNumber: number, updatedAt: string): AuthorityWorkItem {
+  return { id: String(issueNumber), number: issueNumber, title: `issue #${issueNumber}`, body: "", state: "open", updatedAt, states: [], comments: [] };
+}
+
+test("requestPromotion records readiness without touching main; finalizeRequestedPromotion performs the merge and closes", async () => {
   const state = await fixture();
   try {
     await writeFile(`${state.workspace}/promote.txt`, "promote boundary\n");
-    await checkpointCommit(state.workspace, 638, "run-promote-before", ["promote.txt"], "checkpoint: promote boundary");
+    await checkpointCommit(state.workspace, 638, "run-promote", ["promote.txt"], "checkpoint: promote boundary");
     const candidateSha = await git(state.workspace, "rev-parse", "HEAD");
     const expectedMainSha = await git(state.workspace, "rev-parse", "refs/remotes/origin/main");
     const verificationPath = await writePassingVerification(state.workspace);
-    await git(state.repo, "switch", "--detach");
 
-    await assert.rejects(
-      withLifecycleFaultInjection({ checkpoint: "promotion_pushed", position: "before" }, () =>
-        promoteCheckpoint(state.workspace, 638, "run-promote-before", expectedMainSha, verificationPath),
-      ),
-      LifecycleCheckpointFault,
-    );
-    assert.equal(await git(state.workspace, "branch", "--show-current"), "main");
+    await requestPromotion(state.workspace, 638, "run-promote", expectedMainSha, verificationPath);
+    // The worker never merges or pushes main itself (#146).
+    assert.equal(await git(state.workspace, "branch", "--show-current"), "agent/issue-638");
+    assert.equal(await git(state.repo, "branch", "--show-current"), "main");
     assert.equal(
       await git(state.workspace, "merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
       "no",
     );
 
-    await promoteCheckpoint(state.workspace, 638, "run-promote-before", expectedMainSha, verificationPath);
+    const leaseAuthority = freshLeaseAuthority(638);
+    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
+    const result = await finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY);
 
+    assert.ok(result);
+    assert.equal(result!.closed, true);
     assert.equal(
-      await git(state.workspace, "merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
+      await git(state.repo, "merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
       "yes",
     );
-    assert.equal(await git(state.workspace, "rev-list", "--merges", "--count", `${expectedMainSha}..refs/remotes/origin/main`), "1");
-    const events = readLifecycleJournal(piLifecycleJournalFile(state.workspace, "run-promote-before"))
+    assert.equal((await workAuthority.get("638")).state, "closed");
+    const events = readLifecycleJournal(piLifecycleJournalFile(state.workspace, "run-promote"))
       .filter((record) => record.event !== "baseline_imported");
-    assert.ok(events.some((record) => record.event === "promotion_pushed"));
-    assert.ok(events.some((record) => record.event === "reachability_proven"));
+    assert.ok(events.some((record) => record.event === "promotion_requested"));
+
+    // No request left to resolve on a second call.
+    assert.equal(await finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY), undefined);
   } finally {
     await cleanup(state.fixture);
   }
 });
 
-test("promoteCheckpoint resumes after remote main push without duplicate merge", async () => {
+test("finalizeRequestedPromotion resumes after a crash between push and close without duplicate merge or close", async () => {
   const state = await fixture();
   try {
     await writeFile(`${state.workspace}/promote-after.txt`, "promote after boundary\n");
@@ -222,26 +248,31 @@ test("promoteCheckpoint resumes after remote main push without duplicate merge",
     const candidateSha = await git(state.workspace, "rev-parse", "HEAD");
     const expectedMainSha = await git(state.workspace, "rev-parse", "refs/remotes/origin/main");
     const verificationPath = await writePassingVerification(state.workspace);
-    await git(state.repo, "switch", "--detach");
+    await requestPromotion(state.workspace, 638, "run-promote-after", expectedMainSha, verificationPath);
+
+    const leaseAuthority = freshLeaseAuthority(638);
+    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
 
     await assert.rejects(
-      withLifecycleFaultInjection({ checkpoint: "promotion_pushed", position: "after" }, () =>
-        promoteCheckpoint(state.workspace, 638, "run-promote-after", expectedMainSha, verificationPath),
+      withLifecycleFaultInjection({ checkpoint: "issue_closed", position: "after" }, () =>
+        finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY),
       ),
       LifecycleCheckpointFault,
     );
-
-    await promoteCheckpoint(state.workspace, 638, "run-promote-after", expectedMainSha, verificationPath);
-
     assert.equal(
-      await git(state.workspace, "merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
+      await git(state.repo, "merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
       "yes",
     );
-    assert.equal(await git(state.workspace, "rev-list", "--merges", "--count", `${expectedMainSha}..refs/remotes/origin/main`), "1");
+    assert.equal((await workAuthority.get("638")).state, "closed");
+    assert.equal((await workAuthority.get("638")).comments.length, 1);
+
+    const result = await finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY);
+    assert.ok(result);
+    assert.equal(result!.closed, true);
+    assert.equal((await workAuthority.get("638")).comments.length, 1);
     const events = readLifecycleJournal(piLifecycleJournalFile(state.workspace, "run-promote-after"))
       .filter((record) => record.event !== "baseline_imported");
-    assert.equal(events.filter((record) => record.event === "promotion_pushed").length, 1);
-    assert.equal(events.filter((record) => record.event === "promotion_succeeded").length, 1);
+    assert.equal(events.filter((record) => record.event === "promotion_requested").length, 1);
   } finally {
     await cleanup(state.fixture);
   }

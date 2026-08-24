@@ -15,6 +15,8 @@ import {
   GitHubIssueLeaseAuthority,
   type IssueLeaseAuthority,
 } from "./issue-leases.ts";
+import { finalizeRequestedPromotion } from "./checkpoint.ts";
+import { GitHubWorkAuthority, type WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 import {
   createSupervisorRuntime,
   type SupervisorRuntime,
@@ -168,6 +170,9 @@ export function observeLoopHostMemory(
 interface ApplyResultOptions {
   /** A planning repair may preserve pre-existing issue-local dirt. */
   allowDirtyPlanRepair?: boolean;
+  /** Injectable for tests; defaults to the real GitHub-backed adapters. */
+  leaseAuthority?: IssueLeaseAuthority;
+  workAuthority?: WorkAuthorityAdapter;
 }
 
 type PlanRepairDirtySnapshot = Map<string, string>;
@@ -508,6 +513,26 @@ async function applyResult(
 
   if (result.outcome === "archived") {
     const issue = result.issueNumber as number;
+    // The worker no longer merges/pushes main or closes the issue itself
+    // (#146); it can only have recorded a durable promotion request. Resolve
+    // it mechanically here, before this controller step ever reports the
+    // issue as completed - finalizeRequestedPromotion() is a no-op (returns
+    // undefined) when no request is pending.
+    try {
+      const leaseAuthority = options.leaseAuthority ?? new GitHubIssueLeaseAuthority(cwd);
+      const workAuthority = options.workAuthority ?? new GitHubWorkAuthority(cwd);
+      await finalizeRequestedPromotion(cwd, issue, leaseAuthority, workAuthority, {
+        agent: "pi-next",
+        runId: state.runId,
+        sessionId: state.sessionId ?? `${state.runId}-loop`,
+      });
+    } catch (error) {
+      throw new IssueBoundaryFailure(
+        issue,
+        "finalization",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     const completed: LoopState = {
       ...state,
       workerResultMissing: undefined,

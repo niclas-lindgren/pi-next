@@ -28,6 +28,7 @@ export const LIFECYCLE_JOURNAL_EVENTS = [
   "verification_finished",
   "candidate_committed",
   "candidate_pushed",
+  "promotion_requested",
   "promotion_started",
   "promotion_pushed",
   "promotion_succeeded",
