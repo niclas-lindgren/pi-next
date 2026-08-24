@@ -7,7 +7,9 @@ import { acquireBootstrapLifecycleLock, type BootstrapLifecycleLock } from "../s
 import { invalidateVerifiedFinalizationCandidateProof, readVerifiedFinalizationCandidateProof, writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.js";
 import { CANONICAL_STATUS_ARGS, changedFilePathsFromStatus, uniqueSortedGitPaths } from "../src/bootstrap/git-status.js";
 import { emitLifecycleCheckpoint } from "../src/coordination/lifecycle-checkpoints.js";
-import { finalizeIssue, FinalizeError, type PendingVerificationRequest } from "../src/coordination/finalize.ts";
+import { FinalizeError, type PendingVerificationRequest } from "../src/coordination/finalize.ts";
+import { finalizeWithPostIntegrationReverification } from "../src/coordination/post-integration-reverification.ts";
+import { REQUIRED_CHECKS } from "../src/coordination/required-checks.ts";
 import {
   authorityFingerprint,
   GitHubWorkAuthority,
@@ -22,7 +24,6 @@ import type { IssueLease } from "../src/coordination/issue-authority.ts";
 import type { IssueLeaseAuthority } from "../src/coordination/issue-leases.ts";
 
 const execFileAsync = promisify(execFile);
-const REQUIRED_CHECKS = ["npm run typecheck", "npm test"] as const;
 
 export interface CommandResult { command: string; args: string[]; cwd: string; exitCode: number; stdout: string; stderr: string; }
 export type CommandRunner = (command: string, args: string[], options: { cwd: string }) => Promise<CommandResult>;
@@ -426,30 +427,32 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
   };
   let result;
   try {
-    result = await finalizeIssue(leaseAuthority, workAuthority, finalizeInput);
-    // finalizeIssue() refuses to close on its first observation of a
-    // candidate already reachable from origin/main unless the caller proves
-    // it already reverified that exact mergeSha (#20's round-trip contract).
-    // For bootstrap's already-integrated fast path nothing new landed in
-    // this call (alreadyIntegrated was computed before finalizeIssue ran),
-    // so the round-trip is a formality: retry once, immediately, supplying
-    // the mergeSha finalizeIssue itself just reported. A genuine concurrent
-    // 3-way merge (alreadyIntegrated false) is never silently retried here.
-    if (result.requiresReverification && alreadyIntegrated) {
-      result = await finalizeIssue(leaseAuthority, workAuthority, { ...finalizeInput, verifiedIntegratedMain: result.mergeSha });
+    const recovery = await finalizeWithPostIntegrationReverification({
+      leaseAuthority,
+      workAuthority,
+      finalizeInput,
+      gitCommonDir,
+      runCommand: runner,
+      checks: REQUIRED_CHECKS,
+      reporter: (line) => say(`bootstrap finalize #${issueNumber} · ${line}`),
+    });
+    if (recovery.status === "verification-failed") {
+      const evidence = recovery.failedCheck.stderr || recovery.failedCheck.stdout || "no output";
+      throw new BootstrapFinalizeError("VERIFY_FAILED", `${recovery.failedCheck.command} failed during post-integration reverification of ${recovery.mergeSha}: ${evidence}`);
     }
+    if (recovery.status === "requires-reverification") {
+      throw new BootstrapFinalizeError(
+        "REQUIRES_REVERIFICATION",
+        `origin/main advanced with unrelated commits during finalize; re-verify against current main (mergeSha=${recovery.mergeSha}) before retrying`,
+      );
+    }
+    result = recovery.result;
   } catch (error) {
+    if (error instanceof BootstrapFinalizeError) throw error;
     if (error instanceof FinalizeError) throw new BootstrapFinalizeError(error.code, error.message);
     throw error;
   }
   if (process.env.PI_NEXT_BOOTSTRAP_FINALIZE_CRASH_AFTER === "merge") process.exit(99);
-
-  if (result.requiresReverification) {
-    throw new BootstrapFinalizeError(
-      "REQUIRES_REVERIFICATION",
-      `origin/main advanced with unrelated commits during finalize; re-verify against current main (mergeSha=${result.mergeSha}) before retrying`,
-    );
-  }
 
   say(`bootstrap finalize #${issueNumber} · reachable from origin/main`);
   const cleanup = await cleanIntegratedWorkspace({ root, worktree, branch, issueNumber, runner, reporter: say });

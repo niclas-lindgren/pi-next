@@ -99,6 +99,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adopt-pattern** — durable workflow systems bind terminal evidence to the exact candidate content, not to an incidental branch pointer. Bootstrap finalization now inspects canonical worktree status before any already-integrated fast path; dirty/staged/untracked candidate state overrides HEAD ancestry and stale/exact proof shortcuts, so an old baseline HEAD that became reachable after origin/main advanced cannot close an issue while the real candidate exists only as worktree delta.
 - **reject** — treating branch HEAD reachability as completion proof for dirty worktrees, closing first and relying on cleanup to discover unique work, or letting a proof for the baseline SHA stand in for newer uncommitted candidate content.
 
+### Exact integrated-main reverification recovery (issue #157)
+
+- **adopt-pattern** — idempotent workflow retries bind terminal closure to durable proof for the exact post-side-effect state, not merely to evidence that the side effect happened. Finalization recovery now records exact integrated-main verification proof only after required checks pass on the current `origin/main` SHA and a post-check CAS still proves that SHA current; bootstrap and production promotion recovery share the same bounded retry primitive.
+- **reject** — treating candidate reachability/already-integrated status as verification evidence, or holding the finalize lock across the full test suite to prevent unrelated main advancement.
+
 ### Zero-delta implementation retry (issue #149)
 
 - **adopt-pattern** — bounded workflow retry controllers distinguish no-candidate generation failures from candidate verification failures. Pi-next now spends one separate fresh implementation retry only when a completed implementation worker produced mechanically proven zero delta, the issue is still open, satisfaction is unproven, and no repair/finalization phase has started.

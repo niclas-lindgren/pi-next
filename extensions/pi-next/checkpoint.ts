@@ -12,7 +12,8 @@ import { syncProjectStatus, type ProjectStatusAuthority } from "./project-status
 import { commitsReachableFromRef, formatUnreachableCommitDetails } from "./util-core";
 import { issueWorkspaceIdentity } from "./issue-authority.ts";
 import { clearPromotionRequest, readPromotionRequest, writePromotionRequest } from "./promotion-request.ts";
-import { finalizeIssue, FinalizeError } from "../../src/coordination/finalize.ts";
+import { FinalizeError } from "../../src/coordination/finalize.ts";
+import { finalizeWithPostIntegrationReverification } from "../../src/coordination/post-integration-reverification.ts";
 import type { IssueLeaseAuthority } from "../../src/coordination/issue-leases.ts";
 import type { WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 
@@ -21,6 +22,16 @@ const execFileAsync = promisify(execFile);
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { cwd, encoding: "utf8" });
   return stdout.trim();
+}
+
+async function commandRunner(command: string, args: string[], options: { cwd: string }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, { cwd: options.cwd, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+    return { exitCode: 0, stdout, stderr };
+  } catch (error) {
+    const e = error as { code?: number; stdout?: string; stderr?: string };
+    return { exitCode: typeof e.code === "number" ? e.code : 1, stdout: e.stdout ?? "", stderr: e.stderr ?? String(error) };
+  }
 }
 
 async function gitMutation(cwd: string, args: string[]): Promise<string> {
@@ -391,17 +402,20 @@ export async function finalizeRequestedPromotion(
       idempotencyKey: `promotion-started:${issueNumber}:${request.checkpointSha}:${request.mainSha}`,
       payload: { branch: request.branch, candidateSha: request.checkpointSha, mainSha: request.mainSha },
     });
-    let result = await finalizeIssue(leaseAuthority, workAuthority, finalizeInput);
-    // See scripts/bootstrap-finalize.ts for the same round-trip: a candidate
-    // already reachable from origin/main (nothing new to integrate in this
-    // call) requires proving it against the exact mergeSha finalizeIssue
-    // itself just reported before it will close.
-    if (result.requiresReverification) {
-      result = await finalizeIssue(leaseAuthority, workAuthority, { ...finalizeInput, verifiedIntegratedMain: result.mergeSha });
+    const recovery = await finalizeWithPostIntegrationReverification({
+      leaseAuthority,
+      workAuthority,
+      finalizeInput,
+      gitCommonDir,
+      runCommand: commandRunner,
+    });
+    if (recovery.status === "verification-failed") {
+      throw new Error(`${recovery.failedCheck.command} failed during post-integration reverification of ${recovery.mergeSha}: ${recovery.failedCheck.stderr || recovery.failedCheck.stdout || "no output"}`);
     }
-    if (result.requiresReverification) {
-      throw new Error(`origin/main advanced with unrelated commits during finalize; re-verify against current main (mergeSha=${result.mergeSha}) before retrying`);
+    if (recovery.status === "requires-reverification") {
+      throw new Error(`origin/main advanced with unrelated commits during finalize; re-verify against current main (mergeSha=${recovery.mergeSha}) before retrying`);
     }
+    const result = recovery.result;
 
     recordPiLifecycleJournal(journalCwd(cwd), {
       event: "promotion_succeeded",
