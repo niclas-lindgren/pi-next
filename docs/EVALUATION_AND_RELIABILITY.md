@@ -89,6 +89,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adopt-pattern** — durable workflow kernels expose one typed single-work-item primitive and make entry points schedulers/adapters over it. Pi-next now promotes the bootstrap lifecycle mechanics into a production-owned `lifecycle` API with a canonical run/issue/phase projection consumed by bootstrap and available to explicit, auto, and monitor schedulers.
 - **reject** — making `/pi-next auto` or bootstrap infer current truth from stale historical controller records, PLAN files, or worker UI. These remain evidence/projections; the lifecycle kernel result/projection is the current state contract.
 
+### Stale verified-candidate proof recovery (issue #156)
+
+- **adopt-pattern** — durable workflow engines bind completion evidence to an exact workflow input/version and treat superseded evidence as history, not current authority. Bootstrap and production lifecycle entries now use the shared finalization proof recovery semantics: an exact live proof can resume, a newer clean committed live candidate invalidates stale proof and is reverified before guarded finalization, and a newer dirty live candidate blocks without reset/deletion.
+- **reject** — operator shell cleanup, automatic checkout/reset/rebase to the proof SHA, or letting stale durable proof override the canonical `agent/issue-N` branch tip.
+
 ### Zero-delta implementation retry (issue #149)
 
 - **adopt-pattern** — bounded workflow retry controllers distinguish no-candidate generation failures from candidate verification failures. Pi-next now spends one separate fresh implementation retry only when a completed implementation worker produced mechanically proven zero delta, the issue is still open, satisfaction is unproven, and no repair/finalization phase has started.
