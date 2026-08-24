@@ -4,7 +4,7 @@ import { rm } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { acquireBootstrapLifecycleLock, type BootstrapLifecycleLock } from "../src/bootstrap/lifecycle-lock.js";
-import { readVerifiedFinalizationCandidateProof, writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.js";
+import { invalidateVerifiedFinalizationCandidateProof, readVerifiedFinalizationCandidateProof, writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.js";
 import { CANONICAL_STATUS_ARGS, changedFilePathsFromStatus, uniqueSortedGitPaths } from "../src/bootstrap/git-status.js";
 import { emitLifecycleCheckpoint } from "../src/coordination/lifecycle-checkpoints.js";
 import { finalizeIssue, FinalizeError, type PendingVerificationRequest } from "../src/coordination/finalize.ts";
@@ -286,16 +286,42 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     // own durable proof (e.g. integrated by another actor entirely).
     const headAlreadyIntegrated = worktreeHead !== originMainForHead
       && (await tryGit(root, ["merge-base", "--is-ancestor", worktreeHead, "origin/main"], runner)) !== undefined;
-    if (priorProofIntegrated || headAlreadyIntegrated) {
-      // Already integrated (by us or by another actor); any currently dirty
-      // files are unrelated leftover work, not part of the verified
-      // candidate, so they are never staged or committed here -
-      // cleanIntegratedWorkspace() below refuses cleanup if the worktree
-      // isn't clean instead.
-      candidateSha = priorProofIntegrated ? priorProof!.candidateSha : worktreeHead;
+    const dirty = await changedPaths(worktree, runner);
+    const liveCommittedDelta = await committedPaths(worktree, runner);
+    const staleProof = priorProof && priorProof.candidateSha !== worktreeHead ? priorProof : undefined;
+    const exactProof = priorProof && priorProof.candidateSha === worktreeHead ? priorProof : undefined;
+    const liveCandidateTakesPrecedence = !!staleProof && (headAlreadyIntegrated || liveCommittedDelta.length > 0);
+
+    if (liveCandidateTakesPrecedence) {
+      if (dirty.length) {
+        throw new BootstrapFinalizeError(
+          "STALE_PROOF_LIVE_CANDIDATE_DIRTY",
+          `${branch}'s live candidate ${worktreeHead} supersedes stale proof ${staleProof!.candidateSha}, but the canonical worktree is dirty; preserving it for explicit reconciliation`,
+        );
+      }
+      await invalidateVerifiedFinalizationCandidateProof({
+        gitCommonDir,
+        issueNumber,
+        staleProof: staleProof!,
+        reason: "live-candidate-advanced",
+        liveCandidateSha: worktreeHead,
+      });
+      say(`bootstrap finalize #${issueNumber} · stale verified-candidate proof ${staleProof!.candidateSha.slice(0, 12)} invalidated; live candidate ${worktreeHead.slice(0, 12)} takes precedence`);
+      candidateSha = worktreeHead;
+      needsCommitAndVerify = !headAlreadyIntegrated;
+    } else if (staleProof) {
+      throw new BootstrapFinalizeError(
+        "STALE_PROOF_AMBIGUOUS",
+        `${branch}'s tip ${worktreeHead} does not match durable verified proof ${staleProof.candidateSha}, and no newer committed live candidate with a real delta was found`,
+      );
+    } else if (exactProof || headAlreadyIntegrated || priorProofIntegrated) {
+      // Already verified/integrated. Any currently dirty files are unrelated
+      // leftover work, not part of the verified candidate, so they are never
+      // staged or committed here; cleanIntegratedWorkspace() below refuses
+      // cleanup if the worktree isn't clean instead.
+      candidateSha = exactProof ? worktreeHead : headAlreadyIntegrated ? worktreeHead : priorProof!.candidateSha;
       needsCommitAndVerify = false;
     } else {
-      const dirty = await changedPaths(worktree, runner);
       const intended = options.candidatePaths ? uniqueSortedGitPaths(options.candidatePaths) : dirty;
       if (dirty.some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "worktree contains changes outside intended candidate paths");
       if (dirty.length) {

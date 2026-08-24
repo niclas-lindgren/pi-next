@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 interface MinimalCommandResult { exitCode: number; stdout: string; stderr: string; }
@@ -14,12 +14,34 @@ export interface VerifiedFinalizationCandidateProof {
   checks: string[];
 }
 
+export interface InvalidatedFinalizationCandidateProof {
+  version: 1;
+  issueNumber: number;
+  branch: string;
+  invalidatedAt: string;
+  reason: string;
+  staleProof: VerifiedFinalizationCandidateProof;
+  liveCandidateSha?: string;
+}
+
 function proofDirectory(gitCommonDir: string): string {
   return join(resolve(gitCommonDir), "pi-next", "bootstrap-lifecycle");
 }
 
-function proofPath(gitCommonDir: string, issueNumber: number): string {
+export function verifiedFinalizationCandidateProofPath(gitCommonDir: string, issueNumber: number): string {
   return join(proofDirectory(gitCommonDir), `issue-${issueNumber}.verified-candidate.json`);
+}
+
+function invalidatedProofDirectory(gitCommonDir: string): string {
+  return join(proofDirectory(gitCommonDir), "invalidated-verified-candidates");
+}
+
+function archiveStamp(value: Date): string {
+  return value.toISOString().replace(/[^0-9A-Za-z]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function invalidatedProofPath(gitCommonDir: string, issueNumber: number, proofSha: string, now: Date): string {
+  return join(invalidatedProofDirectory(gitCommonDir), `issue-${issueNumber}.${proofSha}.${archiveStamp(now)}.json`);
 }
 
 function isSha(value: unknown): value is string {
@@ -55,15 +77,38 @@ export async function writeVerifiedFinalizationCandidateProof(input: {
     checks: [...input.checks],
   };
   await mkdir(proofDirectory(input.gitCommonDir), { recursive: true });
-  await writeFile(proofPath(input.gitCommonDir, input.issueNumber), `${JSON.stringify(record, null, 2)}\n`);
+  await writeFile(verifiedFinalizationCandidateProofPath(input.gitCommonDir, input.issueNumber), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 export async function readVerifiedFinalizationCandidateProof(gitCommonDir: string, issueNumber: number): Promise<VerifiedFinalizationCandidateProof | undefined> {
   try {
-    return parseProof(JSON.parse(await readFile(proofPath(gitCommonDir, issueNumber), "utf8")), issueNumber);
+    return parseProof(JSON.parse(await readFile(verifiedFinalizationCandidateProofPath(gitCommonDir, issueNumber), "utf8")), issueNumber);
   } catch {
     return undefined;
   }
+}
+
+export async function invalidateVerifiedFinalizationCandidateProof(input: {
+  gitCommonDir: string;
+  issueNumber: number;
+  staleProof: VerifiedFinalizationCandidateProof;
+  reason: string;
+  liveCandidateSha?: string;
+  now?: Date;
+}): Promise<void> {
+  const now = input.now ?? new Date();
+  const record: InvalidatedFinalizationCandidateProof = {
+    version: 1,
+    issueNumber: input.issueNumber,
+    branch: `agent/issue-${input.issueNumber}`,
+    invalidatedAt: now.toISOString(),
+    reason: input.reason,
+    staleProof: input.staleProof,
+    ...(input.liveCandidateSha ? { liveCandidateSha: input.liveCandidateSha } : {}),
+  };
+  await mkdir(invalidatedProofDirectory(input.gitCommonDir), { recursive: true });
+  await writeFile(invalidatedProofPath(input.gitCommonDir, input.issueNumber, input.staleProof.candidateSha, now), `${JSON.stringify(record, null, 2)}\n`);
+  await rm(verifiedFinalizationCandidateProofPath(input.gitCommonDir, input.issueNumber), { force: true });
 }
 
 export async function hasExactVerifiedFinalizationCandidate(input: {

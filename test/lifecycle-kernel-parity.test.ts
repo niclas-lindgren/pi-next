@@ -114,6 +114,24 @@ test("auto scheduler only selects/requeries and never changes lifecycle semantic
   } finally { await f.cleanup(); }
 });
 
+test("bootstrap and production entries share stale-proof finalization-blocked disposition", async () => {
+  const f = await fixture();
+  try {
+    const execute = async () => report(156);
+    const runFinalizer = async () => {
+      const error = new Error("live candidate supersedes stale proof but is dirty");
+      (error as Error & { code: string }).code = "STALE_PROOF_LIVE_CANDIDATE_DIRTY";
+      throw error;
+    };
+    const bootstrap = await runBootstrapLifecycle({ cwd: f.root, issueNumber: 156, allowRepair: true, review: false, finalize: true }, { runFinalizer }, execute);
+    const production = await runSingleIssueLifecycle({ cwd: f.root, workItem: { issueNumber: 156 }, allowRepair: true, review: false, finalize: true, entry: "auto", runId: "auto-156" }, { runFinalizer }, execute);
+    assert.equal(bootstrap.disposition, "finalization-blocked");
+    assert.equal(production.disposition, "finalization-blocked");
+    assert.deepEqual(bootstrap.finalizationFailure, production.finalizationFailure);
+    assert.equal(production.projection.terminalDisposition, "finalization-blocked");
+  } finally { await f.cleanup(); }
+});
+
 test("canonical projection prevents Campsty #647-style footer/worker contradiction", async () => {
   const f = await fixture();
   try {

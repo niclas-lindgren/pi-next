@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +9,7 @@ import { test } from "node:test";
 
 import { BootstrapFinalizeError, main as bootstrapFinalizeMain, runBootstrapFinalize, type CommandRunner } from "../scripts/bootstrap-finalize.ts";
 import { readCandidateState } from "../src/bootstrap/candidate.ts";
+import { readVerifiedFinalizationCandidateProof, verifiedFinalizationCandidateProofPath, writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.ts";
 import { runCommand as bootstrapRunCommand } from "../src/bootstrap/command-runner.ts";
 import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
 import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordination/work-authority.ts";
@@ -52,6 +54,29 @@ async function dirtyTrackedCandidate(root: string, issue: number, file = "README
   return path;
 }
 
+async function commitFileCandidate(root: string, issue: number, file: string, content: string) {
+  const path = await cleanCandidate(root, issue);
+  await writeFile(join(path, file), content);
+  await git(path, "add", file);
+  await git(path, "commit", "-qm", `candidate ${issue} ${file}`);
+  return { path, sha: await git(path, "rev-parse", "HEAD") };
+}
+
+async function gitCommonDir(root: string): Promise<string> {
+  return git(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
+}
+
+async function writeProof(root: string, issue: number, candidateSha: string, paths: string[] = ["feature-a.txt"]) {
+  await writeVerifiedFinalizationCandidateProof({
+    gitCommonDir: await gitCommonDir(root),
+    issueNumber: issue,
+    candidateSha,
+    candidatePaths: paths,
+    checks: ["npm run typecheck", "npm test"],
+    now: new Date("2026-08-24T00:00:00.000Z"),
+  });
+}
+
 /**
  * Simulates a candidate that a prior finalize run already pushed directly to
  * origin/main (no PR) via a real --no-ff merge, exactly like finalizeIssue()
@@ -72,6 +97,16 @@ async function directlyIntegratedCandidate(root: string, remote: string, issue: 
   const mergeSha = await git(root, "rev-parse", "main");
   assert.equal(await git(remote, "rev-parse", "main"), mergeSha);
   return { worktree, sha, mergeSha };
+}
+
+async function fastForwardIntegratedCandidate(root: string, remote: string, issue: number, file = "feature.txt") {
+  const worktree = await dirtyCandidate(root, issue, file);
+  await git(worktree, "add", file);
+  await git(worktree, "commit", "-qm", `candidate ${issue}`);
+  const sha = await git(worktree, "rev-parse", "HEAD");
+  await git(worktree, "push", "-q", "origin", "HEAD:main");
+  assert.equal(await git(remote, "rev-parse", "main"), sha);
+  return { worktree, sha };
 }
 
 /**
@@ -147,6 +182,132 @@ test("bootstrap finalizer commits, pushes directly to main, proves reachability,
     assert.match(await git(f.remote, "log", "--oneline", "main"), /feat\(finalize\): add helper \(#101\)/);
     assert.equal((await authority.get("101")).state, "closed");
     assert.ok(lines.some((line) => line.endsWith("PASS")));
+  } finally { await f.cleanup(); }
+});
+
+test("stale integrated proof cannot override newer clean committed live candidate", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1561;
+    const { worktree, sha: a } = await fastForwardIntegratedCandidate(f.root, f.remote, issue, "feature-a.txt");
+    await writeProof(f.root, issue, a, ["feature-a.txt"]);
+    await writeFile(join(worktree, "feature-b.txt"), "candidate b\n");
+    await git(worktree, "add", "feature-b.txt");
+    await git(worktree, "commit", "-qm", "candidate B");
+    const b = await git(worktree, "rev-parse", "HEAD");
+
+    const lines: string[] = [];
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, reporter: (line) => lines.push(line) });
+
+    assert.equal(result.outcome, "finalized");
+    assert.equal(result.candidateSha, b);
+    assert.notEqual(result.candidateSha, a);
+    assert.equal(await git(f.remote, "show", "main:feature-b.txt"), "candidate b");
+    const proof = await readVerifiedFinalizationCandidateProof(await gitCommonDir(f.root), issue);
+    assert.equal(proof?.candidateSha, b);
+    assert.deepEqual(proof?.candidatePaths, ["feature-b.txt"]);
+    assert.ok(lines.some((line) => line.includes("stale verified-candidate proof") && line.includes("takes precedence")));
+    const archived = await readdir(join(await gitCommonDir(f.root), "pi-next", "bootstrap-lifecycle", "invalidated-verified-candidates"));
+    assert.ok(archived.some((name) => name.includes(a)));
+
+    const rerun = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority });
+    assert.equal(rerun.candidateSha, b);
+    assert.equal(rerun.outcome, "finalized");
+  } finally { await f.cleanup(); }
+});
+
+test("stale proof with newer dirty live candidate blocks without deleting or resetting work", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1562;
+    const { worktree, sha: a } = await fastForwardIntegratedCandidate(f.root, f.remote, issue, "feature-a.txt");
+    await writeProof(f.root, issue, a, ["feature-a.txt"]);
+    await writeFile(join(worktree, "feature-b.txt"), "candidate b\n");
+    await git(worktree, "add", "feature-b.txt");
+    await git(worktree, "commit", "-qm", "candidate B");
+    const b = await git(worktree, "rev-parse", "HEAD");
+    await writeFile(join(worktree, "dirty.txt"), "preserve dirty work\n");
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority }), "STALE_PROOF_LIVE_CANDIDATE_DIRTY");
+    assert.equal(await git(worktree, "rev-parse", "HEAD"), b);
+    assert.equal(await git(worktree, "status", "--porcelain", "dirty.txt"), "?? dirty.txt");
+    assert.equal((await readVerifiedFinalizationCandidateProof(await gitCommonDir(f.root), issue))?.candidateSha, a);
+    assert.equal((await authority.get(String(issue))).state, "open");
+
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority }), "STALE_PROOF_LIVE_CANDIDATE_DIRTY");
+    assert.equal(await git(worktree, "rev-parse", "HEAD"), b);
+    assert.equal(await git(worktree, "status", "--porcelain", "dirty.txt"), "?? dirty.txt");
+  } finally { await f.cleanup(); }
+});
+
+test("integrated exact proof with no newer live candidate resumes finalization and cleanup", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1563;
+    const { sha } = await directlyIntegratedCandidate(f.root, f.remote, issue, "feature-a.txt");
+    await writeProof(f.root, issue, sha, ["feature-a.txt"]);
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority });
+
+    assert.equal(result.outcome, "finalized");
+    assert.equal(result.candidateSha, sha);
+    assert.equal(result.worktreeRemoved, true);
+    assert.equal(result.localBranchRemoved, true);
+  } finally { await f.cleanup(); }
+});
+
+test("exact live proof resumes without rerunning repository checks before finalization", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1564;
+    const { sha } = await commitFileCandidate(f.root, issue, "feature-a.txt", "candidate a\n");
+    await writeProof(f.root, issue, sha, ["feature-a.txt"]);
+    const commands: string[] = [];
+    const runner: CommandRunner = async (command, args, options) => {
+      commands.push(`${command} ${args.join(" ")}`);
+      return bootstrapRunCommand(command, args, { cwd: options.cwd });
+    };
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, runCommand: runner });
+
+    assert.equal(result.candidateSha, sha);
+    assert.equal(result.outcome, "finalized");
+    assert.equal(commands.some((command) => command === "sh -c npm run typecheck" || command === "sh -c npm test"), false);
+  } finally { await f.cleanup(); }
+});
+
+test("recovery writes fresh exact proof before guarded finalization sees newer live candidate", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1565;
+    const { worktree, sha: a } = await fastForwardIntegratedCandidate(f.root, f.remote, issue, "feature-a.txt");
+    await writeProof(f.root, issue, a, ["feature-a.txt"]);
+    await writeFile(join(worktree, "feature-b.txt"), "candidate b\n");
+    await git(worktree, "add", "feature-b.txt");
+    await git(worktree, "commit", "-qm", "candidate B");
+    const b = await git(worktree, "rev-parse", "HEAD");
+    const proofPath = verifiedFinalizationCandidateProofPath(await gitCommonDir(f.root), issue);
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+    let proofShaWhenVerificationReported: string | undefined;
+
+    const result = await runBootstrapFinalize({
+      cwd: f.root,
+      issueNumber: issue,
+      authority,
+      reporter: (line) => {
+        if (line.includes("candidate verified")) {
+          proofShaWhenVerificationReported = (JSON.parse(readFileSync(proofPath, "utf8")) as { candidateSha: string }).candidateSha;
+        }
+      },
+    });
+
+    assert.equal(proofShaWhenVerificationReported, b);
+    assert.equal(result.candidateSha, b);
+    assert.equal((await readVerifiedFinalizationCandidateProof(await gitCommonDir(f.root), issue))?.candidateSha, b);
   } finally { await f.cleanup(); }
 });
 
