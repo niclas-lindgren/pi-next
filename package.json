@@ -1,6 +1,6 @@
 {
   "name": "pi-next",
-  "version": "0.2.82",
+  "version": "0.2.83",
   "description": "Autonomous issue implementation loop extension for pi-coding-agent",
   "keywords": [
     "pi-package"
