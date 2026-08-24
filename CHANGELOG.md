@@ -2,21 +2,39 @@
 
 ## Unreleased
 
+## 0.2.73 - prepared release
+
+Bundle the deterministic multi-source skill registry, and the lifecycle-kernel unification work converging bootstrap, the evaluation harness, and production's checkpoint promotion onto one canonical worker seam and finalizer, accumulated since v0.2.72.
+
 ### Material changes
 
 - Add a deterministic multi-source skill registry and a kernel task-aware resolver. `skills/manifest.json` can now pin more than one reviewed upstream source (each with its own immutable revision, allowlist, destination, license/provenance, overlays, and per-source `PROVENANCE.json`) while preserving the existing single-upstream integrity guarantees.
 - Resolve skills in the kernel before worker launch with explicit mandatory/automatic/explicit tiers, role/task/path/risk rules, one-canonical-methodology-per-category conflict detection, and bounded telemetry (registry fingerprint, selected ids, source/provenance version, tier, reason). Available, selected, and loaded skills are mechanically distinct; installed-but-unselected skills add no worker-context payload.
 - Adopt the Superpowers `verification-before-completion` concept as a package-owned discipline behind pi-next's trust/authority boundary without importing a competing Superpowers workflow bootstrap; process-owner skills can never be routed automatically.
 - Add memorable `make bootstrap`, `make bootstrap-N`, and `make bootstrap-next` targets as thin wrappers around the existing `npm run bootstrap:self-host` CLI, documented in `make help`; the Make layer does not duplicate bootstrap/lifecycle semantics.
+- Converge bootstrap's worker invocation, the evaluation canary harness, and production onto one shared `WorkerAdapter` seam and evidence-based terminal-result classification; a resolved model turn is no longer treated as `completed` without a mechanically observed successful terminal result (fixes the same false-completion shape in three independent places).
+- Add a shared outer `LifecycleDisposition` type that bootstrap's `Disposition`, production's `VerificationFailureDisposition`, and `WorkerFailureClassification` each translate into.
+- Promote `finalizeIssue()` to the one canonical mechanical finalizer: extend it with an optional committed-verification-report evidence gate, fix a duplicate-close-comment bug on crash-retry, and converge `scripts/bootstrap-finalize.ts` onto it (dropping its own PR+CI-gated integration strategy, since `main` has no branch protection in this repository).
+- Split `extensions/pi-next/checkpoint.ts`'s worker-invoked `promoteCheckpoint()` into a worker-side promotion *request* and a controller-side `finalizeRequestedPromotion()` step that actually performs the merge via `finalizeIssue()`; a promotion is now resolved mechanically before an issue is ever reported completed, instead of trusted from the worker's own merge.
 
 ### Compatibility/configuration/schema
 
 - New optional versioned `skills` routing policy under `.pi-next/config.json`; a missing section uses the built-in default that mirrors prior role/risk selection. Unknown/unavailable skills, unsupported versions, invalid patterns, and competing methodologies fail configuration validation.
 - The classic single-upstream `skills/manifest.json` form and its provenance fingerprint are unchanged; a manifest cannot mix the single-upstream and `sources` forms.
+- `WorkerReport` gains optional `stopReason`/`terminalResultObserved` diagnostic fields; `BootstrapFinalizerReport` drops the unused `pr` field and gains an `"integrated-authority-changed"` outcome value.
+
+### Breaking/behavior changes
+
+- The `pi_next_git` worker tool's `"promote"` action is renamed to `"request_promotion"` and no longer merges/pushes `main` itself; promotion is now finalized by a controller-side step after the worker's turn ends. A worker session still relying on the old `"promote"` action name must be updated to call `"request_promotion"`.
 
 ### Security/safety
 
 - Adding or updating a managed source remains an explicit reviewed repository change; a worker/model cannot discover and install a skill from the network during normal dispatch.
+- The worker can no longer merge/push to `main` or close an issue through the `pi_next_git` tool; that now requires a controller-verified `finalizeIssue()` call. Note: the production worker is a full Pi CLI subprocess with no tool allowlist/denylist configured anywhere in `extensions/pi-next` (unlike bootstrap's sandboxed in-process session), so it likely still retains Pi's unrestricted built-in `bash` tool and could run `git push`/`gh issue close` directly outside `pi_next_git`. Enforcing that boundary needs a separate follow-up.
+
+### Upgrade guidance
+
+- No consumer action is required for the skill registry or worker-adapter changes. Any external caller of the `pi_next_git` tool's `"promote"` action must switch to `"request_promotion"`.
 
 ## 0.2.72 - prepared release
 
