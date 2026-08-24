@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { BootstrapFinalizeError, main as bootstrapFinalizeMain, runBootstrapFinalize, type CommandRunner } from "../scripts/bootstrap-finalize.ts";
 import { readCandidateState } from "../src/bootstrap/candidate.ts";
 import { readVerifiedFinalizationCandidateProof, verifiedFinalizationCandidateProofPath, writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.ts";
+import { readVerifiedIntegratedMainProof, writeVerifiedIntegratedMainProof } from "../src/coordination/post-integration-reverification.ts";
 import { runCommand as bootstrapRunCommand } from "../src/bootstrap/command-runner.ts";
 import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
 import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordination/work-authority.ts";
@@ -117,6 +118,21 @@ async function fastForwardIntegratedCandidate(root: string, remote: string, issu
   return { worktree, sha };
 }
 
+async function pushUnrelatedMainCommit(root: string, remote: string, file: string, content = `${file}\n`): Promise<string> {
+  const scratch = `${root}-scratch-${file.replace(/[^a-z0-9-]/gi, "-")}`;
+  await exec("git", ["clone", "-q", remote, scratch]);
+  await git(scratch, "config", "user.email", "release@example.invalid");
+  await git(scratch, "config", "user.name", "Release Test");
+  await writeFile(join(scratch, file), content);
+  await git(scratch, "add", file);
+  await git(scratch, "commit", "-qm", `chore(release): ${file}`);
+  await git(scratch, "push", "-q", "origin", "HEAD:main");
+  const sha = await git(scratch, "rev-parse", "HEAD");
+  await rm(scratch, { recursive: true, force: true });
+  await git(root, "fetch", "origin", "main", "--quiet");
+  return sha;
+}
+
 /**
  * Simulates the same real --no-ff integration as directlyIntegratedCandidate,
  * but performed in a scratch worktree pushed straight to the bare remote, so
@@ -206,20 +222,17 @@ test("advanced main cannot make a dirty baseline HEAD look integrated (#157 inci
     assert.equal(await git(f.root, "merge-base", "--is-ancestor", baseline, "origin/main").then(() => "yes"), "yes");
 
     const authority = new InMemoryWorkAuthority([workItem(issue)]);
-    await rejectsCode(
-      runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, candidatePaths: ["README.md", "new-source.ts"] }),
-      "REQUIRES_REVERIFICATION",
-    );
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, candidatePaths: ["README.md", "new-source.ts"] });
 
-    const candidate = await git(worktree, "rev-parse", "HEAD");
+    const candidate = result.candidateSha;
     assert.notEqual(candidate, baseline);
-    assert.equal(await git(worktree, "status", "--porcelain"), "");
+    assert.equal(result.outcome, "finalized");
     assert.equal(await git(f.remote, "merge-base", "--is-ancestor", candidate, "main").then(() => "yes"), "yes");
     assert.equal(await git(f.remote, "show", "main:README.md"), "dirty tracked candidate");
     assert.equal(await git(f.remote, "show", "main:new-source.ts"), "export const candidate = true;");
-    assert.equal((await authority.get(String(issue))).state, "open");
-    assert.ok(await git(f.root, "worktree", "list", "--porcelain").then((text) => text.includes("issue-157")));
-    assert.ok(await git(f.root, "rev-parse", "--verify", `agent/issue-${issue}`));
+    assert.equal((await authority.get(String(issue))).state, "closed");
+    assert.equal(await git(f.root, "worktree", "list", "--porcelain").then((text) => text.includes("issue-157")), false);
+    await assert.rejects(git(f.root, "rev-parse", "--verify", `agent/issue-${issue}`));
   } finally { await f.cleanup(); }
 });
 
@@ -254,16 +267,13 @@ test("durable proof bound to baseline HEAD cannot override newer dirty worktree 
     await advanceOriginMain(f.root, "unrelated.txt", "main advanced\n");
     const authority = new InMemoryWorkAuthority([workItem(issue)]);
 
-    await rejectsCode(
-      runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, candidatePaths: ["README.md", "candidate-extra.ts"] }),
-      "REQUIRES_REVERIFICATION",
-    );
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, candidatePaths: ["README.md", "candidate-extra.ts"] });
 
-    const candidate = await git(worktree, "rev-parse", "HEAD");
+    const candidate = result.candidateSha;
     assert.notEqual(candidate, baseline);
     assert.equal((await readVerifiedFinalizationCandidateProof(await gitCommonDir(f.root), issue))?.candidateSha, candidate);
     assert.equal(await git(f.remote, "show", "main:README.md"), "new dirty candidate");
-    assert.equal((await authority.get(String(issue))).state, "open");
+    assert.equal((await authority.get(String(issue))).state, "closed");
   } finally { await f.cleanup(); }
 });
 
@@ -540,6 +550,140 @@ test("candidate already integrated by a prior crashed run resumes post-integrati
     assert.equal(result.issueClosed, true);
     assert.equal((await authority.get("77")).state, "closed");
     await assert.rejects(git(f.root, "rev-parse", "--verify", "agent/issue-77"));
+  } finally { await f.cleanup(); }
+});
+
+test("#157 regression: already integrated candidate is reverified against current main before closure", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1571;
+    const { sha } = await directlyIntegratedCandidate(f.root, f.remote, issue, "issue-156-candidate.txt");
+    const releaseSha = await pushUnrelatedMainCommit(f.root, f.remote, "release-v0.2.77.txt", "chore(release): v0.2.77\n");
+    const commands: string[] = [];
+    const runner: CommandRunner = async (command, args, options) => {
+      commands.push(`${command} ${args.join(" ")}`);
+      return bootstrapRunCommand(command, args, { cwd: options.cwd });
+    };
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, runCommand: runner });
+
+    assert.equal(result.outcome, "finalized");
+    assert.equal(result.issueClosed, true);
+    assert.equal(await git(f.root, "rev-parse", "origin/main"), releaseSha);
+    assert.ok(commands.includes("sh -c npm run typecheck"));
+    assert.ok(commands.includes("sh -c npm test"));
+    const proof = await readVerifiedIntegratedMainProof(await gitCommonDir(f.root), issue);
+    assert.equal(proof?.candidateSha, sha);
+    assert.equal(proof?.mainSha, releaseSha);
+    assert.deepEqual(proof?.checks, ["npm run typecheck", "npm test"]);
+    assert.equal((await authority.get(String(issue))).state, "closed");
+  } finally { await f.cleanup(); }
+});
+
+test("post-integration recovery rechecks the merge commit produced after concurrent main advance", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1575;
+    const { path: worktree } = await commitFileCandidate(f.root, issue, "candidate-1575.txt", "candidate\n");
+    await pushUnrelatedMainCommit(f.root, f.remote, "release-before-finalize.txt", "release\n");
+    const rootChecks: string[] = [];
+    const candidateChecks: string[] = [];
+    const runner: CommandRunner = async (command, args, options) => {
+      if (command === "sh" && args[0] === "-c") {
+        if (options.cwd === f.root) rootChecks.push(args[1] ?? "");
+        if (options.cwd === worktree) candidateChecks.push(args[1] ?? "");
+      }
+      return bootstrapRunCommand(command, args, { cwd: options.cwd });
+    };
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, runCommand: runner });
+
+    assert.equal(result.issueClosed, true);
+    assert.deepEqual(candidateChecks, ["npm run typecheck", "npm test"]);
+    assert.deepEqual(rootChecks, ["npm run typecheck", "npm test"]);
+    assert.equal((await readVerifiedIntegratedMainProof(await gitCommonDir(f.root), issue))?.mainSha, await git(f.root, "rev-parse", "origin/main"));
+  } finally { await f.cleanup(); }
+});
+
+test("post-integration reverification repeats within bound when main advances during checks", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1572;
+    await directlyIntegratedCandidate(f.root, f.remote, issue, "candidate-1572.txt");
+    const m1 = await pushUnrelatedMainCommit(f.root, f.remote, "release-m1.txt", "m1\n");
+    let advanced = false;
+    const checkedCwds: string[] = [];
+    const runner: CommandRunner = async (command, args, options) => {
+      const result = await bootstrapRunCommand(command, args, { cwd: options.cwd });
+      if (command === "sh" && args[0] === "-c" && (args[1] === "npm run typecheck" || args[1] === "npm test")) checkedCwds.push(`${options.cwd}:${args[1]}`);
+      if (!advanced && command === "sh" && args[0] === "-c" && args[1] === "npm test") {
+        advanced = true;
+        await pushUnrelatedMainCommit(f.root, f.remote, "release-m2.txt", "m2\n");
+      }
+      return result;
+    };
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, runCommand: runner });
+
+    const m2 = await git(f.root, "rev-parse", "origin/main");
+    assert.notEqual(m2, m1);
+    assert.equal(result.issueClosed, true);
+    assert.equal((await authority.get(String(issue))).state, "closed");
+    assert.equal(checkedCwds.filter((entry) => entry.endsWith(":npm run typecheck")).length, 2);
+    assert.equal(checkedCwds.filter((entry) => entry.endsWith(":npm test")).length, 2);
+    assert.equal((await readVerifiedIntegratedMainProof(await gitCommonDir(f.root), issue))?.mainSha, m2);
+  } finally { await f.cleanup(); }
+});
+
+test("failed post-integration required check keeps issue open and preserves integrated candidate", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1573;
+    const { worktree, sha } = await directlyIntegratedCandidate(f.root, f.remote, issue, "candidate-1573.txt");
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+    const runner: CommandRunner = async (command, args, options) => {
+      if (command === "sh" && args[0] === "-c" && args[1] === "npm test") {
+        return { command, args, cwd: options.cwd, exitCode: 1, stdout: "", stderr: "post integration failure" };
+      }
+      return bootstrapRunCommand(command, args, { cwd: options.cwd });
+    };
+
+    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, runCommand: runner }), "VERIFY_FAILED");
+
+    assert.equal((await authority.get(String(issue))).state, "open");
+    assert.equal(await git(f.remote, "merge-base", "--is-ancestor", sha, "main").then(() => "yes"), "yes");
+    assert.equal(await git(worktree, "rev-parse", "HEAD"), sha);
+    assert.ok(await git(f.root, "rev-parse", "--verify", `agent/issue-${issue}`));
+  } finally { await f.cleanup(); }
+});
+
+test("durable exact integrated-main proof resumes without rerunning post-integration checks", async () => {
+  const f = await fixture();
+  try {
+    const issue = 1574;
+    const { sha } = await directlyIntegratedCandidate(f.root, f.remote, issue, "candidate-1574.txt");
+    const mainSha = await git(f.root, "rev-parse", "origin/main");
+    await writeVerifiedIntegratedMainProof({
+      gitCommonDir: await gitCommonDir(f.root),
+      issueNumber: issue,
+      candidateSha: sha,
+      mainSha,
+      checks: ["npm run typecheck", "npm test"],
+    });
+    const commands: string[] = [];
+    const runner: CommandRunner = async (command, args, options) => {
+      commands.push(`${command} ${args.join(" ")}`);
+      return bootstrapRunCommand(command, args, { cwd: options.cwd });
+    };
+    const authority = new InMemoryWorkAuthority([workItem(issue)]);
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, runCommand: runner });
+
+    assert.equal(result.issueClosed, true);
+    assert.equal(commands.some((command) => command === "sh -c npm run typecheck" || command === "sh -c npm test"), false);
   } finally { await f.cleanup(); }
 });
 
@@ -847,15 +991,14 @@ test("failed external verification does not close and allows a fresh branch from
 test("dirty unique work appearing after direct integration is promoted as a newer exact candidate before cleanup", async () => {
   const f = await fixture();
   try {
-    const { worktree, sha: integratedCandidate } = await directlyIntegratedCandidate(f.root, f.remote, 119);
+    const { sha: integratedCandidate, worktree } = await directlyIntegratedCandidate(f.root, f.remote, 119);
     await writeFile(join(worktree, "unique.txt"), "do not delete\n");
     const authority = new InMemoryWorkAuthority([workItem(119)]);
-    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 119, authority }), "REQUIRES_REVERIFICATION");
-    const newerCandidate = await git(worktree, "rev-parse", "HEAD");
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 119, authority });
+    const newerCandidate = result.candidateSha;
     assert.notEqual(newerCandidate, integratedCandidate);
-    assert.equal(await git(worktree, "status", "--porcelain"), "");
     assert.equal(await git(f.remote, "show", "main:unique.txt"), "do not delete");
-    assert.equal((await authority.get("119")).state, "open");
+    assert.equal((await authority.get("119")).state, "closed");
   } finally { await f.cleanup(); }
 });
 

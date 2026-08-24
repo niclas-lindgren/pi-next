@@ -1,10 +1,11 @@
+import { REQUIRED_CHECKS } from "../coordination/required-checks.ts";
 export const MAX_OUTPUT = 32_000;
 export const MAX_FAILURE_EVIDENCE = 8_000;
 export const MAX_PACKET_BYTES = 256_000;
 export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
 export const DEFAULT_PROGRESS_HEARTBEAT_MS = 20_000;
 export const MAX_CHANGED_FILES = 200;
-export const CHECKS = ["npm run typecheck", "npm test"] as const;
+export const CHECKS = REQUIRED_CHECKS;
 
 export type Disposition = "pass" | "already-satisfied" | "no-change" | "repairable-failure" | "blocked";
 export type WorkerRole = "implementation" | "implementation-retry" | "repair" | "review";

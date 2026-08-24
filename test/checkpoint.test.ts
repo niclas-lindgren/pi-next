@@ -34,6 +34,7 @@ async function fixture() {
     initialFiles: {
       "README.md": "fixture\n",
       ".gitignore": ".worktrees/\n.pi/\n",
+      "package.json": `${JSON.stringify({ scripts: { typecheck: "true", test: "true" } }, null, 2)}\n`,
     },
   });
   const { path: workspace } = await fixture.addIssueWorktree(638);
@@ -370,5 +371,41 @@ test("finalizeRequestedPromotion resumes after a crash between push and close wi
     assert.equal(events.filter((record) => record.event === "promotion_requested").length, 1);
   } finally {
     await cleanup(state.fixture);
+  }
+});
+
+test("production promotion recovery runs required post-integration checks before closing an already integrated candidate", async () => {
+  const fixture = await createDisposableGitFixture({
+    prefix: "pi-next-checkpoint-reverify-",
+    initialFiles: {
+      "README.md": "fixture\n",
+      ".gitignore": ".worktrees/\n.pi/\n",
+      "package.json": `${JSON.stringify({ scripts: { typecheck: "true", test: "node -e \"process.exit(1)\"" } }, null, 2)}\n`,
+    },
+  });
+  try {
+    const { path: workspace } = await fixture.addIssueWorktree(639);
+    await writeFile(`${workspace}/already-integrated.txt`, "already integrated\n");
+    await checkpointCommit(workspace, 639, "run-reverify", ["already-integrated.txt"], "checkpoint: already integrated");
+    const candidateSha = await git(workspace, "rev-parse", "HEAD");
+    const expectedMainSha = await git(workspace, "rev-parse", "refs/remotes/origin/main");
+    const leaseAuthority = freshLeaseAuthority(639);
+    const workAuthority = new InMemoryWorkAuthority([workItem(639, "2026-08-19T00:00:00Z")]);
+    const verificationPath = await writePassingVerification(workspace, workAuthority.fingerprint(await workAuthority.get("639")));
+    await requestPromotion(workspace, 639, "run-reverify", expectedMainSha, verificationPath);
+
+    await git(fixture.repo, "merge", "--no-ff", "--no-edit", candidateSha);
+    await git(fixture.repo, "push", "-q", "origin", "HEAD:main");
+    await assert.rejects(
+      finalizeRequestedPromotion(fixture.repo, 639, leaseAuthority, workAuthority, IDENTITY),
+      /npm test failed during post-integration reverification/,
+    );
+    assert.equal((await workAuthority.get("639")).state, "open");
+    assert.equal(
+      await git(fixture.repo, "merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
+      "yes",
+    );
+  } finally {
+    await fixture.cleanup();
   }
 });
