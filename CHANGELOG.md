@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.2.74 - prepared release
+
+### Material changes
+
+### Compatibility/configuration/schema
+
+### Breaking/behavior changes
+
+### Security/safety
+
+### Upgrade guidance
+
 ## 0.2.73 - prepared release
 
 Bundle the deterministic multi-source skill registry, and the lifecycle-kernel unification work converging bootstrap, the evaluation harness, and production's checkpoint promotion onto one canonical worker seam and finalizer, accumulated since v0.2.72.
