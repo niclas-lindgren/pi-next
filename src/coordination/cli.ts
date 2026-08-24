@@ -64,7 +64,9 @@ export type CoordinationCliErrorCode =
   | "PROMOTION_RACE"
   | "MISSING_AUTHORITY_EVIDENCE"
   | "INVALID_PENDING_VERIFICATION"
-  | "PENDING_VERIFICATION_FAILED";
+  | "PENDING_VERIFICATION_FAILED"
+  | "VERIFICATION_EVIDENCE_MISSING"
+  | "VERIFICATION_EVIDENCE_STALE";
 
 export type CoordinationCliErrorDetails = Record<string, string>;
 

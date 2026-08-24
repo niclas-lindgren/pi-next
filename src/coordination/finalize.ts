@@ -65,7 +65,9 @@ export type FinalizeErrorCode =
   | "STALE_AUTHORITY"
   | "MISSING_AUTHORITY_EVIDENCE"
   | "INVALID_PENDING_VERIFICATION"
-  | "PENDING_VERIFICATION_FAILED";
+  | "PENDING_VERIFICATION_FAILED"
+  | "VERIFICATION_EVIDENCE_MISSING"
+  | "VERIFICATION_EVIDENCE_STALE";
 
 export class FinalizeError extends Error {
   constructor(
@@ -81,6 +83,21 @@ export class FinalizeError extends Error {
 export interface PendingVerificationRequest {
   /** Explicit consumer-classified checks; the kernel does not infer policy from authority data. */
   criteria: readonly PendingVerificationCriterion[];
+}
+
+/**
+ * Optional mechanical gate on a verification report committed on the
+ * candidate branch (a `VERIFY.md`-style file), read directly via `git show`
+ * so it never requires checking out the candidate branch. Requires a
+ * `STATUS: PASS` line and a `FINGERPRINT: <value>` line matching
+ * `computeFingerprint`, and (if present) that every `commit:<sha>` evidence
+ * reference in the report is reachable from the candidate branch.
+ */
+export interface CandidateVerificationEvidenceCheck {
+  /** Path, relative to the repo root, of the verification report on the candidate branch. */
+  path: string;
+  /** Recomputes the fingerprint expected for the exact candidate commit; must match the report's recorded FINGERPRINT. */
+  computeFingerprint: (candidateSha: string) => Promise<string>;
 }
 
 export interface FinalizeInput {
@@ -116,6 +133,8 @@ export interface FinalizeInput {
   closeComment?: string;
   /** When supplied, integrate and record these checks while leaving authority open. */
   pendingVerification?: PendingVerificationRequest;
+  /** When supplied, refuse to integrate unless the candidate branch carries a passing, fresh, evidence-reachable verification report. */
+  candidateVerificationEvidence?: CandidateVerificationEvidenceCheck;
 }
 
 export interface FinalizeResult {
@@ -223,6 +242,57 @@ function assertOwnedFreshLease(
 
 const MAX_PROMOTION_ATTEMPTS = 3;
 
+// Mirrors extensions/pi-next/acceptance-verification.ts's extractCommitEvidenceShas.
+// Duplicated rather than imported so this module stays free of any dependency
+// on extensions/pi-next (the neutral-kernel/consumer layering #146 relies on).
+const COMMIT_SHA_PATTERN = /\bcommit:([0-9a-f]{7,40})\b/gi;
+function extractCommitEvidenceShas(report: string): string[] {
+  const shas = new Set<string>();
+  for (const match of report.matchAll(COMMIT_SHA_PATTERN)) shas.add(match[1].toLowerCase());
+  return [...shas];
+}
+
+async function assertCandidateVerificationEvidence(
+  cwd: string,
+  candidateSha: string,
+  branch: string,
+  check: CandidateVerificationEvidenceCheck,
+): Promise<void> {
+  const content = await tryGit(cwd, ["show", `${candidateSha}:${check.path}`]);
+  if (content === undefined) {
+    throw new FinalizeError(
+      "VERIFICATION_EVIDENCE_MISSING",
+      `Verification evidence not found at ${check.path} on candidate ${candidateSha}`,
+    );
+  }
+  if (!/^STATUS:\s*PASS$/m.test(content)) {
+    throw new FinalizeError(
+      "VERIFICATION_EVIDENCE_MISSING",
+      `Verification evidence at ${check.path} does not report STATUS: PASS`,
+    );
+  }
+  const recordedFingerprint = content.match(/^FINGERPRINT:\s*(\S+)$/m)?.[1];
+  const expectedFingerprint = await check.computeFingerprint(candidateSha);
+  if (recordedFingerprint !== expectedFingerprint) {
+    throw new FinalizeError(
+      "VERIFICATION_EVIDENCE_STALE",
+      `Verification evidence at ${check.path} is stale for candidate ${candidateSha}`,
+    );
+  }
+  const evidenceShas = extractCommitEvidenceShas(content);
+  if (evidenceShas.length === 0) return;
+  const unreachable: string[] = [];
+  for (const sha of evidenceShas) {
+    if ((await tryGit(cwd, ["merge-base", "--is-ancestor", sha, branch])) === undefined) unreachable.push(sha);
+  }
+  if (unreachable.length > 0) {
+    throw new FinalizeError(
+      "VERIFICATION_EVIDENCE_STALE",
+      `Verification evidence at ${check.path} cites commits not reachable from ${branch}: ${unreachable.join(", ")}`,
+    );
+  }
+}
+
 function validatePendingVerification(input: PendingVerificationRequest | undefined): PendingVerificationRecord | undefined {
   if (input === undefined) return undefined;
   if (!input || typeof input !== "object" || !Array.isArray(input.criteria) || input.criteria.length === 0) {
@@ -298,6 +368,10 @@ export async function finalizeIssue(
       "CANDIDATE_STALE",
       `${branch}'s tip ${initialTip} no longer matches the verified candidate ${input.candidateSha}; reconcile and re-verify before finalizing`,
     );
+  }
+
+  if (input.candidateVerificationEvidence) {
+    await assertCandidateVerificationEvidence(input.cwd, input.candidateSha, branch, input.candidateVerificationEvidence);
   }
 
   const release = await acquireFinalizeLock(input.cwd);
@@ -516,9 +590,15 @@ export async function finalizeIssue(
     };
   }
 
-  emitLifecycleCheckpoint("issue_closed", "before");
-  await workAuthority.close(String(input.issueNumber), input.closeComment ?? "Completed via pi-next automated workflow.");
-  emitLifecycleCheckpoint("issue_closed", "after");
+  // A retry after a crash between close() succeeding and the caller
+  // observing it must not call close() again - many adapters (GitHub
+  // included) accept a redundant close but still append the comment,
+  // duplicating it every retry.
+  if (item.state.trim().toLowerCase() !== "closed") {
+    emitLifecycleCheckpoint("issue_closed", "before");
+    await workAuthority.close(String(input.issueNumber), input.closeComment ?? "Completed via pi-next automated workflow.");
+    emitLifecycleCheckpoint("issue_closed", "after");
+  }
 
   return {
     ok: true,

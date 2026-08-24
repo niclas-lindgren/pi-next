@@ -652,3 +652,185 @@ describe("finalizeIssue", { concurrency: false }, () => {
     assert.equal(git(root, ["log", "-1", "--format=%s", "main"]), "baseline");
   });
 });
+
+/**
+ * `candidateVerificationEvidence` mechanically gates finalize on a committed
+ * `VERIFY.md`-style report, read via `git show` (never a checkout) - the
+ * optional pre-check promoted from extensions/pi-next/checkpoint.ts's
+ * promotionReadiness() during the #146 finalizer convergence.
+ */
+describe("finalizeIssue candidateVerificationEvidence", { concurrency: false }, () => {
+  function createCandidateBranchWithVerification(
+    root: string,
+    issueNumber: number,
+    file: string,
+    verification: { status: "PASS" | "FAIL"; fingerprint: string; commitShas?: string[] },
+  ): { candidateSha: string; verifyPath: string } {
+    git(root, ["switch", "-c", `agent/issue-${issueNumber}`]);
+    writeFileSync(join(root, file), "candidate change\n");
+    git(root, ["add", file]);
+    git(root, ["commit", "-qm", `feat: issue #${issueNumber} candidate`]);
+    const verifyPath = "VERIFY.md";
+    const lines = [
+      `STATUS: ${verification.status}`,
+      `FINGERPRINT: ${verification.fingerprint}`,
+      ...(verification.commitShas ?? []).map((sha) => `Evidence: commit:${sha}`),
+      "",
+    ];
+    writeFileSync(join(root, verifyPath), lines.join("\n"));
+    git(root, ["add", verifyPath]);
+    git(root, ["commit", "-qm", "chore: verification report"]);
+    const candidateSha = git(root, ["rev-parse", "HEAD"]);
+    git(root, ["switch", "main"]);
+    return { candidateSha, verifyPath };
+  }
+
+  test("integrates when the committed report is PASS with a matching fingerprint", async () => {
+    const { root } = setupRepo();
+    const { candidateSha, verifyPath } = createCandidateBranchWithVerification(root, 701, "feature.txt", {
+      status: "PASS",
+      fingerprint: "fp-701",
+    });
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(701));
+    const workAuthority = new InMemoryWorkAuthority([workItem(701, "2026-08-19T00:00:00Z")]);
+
+    const result = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 701,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(701, "2026-08-19T00:00:00Z")),
+      candidateVerificationEvidence: { path: verifyPath, computeFingerprint: async () => "fp-701" },
+    });
+
+    assert.equal(result.closed, true);
+  });
+
+  test("refuses to integrate when the report is missing from the candidate branch", async () => {
+    const { root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 702, "feature.txt");
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(702));
+    const workAuthority = new InMemoryWorkAuthority([workItem(702, "2026-08-19T00:00:00Z")]);
+
+    await expectRejects(
+      finalizeIssue(leaseAuthority, workAuthority, {
+        cwd: root,
+        issueNumber: 702,
+        agent: "claude",
+        runId: "run-1",
+        sessionId: "session-1",
+        candidateSha,
+        issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(702, "2026-08-19T00:00:00Z")),
+        candidateVerificationEvidence: { path: "VERIFY.md", computeFingerprint: async () => "irrelevant" },
+      }),
+      "VERIFICATION_EVIDENCE_MISSING",
+    );
+    assert.equal(git(root, ["log", "-1", "--format=%s", "main"]), "baseline");
+  });
+
+  test("refuses to integrate when the report status is not PASS", async () => {
+    const { root } = setupRepo();
+    const { candidateSha, verifyPath } = createCandidateBranchWithVerification(root, 703, "feature.txt", {
+      status: "FAIL",
+      fingerprint: "fp-703",
+    });
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(703));
+    const workAuthority = new InMemoryWorkAuthority([workItem(703, "2026-08-19T00:00:00Z")]);
+
+    await expectRejects(
+      finalizeIssue(leaseAuthority, workAuthority, {
+        cwd: root,
+        issueNumber: 703,
+        agent: "claude",
+        runId: "run-1",
+        sessionId: "session-1",
+        candidateSha,
+        issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(703, "2026-08-19T00:00:00Z")),
+        candidateVerificationEvidence: { path: verifyPath, computeFingerprint: async () => "fp-703" },
+      }),
+      "VERIFICATION_EVIDENCE_MISSING",
+    );
+  });
+
+  test("refuses to integrate when the fingerprint is stale", async () => {
+    const { root } = setupRepo();
+    const { candidateSha, verifyPath } = createCandidateBranchWithVerification(root, 704, "feature.txt", {
+      status: "PASS",
+      fingerprint: "fp-old",
+    });
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(704));
+    const workAuthority = new InMemoryWorkAuthority([workItem(704, "2026-08-19T00:00:00Z")]);
+
+    await expectRejects(
+      finalizeIssue(leaseAuthority, workAuthority, {
+        cwd: root,
+        issueNumber: 704,
+        agent: "claude",
+        runId: "run-1",
+        sessionId: "session-1",
+        candidateSha,
+        issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(704, "2026-08-19T00:00:00Z")),
+        candidateVerificationEvidence: { path: verifyPath, computeFingerprint: async () => "fp-current" },
+      }),
+      "VERIFICATION_EVIDENCE_STALE",
+    );
+  });
+
+  test("refuses to integrate when cited commit evidence is not reachable from the candidate branch", async () => {
+    const { root } = setupRepo();
+    const { candidateSha, verifyPath } = createCandidateBranchWithVerification(root, 705, "feature.txt", {
+      status: "PASS",
+      fingerprint: "fp-705",
+      commitShas: ["0000000000000000000000000000000000000000"],
+    });
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(705));
+    const workAuthority = new InMemoryWorkAuthority([workItem(705, "2026-08-19T00:00:00Z")]);
+
+    await expectRejects(
+      finalizeIssue(leaseAuthority, workAuthority, {
+        cwd: root,
+        issueNumber: 705,
+        agent: "claude",
+        runId: "run-1",
+        sessionId: "session-1",
+        candidateSha,
+        issueUpdatedAt: "2026-08-19T00:00:00Z",
+        verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(705, "2026-08-19T00:00:00Z")),
+        candidateVerificationEvidence: { path: verifyPath, computeFingerprint: async () => "fp-705" },
+      }),
+      "VERIFICATION_EVIDENCE_STALE",
+    );
+  });
+
+  test("integrates normally when candidateVerificationEvidence is omitted, even with no report committed", async () => {
+    const { root } = setupRepo();
+    const candidateSha = createCandidateBranch(root, 706, "feature.txt");
+    const leaseAuthority = new MemoryLeaseAuthority();
+    leaseAuthority.seed(freshLease(706));
+    const workAuthority = new InMemoryWorkAuthority([workItem(706, "2026-08-19T00:00:00Z")]);
+
+    const result = await finalizeIssue(leaseAuthority, workAuthority, {
+      cwd: root,
+      issueNumber: 706,
+      agent: "claude",
+      runId: "run-1",
+      sessionId: "session-1",
+      candidateSha,
+      issueUpdatedAt: "2026-08-19T00:00:00Z",
+      verifiedAuthorityFingerprint: workAuthority.fingerprint(workItem(706, "2026-08-19T00:00:00Z")),
+    });
+
+    assert.equal(result.closed, true);
+  });
+});
