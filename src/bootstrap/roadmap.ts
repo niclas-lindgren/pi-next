@@ -1,8 +1,8 @@
 import { BootstrapError } from "./errors.js";
 import { runCommand } from "./command-runner.js";
-import { roadmapIssueFromJson } from "./authority.js";
+import { fetchIssue, roadmapIssueFromJson } from "./authority.js";
 import { assertCommand } from "./git-utils.js";
-import { BootstrapDependencies, CommandRunner, NextIssueSelection, RoadmapIssue } from "./types.js";
+import { BootstrapDependencies, CommandRunner, Issue, NextIssueSelection, RoadmapIssue } from "./types.js";
 
 const DEFAULT_ROADMAP_ISSUE = 73;
 const NOT_ELIGIBLE_LABELS = new Set(["blocked", "not-ready", "not ready", "on-hold", "on hold", "do-not-run", "do not run"]);
@@ -124,8 +124,65 @@ function notEligibleReason(issue: RoadmapIssue): string | undefined {
   return undefined;
 }
 
+async function dependencyAuthority(
+  dependency: number,
+  candidate: RoadmapIssue,
+  cwd: string,
+  provider: (issueNumber: number, root: string) => Promise<Issue>,
+  cache: Map<number, Promise<Issue>>,
+): Promise<Issue> {
+  try {
+    let result = cache.get(dependency);
+    if (!result) {
+      result = provider(dependency, cwd);
+      cache.set(dependency, result);
+    }
+    const issue = await result;
+    if (issue.number !== dependency) {
+      throw new BootstrapError(
+        `dependency authority for #${dependency} required by #${candidate.number} returned issue #${issue.number}`,
+        "DEPENDENCY_AUTHORITY_AMBIGUOUS",
+      );
+    }
+    if (issue.state !== "OPEN" && issue.state !== "CLOSED") {
+      throw new BootstrapError(
+        `dependency authority for #${dependency} required by #${candidate.number} is missing a resolvable state`,
+        "DEPENDENCY_AUTHORITY_UNAVAILABLE",
+      );
+    }
+    return issue;
+  } catch (error) {
+    if (error instanceof BootstrapError && error.code.startsWith("DEPENDENCY_AUTHORITY_")) throw error;
+    throw new BootstrapError(
+      `dependency authority lookup for #${dependency} required by #${candidate.number} failed: ${error instanceof Error ? error.message : String(error)}`,
+      "DEPENDENCY_AUTHORITY_UNAVAILABLE",
+    );
+  }
+}
+
+async function openDependenciesForCandidate(
+  item: RoadmapIssue,
+  byNumber: Map<number, RoadmapIssue>,
+  cwd: string,
+  provider: (issueNumber: number, root: string) => Promise<Issue>,
+  cache: Map<number, Promise<Issue>>,
+): Promise<number[]> {
+  const openDependencies: number[] = [];
+  for (const dependency of declaredDependencies(item)) {
+    const roadmapDependency = byNumber.get(dependency);
+    if (roadmapDependency) {
+      if (roadmapDependency.state !== "CLOSED") openDependencies.push(dependency);
+      continue;
+    }
+    const authority = await dependencyAuthority(dependency, item, cwd, provider, cache);
+    if (authority.state !== "CLOSED") openDependencies.push(dependency);
+  }
+  return openDependencies;
+}
+
 export async function resolveNextIssue(cwd: string, dependencies: BootstrapDependencies = {}): Promise<NextIssueSelection> {
   const provider = dependencies.fetchRoadmapIssues ?? ((root: string) => fetchRoadmapIssues(root, dependencies.runCommand ?? runCommand));
+  const authorityProvider = dependencies.fetchIssue ?? ((issueNumber: number, root: string) => fetchIssue(issueNumber, root, dependencies.runCommand ?? runCommand));
   const roadmap = await provider(cwd);
   if (roadmap.length === 0) throw new BootstrapError("roadmap contains no issue candidates");
   const byNumber = new Map<number, RoadmapIssue>();
@@ -133,16 +190,13 @@ export async function resolveNextIssue(cwd: string, dependencies: BootstrapDepen
     if (byNumber.has(item.number)) throw new BootstrapError(`roadmap contains duplicate issue #${item.number}`);
     byNumber.set(item.number, item);
   }
+  const externalAuthorityCache = new Map<number, Promise<Issue>>();
   const skips = [];
   for (const item of roadmap) {
     if (item.state === "CLOSED") { skips.push({ issueNumber: item.number, status: "closed" as const, reason: "closed" }); continue; }
     const ineligible = notEligibleReason(item);
     if (ineligible) { skips.push({ issueNumber: item.number, status: "not-eligible" as const, reason: ineligible }); continue; }
-    const openDependencies = declaredDependencies(item).filter((dependency) => {
-      const dependencyIssue = byNumber.get(dependency);
-      if (!dependencyIssue) throw new BootstrapError(`dependency #${dependency} for #${item.number} is outside the configured roadmap`);
-      return dependencyIssue.state !== "CLOSED";
-    });
+    const openDependencies = await openDependenciesForCandidate(item, byNumber, cwd, authorityProvider, externalAuthorityCache);
     if (openDependencies.length > 0) {
       skips.push({ issueNumber: item.number, status: "blocked" as const, reason: `blocked by ${openDependencies.map((number) => `#${number}`).join("/")}` });
       continue;
