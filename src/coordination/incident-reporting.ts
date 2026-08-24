@@ -67,7 +67,17 @@ export interface IncidentLifecycleDiagnostic {
   verification?: string;
   finalization?: string;
   repair?: string;
-  workerAttempts?: { role: string; disposition: string; model?: string; durationMs?: number; toolCalls?: number }[];
+  workerAttempts?: {
+    role: string;
+    disposition: string;
+    model?: string;
+    durationMs?: number;
+    toolCalls?: number;
+    stopReason?: string;
+    terminalResultKind?: string;
+    terminalResultObserved?: boolean;
+    assistantOutputObserved?: boolean;
+  }[];
 }
 
 export interface IncidentIdentityMismatchDiagnostic {
@@ -430,6 +440,10 @@ export function incidentBundleFromLifecycleResult(cwd: string, result: UnifiedLi
         ...(attempt.model ? { model: attempt.model } : {}),
         durationMs: attempt.durationMs,
         toolCalls: attempt.toolCalls,
+        ...(attempt.stopReason ? { stopReason: attempt.stopReason } : {}),
+        ...(attempt.terminalResultKind ? { terminalResultKind: attempt.terminalResultKind } : {}),
+        terminalResultObserved: attempt.terminalResultObserved,
+        ...(attempt.assistantOutputObserved !== undefined ? { assistantOutputObserved: attempt.assistantOutputObserved } : {}),
       })),
     },
     candidate: {
