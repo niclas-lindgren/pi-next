@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -791,6 +791,25 @@ function roadmap(items: Array<Partial<RoadmapIssue> & { number: number }>): Road
   }));
 }
 
+function authorityIssue(number: number, state?: "OPEN" | "CLOSED"): Issue {
+  return {
+    number,
+    title: `issue ${number}`,
+    body: "",
+    comments: [],
+    ...(state ? { state } : {}),
+  };
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test("roadmap discovery preserves row order without treating dependency references as candidates", async () => {
   const viewed: number[] = [];
   const result = await fetchRoadmapIssues(process.cwd(), async (command, args, options) => {
@@ -899,6 +918,115 @@ test("open dependencies block dependents until the dependency closes", async () 
   assert.equal(ready.selectedIssueNumber, 80);
 });
 
+test("closed out-of-roadmap dependencies satisfy roadmap candidates without becoming schedulable", async () => {
+  const authorityCalls: number[] = [];
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 108, body: "Depends on: #113" },
+    ]),
+    fetchIssue: async (issueNumber) => {
+      authorityCalls.push(issueNumber);
+      return authorityIssue(issueNumber, "CLOSED");
+    },
+  });
+
+  assert.equal(selection.selectedIssueNumber, 108);
+  assert.deepEqual(selection.skips, []);
+  assert.deepEqual(authorityCalls, [113]);
+  assert.notEqual(selection.selectedIssueNumber, 113);
+});
+
+test("open out-of-roadmap dependencies block only their candidate and selection continues", async () => {
+  const authorityCalls: number[] = [];
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 108, body: "Depends on: #113" },
+      { number: 109, body: "Dependencies: none" },
+    ]),
+    fetchIssue: async (issueNumber) => {
+      authorityCalls.push(issueNumber);
+      return authorityIssue(issueNumber, "OPEN");
+    },
+  });
+
+  assert.equal(selection.selectedIssueNumber, 109);
+  assert.deepEqual(selection.skips, [{ issueNumber: 108, status: "blocked", reason: "blocked by #113" }]);
+  assert.deepEqual(authorityCalls, [113]);
+  assert.notEqual(selection.selectedIssueNumber, 113);
+});
+
+test("multiple closed out-of-roadmap dependencies are all evaluated before selecting the candidate", async () => {
+  const authorityCalls: number[] = [];
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 108, body: "Dependencies: #113, #114" },
+    ]),
+    fetchIssue: async (issueNumber) => {
+      authorityCalls.push(issueNumber);
+      return authorityIssue(issueNumber, "CLOSED");
+    },
+  });
+
+  assert.equal(selection.selectedIssueNumber, 108);
+  assert.deepEqual(authorityCalls, [113, 114]);
+});
+
+test("mixed closed and open out-of-roadmap dependencies block by the open dependency", async () => {
+  const authorityState = new Map<number, "OPEN" | "CLOSED">([[113, "CLOSED"], [114, "OPEN"]]);
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 108, body: "Dependencies: #113, #114" },
+      { number: 109 },
+    ]),
+    fetchIssue: async (issueNumber) => authorityIssue(issueNumber, authorityState.get(issueNumber) ?? "OPEN"),
+  });
+
+  assert.equal(selection.selectedIssueNumber, 109);
+  assert.deepEqual(selection.skips, [{ issueNumber: 108, status: "blocked", reason: "blocked by #114" }]);
+});
+
+test("missing out-of-roadmap dependency authority fails closed with an explicit authority error", async () => {
+  await assert.rejects(
+    resolveNextIssue(process.cwd(), {
+      fetchRoadmapIssues: async () => roadmap([
+        { number: 108, body: "Depends on: #113" },
+        { number: 109 },
+      ]),
+      fetchIssue: async () => { throw new Error("not found"); },
+    }),
+    /dependency authority lookup for #113 required by #108 failed: not found/,
+  );
+
+  await assert.rejects(
+    resolveNextIssue(process.cwd(), {
+      fetchRoadmapIssues: async () => roadmap([
+        { number: 108, body: "Depends on: #113" },
+      ]),
+      fetchIssue: async () => authorityIssue(113),
+    }),
+    /dependency authority for #113 required by #108 is missing a resolvable state/,
+  );
+});
+
+test("historical #108 regression permits completed #113/#114 follow-up dependencies outside #73 roadmap", async () => {
+  const authorityCalls: number[] = [];
+  const selection = await resolveNextIssue(process.cwd(), {
+    fetchRoadmapIssues: async () => roadmap([
+      { number: 106, state: "CLOSED" },
+      { number: 107, state: "CLOSED" },
+      { number: 108, body: "Dependencies: #107, #106, #113 and #114" },
+    ]),
+    fetchIssue: async (issueNumber) => {
+      authorityCalls.push(issueNumber);
+      return authorityIssue(issueNumber, "CLOSED");
+    },
+  });
+
+  assert.equal(selection.selectedIssueNumber, 108);
+  assert.deepEqual(selection.skips.map((skip) => [skip.issueNumber, skip.status]), [[106, "closed"], [107, "closed"]]);
+  assert.deepEqual(authorityCalls, [113, 114]);
+});
+
 test("multiline dependency sections block through the next markdown heading", async () => {
   const blocked = await resolveNextIssue(process.cwd(), {
     fetchRoadmapIssues: async () => roadmap([
@@ -919,6 +1047,7 @@ test("multiline dependency sections block through the next markdown heading", as
 });
 
 test("fenced code and ordinary dependency prose are ignored by dependency parsing", async () => {
+  const authorityCalls: number[] = [];
   const selection = await resolveNextIssue(process.cwd(), {
     fetchRoadmapIssues: async () => roadmap([
       {
@@ -935,9 +1064,14 @@ test("fenced code and ordinary dependency prose are ignored by dependency parsin
         ].join("\n"),
       },
     ]),
+    fetchIssue: async (issueNumber) => {
+      authorityCalls.push(issueNumber);
+      throw new Error("prose or fenced references must not be fetched as dependencies");
+    },
   });
   assert.equal(selection.selectedIssueNumber, 107);
   assert.deepEqual(selection.skips, []);
+  assert.deepEqual(authorityCalls, []);
 });
 
 test("dependency metadata supports anchored inline declarations and explicit none", async () => {
@@ -1098,6 +1232,45 @@ test("--next-only launches zero workers or bootstrap executions", async () => {
   assert.equal(executions, 0);
 });
 
+test("--next-only uses out-of-roadmap dependency authority without lifecycle mutation or model calls", async () => {
+  const fixtureState = await fixture();
+  try {
+    let executions = 0;
+    let finalizations = 0;
+    let workers = 0;
+    const authorityCalls: number[] = [];
+    const code = await runBootstrapCli(["--cwd", fixtureState.root, "--next-only"], {
+      fetchRoadmapIssues: async () => roadmap([
+        { number: 108, body: "Depends on: #113" },
+      ]),
+      fetchIssue: async (issueNumber) => {
+        authorityCalls.push(issueNumber);
+        return authorityIssue(issueNumber, "CLOSED");
+      },
+      createWorker: async () => {
+        workers += 1;
+        throw new Error("no model worker should launch for --next-only");
+      },
+      runFinalizer: async () => {
+        finalizations += 1;
+        throw new Error("no lifecycle finalization should run for --next-only");
+      },
+    }, async () => {
+      executions += 1;
+      throw new Error("no bootstrap execution should launch for --next-only");
+    });
+
+    assert.equal(code, 0);
+    assert.equal(executions, 0);
+    assert.equal(finalizations, 0);
+    assert.equal(workers, 0);
+    assert.deepEqual(authorityCalls, [113]);
+    assert.equal(await pathExists(join(fixtureState.root, ".git", "pi-next")), false);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
 test("--next-only evaluates the real #73/#107 fenced dependency shape without ambiguity or model calls", async () => {
   let executions = 0;
   const code = await runBootstrapCli(["--next-only"], {
@@ -1127,14 +1300,19 @@ test("--next-only evaluates the real #73/#107 fenced dependency shape without am
   assert.equal(executions, 0);
 });
 
-test("automatic selection invokes the existing single-issue bootstrap path exactly once and does not queue progress", async () => {
+test("automatic selection invokes the existing single-issue bootstrap path once after closed external dependencies", async () => {
   const fixtureState = await fixture();
   try {
     const calls: number[] = [];
     const finalizations: number[] = [];
-    const selectedFixtureIssue = 85;
+    const authorityCalls: number[] = [];
+    const selectedFixtureIssue = 108;
     const code = await runBootstrapCli(["--cwd", fixtureState.root], {
-      fetchRoadmapIssues: async () => roadmap([{ number: selectedFixtureIssue }, { number: 82 }]),
+      fetchRoadmapIssues: async () => roadmap([{ number: selectedFixtureIssue, body: "Depends on: #113" }, { number: 82 }]),
+      fetchIssue: async (issueNumber) => {
+        authorityCalls.push(issueNumber);
+        return authorityIssue(issueNumber, "CLOSED");
+      },
       runFinalizer: async (options) => {
         finalizations.push(options.issueNumber ?? 0);
         return { ok: true, issueNumber: options.issueNumber ?? 0, branch: `agent/issue-${selectedFixtureIssue}`, candidateSha: "r", merged: true, reachable: true, issueClosed: true, worktreeRemoved: true, localBranchRemoved: true, outcome: "finalized" };
@@ -1163,6 +1341,7 @@ test("automatic selection invokes the existing single-issue bootstrap path exact
       };
     });
     assert.equal(code, 0);
+    assert.deepEqual(authorityCalls, [113]);
     assert.deepEqual(calls, [selectedFixtureIssue]);
     assert.deepEqual(finalizations, [selectedFixtureIssue]);
   } finally {
