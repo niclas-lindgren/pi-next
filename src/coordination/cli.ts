@@ -38,6 +38,7 @@ import { finalizeIssue, FinalizeError } from "./finalize.ts";
 import { loadPiNextConfig } from "./config.ts";
 import { AuthorityCapabilityError, createWorkAuthority, type WorkAuthorityAdapter } from "./work-authority.ts";
 import type { PendingVerificationRequest } from "./finalize.ts";
+import { readLastIncidentBundle, reportIncidentBundle } from "./incident-reporting.ts";
 
 export type CoordinationCliCommand =
   | "status"
@@ -46,7 +47,8 @@ export type CoordinationCliCommand =
   | "release"
   | "workspace"
   | "prepare"
-  | "finalize";
+  | "finalize"
+  | "report";
 
 /**
  * Stable, documented error codes (see `docs/ARCHITECTURE.md`). Callers
@@ -111,6 +113,8 @@ interface ParsedFlags {
   verifiedIntegratedMain?: string;
   closeComment?: string;
   pendingVerification?: PendingVerificationRequest;
+  last?: boolean;
+  github?: boolean;
 }
 
 function parseFlags(args: string[]): ParsedFlags {
@@ -182,6 +186,12 @@ function parseFlags(args: string[]): ParsedFlags {
         }
         break;
       }
+      case "--last":
+        flags.last = true;
+        break;
+      case "--github":
+        flags.github = true;
+        break;
       default:
         throw new CoordinationCliError("INVALID_ARGS", `Unknown flag: ${arg}`);
     }
@@ -386,6 +396,27 @@ async function runPrepare(flags: ParsedFlags): Promise<CoordinationCliSuccess> {
  * sequence; this wrapper only maps flags/errors and picks the configured
  * `WorkAuthorityAdapter` for the close/comment step.
  */
+async function runReport(flags: ParsedFlags): Promise<CoordinationCliSuccess> {
+  const cwd = flags.cwd ?? process.cwd();
+  if (!flags.last && flags.issue === undefined) {
+    throw new CoordinationCliError("INVALID_ARGS", "report requires --last or --issue <number>");
+  }
+  const bundle = readLastIncidentBundle(cwd, flags.issue);
+  if (!bundle) {
+    throw new CoordinationCliError("STALE_AUTHORITY", flags.issue === undefined ? "No local incident bundle is available" : `No local incident bundle is available for issue #${flags.issue}`);
+  }
+  const result = await reportIncidentBundle(cwd, bundle, { github: flags.github });
+  return {
+    ok: true,
+    command: "report",
+    fingerprint: bundle.fingerprint,
+    classification: bundle.classification,
+    bundle,
+    local: result.local,
+    ...(result.github ? { github: result.github } : {}),
+  };
+}
+
 async function runFinalize(flags: ParsedFlags): Promise<CoordinationCliSuccess> {
   const issueNumber = requireIssue(flags);
   const { agent, run, session } = requireOwnerFlags(flags);
@@ -449,10 +480,12 @@ export async function runCoordinationCli(argv: string[]): Promise<CoordinationCl
         return await runPrepare(parseFlags(rest));
       case "finalize":
         return await runFinalize(parseFlags(rest));
+      case "report":
+        return await runReport(parseFlags(rest));
       default:
         throw new CoordinationCliError(
           "INVALID_ARGS",
-          `Unknown command: ${command ?? "(none)"}. Expected one of: status, claim, renew, release, workspace, prepare, finalize`,
+          `Unknown command: ${command ?? "(none)"}. Expected one of: status, claim, renew, release, workspace, prepare, finalize, report`,
         );
     }
   } catch (error) {
@@ -475,5 +508,5 @@ export async function runCoordinationCli(argv: string[]): Promise<CoordinationCl
 }
 
 function isCoordinationCliCommand(value: string | undefined): value is CoordinationCliCommand {
-  return value === "status" || value === "claim" || value === "renew" || value === "release" || value === "workspace" || value === "prepare" || value === "finalize";
+  return value === "status" || value === "claim" || value === "renew" || value === "release" || value === "workspace" || value === "prepare" || value === "finalize" || value === "report";
 }

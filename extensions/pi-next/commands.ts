@@ -76,6 +76,7 @@ import { appendWorkerNarrative, appendWorkerWorkLog, type WorkerWorkLogSink } fr
 import { attachWorkerDisplay } from "./worker-display.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
 import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
+import { readLastIncidentBundle, reportIncidentBundle } from "../../src/coordination/incident-reporting.ts";
 import { createWorkerFailureEvidence, WorkerFailureError } from "./worker-failure.ts";
 import {
   formatWorkflowState,
@@ -592,7 +593,7 @@ export function registerPiNextCommands(
   pi.registerCommand("pi-next", {
     description: "Run the GitHub-backed pi-next workflow",
     getArgumentCompletions: (prefix) => {
-      const values = ["auto", "fresh", "plan", "monitor start", "monitor stop", "monitor status"].filter((value) =>
+      const values = ["auto", "fresh", "plan", "report --last", "report --last --github", "monitor start", "monitor stop", "monitor status"].filter((value) =>
         value.startsWith(prefix),
       );
       return values.length
@@ -617,6 +618,18 @@ export function registerPiNextCommands(
         }
         if (trimmed === "monitor" || trimmed === "monitor status") {
           notifySafely(ctx, formatMonitorStatus(getMonitor(ctx.cwd, sessionIdentity(ctx))?.snapshot()), "info");
+          return;
+        }
+        if (trimmed === "report" || trimmed === "report --last" || trimmed === "report --last --github" || /^report\s+--issue\s+\d+(?:\s+--github)?$/.test(trimmed)) {
+          const issueMatch = trimmed.match(/--issue\s+(\d+)/);
+          const bundle = readLastIncidentBundle(ctx.cwd, issueMatch ? Number.parseInt(issueMatch[1]!, 10) : undefined);
+          if (!bundle) {
+            notifySafely(ctx, "No local pi-next incident bundle is available", "warning");
+            return;
+          }
+          const result = await reportIncidentBundle(ctx.cwd, bundle, { github: /(?:^|\s)--github(?:\s|$)/.test(trimmed) });
+          const github = result.github ? `\nGitHub: ${result.github.status}${"url" in result.github && result.github.url ? ` ${result.github.url}` : ""}${"reason" in result.github ? ` (${result.github.reason})` : ""}` : "";
+          notifySafely(ctx, `Incident: ${bundle.fingerprint}\nClassification: ${bundle.classification.category}/${bundle.classification.reportability}\nLocal: ${result.local.path}${github}`, "info");
           return;
         }
         if (trimmed === "auto") {
@@ -730,6 +743,25 @@ export function registerPiNextCommands(
           `pi-next doctor failed: ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
+      }
+    },
+  });
+
+  pi.registerCommand("pi-next-report", {
+    description: "Show or publish the last bounded pi-next incident report without invoking the model",
+    handler: async (args, ctx) => {
+      try {
+        const issueMatch = args.match(/--issue\s+(\d+)/);
+        const bundle = readLastIncidentBundle(ctx.cwd, issueMatch ? Number.parseInt(issueMatch[1]!, 10) : undefined);
+        if (!bundle) {
+          notifySafely(ctx, "No local pi-next incident bundle is available", "warning");
+          return;
+        }
+        const result = await reportIncidentBundle(ctx.cwd, bundle, { github: /(?:^|\s)--github(?:\s|$)/.test(args) });
+        const github = result.github ? `\nGitHub: ${result.github.status}${"url" in result.github && result.github.url ? ` ${result.github.url}` : ""}${"reason" in result.github ? ` (${result.github.reason})` : ""}` : "";
+        notifySafely(ctx, `Incident: ${bundle.fingerprint}\nClassification: ${bundle.classification.category}/${bundle.classification.reportability}\nLocal: ${result.local.path}${github}`, "info");
+      } catch (error) {
+        notifySafely(ctx, `pi-next report failed: ${boundedStatusText(error instanceof Error ? error.message : String(error))}`, "error");
       }
     },
   });

@@ -97,6 +97,12 @@ export interface PiNextConfig {
     pollIntervalMs: number;
     maxBackoffMs: number;
   };
+  incidentReporting: {
+    /** Upstream repository for pi-next framework incidents, owner/name. */
+    repository: string;
+    /** Optional automatic GitHub mutation for confidently classified framework incidents. */
+    autoCreateFrameworkIncidents: boolean;
+  };
   /** Bounded self-assessment policy. Runtime changes remain disabled outside
    * explicitly configured/reversible actions. */
   assessment: {
@@ -161,6 +167,10 @@ export const DEFAULT_PI_NEXT_CONFIG: Readonly<PiNextConfig> = Object.freeze({
     },
   },
   monitor: { pollIntervalMs: 60_000, maxBackoffMs: 600_000 },
+  incidentReporting: {
+    repository: "niclas-lindgren/pi-next",
+    autoCreateFrameworkIncidents: false,
+  },
   assessment: {
     enabled: true,
     noProgressThreshold: 2,
@@ -293,7 +303,7 @@ function parseSkillsPolicy(value: unknown): SkillRoutingPolicy {
 
 export function validatePiNextConfig(value: unknown): PiNextConfig {
   const root = object(value, "config");
-  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "skills", "adversarialReview", "convergence", "workerWatchdog", "monitor", "assessment"], "config");
+  rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "skills", "adversarialReview", "convergence", "workerWatchdog", "monitor", "incidentReporting", "assessment"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
     throw new PiNextConfigError(`config.version must be ${PI_NEXT_CONFIG_VERSION}`);
   }
@@ -462,6 +472,21 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
   };
   if (monitor.maxBackoffMs < monitor.pollIntervalMs) throw new PiNextConfigError("config.monitor.maxBackoffMs must be at least pollIntervalMs");
 
+  const incidentReportingValue: Record<string, unknown> = root.incidentReporting === undefined
+    ? DEFAULT_PI_NEXT_CONFIG.incidentReporting as unknown as Record<string, unknown>
+    : object(root.incidentReporting, "config.incidentReporting");
+  rejectUnknown(incidentReportingValue, ["repository", "autoCreateFrameworkIncidents"], "config.incidentReporting");
+  const incidentRepositoryRaw = incidentReportingValue.repository === undefined ? DEFAULT_PI_NEXT_CONFIG.incidentReporting.repository : incidentReportingValue.repository;
+  if (typeof incidentRepositoryRaw !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(incidentRepositoryRaw.trim())) {
+    throw new PiNextConfigError("config.incidentReporting.repository must be owner/name");
+  }
+  const autoCreateRaw = incidentReportingValue.autoCreateFrameworkIncidents === undefined ? false : incidentReportingValue.autoCreateFrameworkIncidents;
+  if (typeof autoCreateRaw !== "boolean") throw new PiNextConfigError("config.incidentReporting.autoCreateFrameworkIncidents must be boolean");
+  const incidentReporting = {
+    repository: incidentRepositoryRaw.trim(),
+    autoCreateFrameworkIncidents: autoCreateRaw,
+  };
+
   const assessmentValue: Record<string, unknown> = root.assessment === undefined
     ? DEFAULT_PI_NEXT_CONFIG.assessment as unknown as Record<string, unknown>
     : object(root.assessment, "config.assessment");
@@ -508,6 +533,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
     convergence,
     workerWatchdog,
     monitor,
+    incidentReporting,
     assessment,
   };
 }

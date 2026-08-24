@@ -45,6 +45,12 @@ test("versioned configuration validates custom authority and workflow policy", (
   assert.deepEqual(validated.selection.priorities, ["urgent", "normal"]);
   assert.equal(validated.workflow.planPath, ".workflow/PLAN.md");
   assert.equal(validated.workflow.diagnosticsPath, ".pi-next/diagnostics");
+  assert.equal(validated.incidentReporting.repository, "niclas-lindgren/pi-next");
+  const incidentConfig = validatePiNextConfig({
+    ...config,
+    incidentReporting: { repository: "owner/project", autoCreateFrameworkIncidents: true },
+  });
+  assert.deepEqual(incidentConfig.incidentReporting, { repository: "owner/project", autoCreateFrameworkIncidents: true });
   assert.throws(
     () => validatePiNextConfig({ ...config, unsupported: true }),
     (error: unknown) => error instanceof PiNextConfigError && /unsupported/.test(error.message),

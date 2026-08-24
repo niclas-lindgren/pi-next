@@ -16,6 +16,8 @@ import { redact } from "../bootstrap/utils.js";
 import { acquireBootstrapLifecycleLock } from "../bootstrap/lifecycle-lock.js";
 import { hasExactVerifiedFinalizationCandidate } from "../bootstrap/finalization-proof.js";
 import { runBootstrapFinalize } from "../../scripts/bootstrap-finalize.ts";
+import { loadPiNextConfig } from "../coordination/config.ts";
+import { incidentBundleFromLifecycleResult, readRunJournalIfAvailable, reportIncidentBundle } from "../coordination/incident-reporting.ts";
 
 export type LifecycleEntryPoint = "bootstrap" | "explicit" | "auto" | "monitor";
 
@@ -226,7 +228,20 @@ export async function runSingleIssueLifecycle(
       emit(reporter, { issueNumber, phase: "finalization", state: "blocked", detail: code }, identity, "finalization");
       emit(reporter, { issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: PASS; finalization: BLOCKED; candidate preserved" }, identity, "terminal");
       const result = { ...base, disposition: "finalization-blocked", finalization: "BLOCKED", candidatePreserved: true, finalizationFailure: { code, reason } } satisfies Omit<UnifiedLifecycleResult, "projection">;
-      return { ...result, projection: terminalProjection(result) };
+      const unified = { ...result, projection: terminalProjection(result) };
+      try {
+        const config = loadPiNextConfig(cwd);
+        const bundle = incidentBundleFromLifecycleResult(cwd, unified, readRunJournalIfAvailable(cwd, runId));
+        if (bundle) {
+          await reportIncidentBundle(cwd, bundle, {
+            config,
+            github: config.incidentReporting.autoCreateFrameworkIncidents && bundle.classification.reportability === "upstream",
+          });
+        }
+      } catch {
+        // Incident capture/reporting is observational and must never alter the preserved candidate lifecycle result.
+      }
+      return unified;
     }
   } finally {
     await lifecycleLock.release();

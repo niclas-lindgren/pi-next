@@ -31,7 +31,7 @@ test("an unknown command fails closed with INVALID_ARGS", async () => {
     ok: false,
     command: "unknown",
     code: "INVALID_ARGS",
-    message: "Unknown command: bogus. Expected one of: status, claim, renew, release, workspace, prepare, finalize",
+    message: "Unknown command: bogus. Expected one of: status, claim, renew, release, workspace, prepare, finalize, report",
   });
 });
 
