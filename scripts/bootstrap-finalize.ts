@@ -150,6 +150,25 @@ async function findWorktree(root: string, branch: string, issue: number, runner:
 async function changedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const s = await gitRaw(worktree, [...CANONICAL_STATUS_ARGS], runner); return changedFilePathsFromStatus(s); }
 async function committedPaths(worktree: string, runner: CommandRunner): Promise<string[]> { const base = await git(worktree, ["merge-base", "HEAD", "origin/main"], runner); const out = await git(worktree, ["diff", "--name-only", `${base}..HEAD`], runner); return out.split("\n").filter(Boolean).sort(); }
 
+async function committedIdentityPaths(worktree: string, runner: CommandRunner): Promise<string[]> {
+  // When origin/main advances after an issue branch was created, a committed
+  // candidate that has already been merged is itself the ordinary merge-base
+  // of HEAD and origin/main. Diffing from that raw merge-base would collapse a
+  // real candidate C to zero delta, making it indistinguishable from an old
+  // clean baseline branch A after main advanced A -> M. The canonical issue
+  // branch reflog records the branch-creation commit during normal bootstrap
+  // runs, so use it only to prove that HEAD is a real committed candidate;
+  // verification deltas still use committedPaths() relative to current main.
+  const head = await git(worktree, ["rev-parse", "HEAD"], runner);
+  const branch = await tryGit(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"], runner);
+  const reflog = branch ? await tryGit(worktree, ["reflog", "show", "--format=%H", branch], runner) : undefined;
+  const creationPoint = reflog?.split("\n").filter(Boolean).at(-1);
+  const base = creationPoint && creationPoint !== head ? creationPoint : undefined;
+  if (!base) return committedPaths(worktree, runner);
+  const out = await git(worktree, ["diff", "--name-only", `${base}..HEAD`], runner);
+  return out.split("\n").filter(Boolean).sort();
+}
+
 async function synchronizeLocalMain(input: { root: string; issueNumber: number; runner: CommandRunner; reporter?: (line: string) => void }): Promise<LocalMainSyncResult> {
   const report = (result: LocalMainSyncResult): LocalMainSyncResult => {
     if (result.status === "skipped") input.reporter?.(`bootstrap finalize #${input.issueNumber} · local-main sync skipped: ${result.reason ?? "not safely fast-forwardable"}`);
@@ -226,6 +245,7 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
 
   let candidateSha: string;
   let needsCommitAndVerify: boolean;
+  let alreadyIntegratedFastPathProven = false;
 
   // A durable local proof from a *previous* run's passing REQUIRED_CHECKS
   // that is now reachable from origin/main is the signal that this issue's
@@ -280,25 +300,46 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     await git(worktree, ["diff", "--check"], runner);
     const worktreeHead = await git(worktree, ["rev-parse", "HEAD"], runner);
     const originMainForHead = await tryGit(root, ["rev-parse", "origin/main"], runner);
-    // A worktree HEAD reachable from origin/main - but distinct from it, not
-    // merely a trivial self-ancestor of an unmodified branch - proves this
-    // exact committed candidate was already integrated, even without our
-    // own durable proof (e.g. integrated by another actor entirely).
-    const headAlreadyIntegrated = worktreeHead !== originMainForHead
-      && (await tryGit(root, ["merge-base", "--is-ancestor", worktreeHead, "origin/main"], runner)) !== undefined;
     const dirty = await changedPaths(worktree, runner);
     const liveCommittedDelta = await committedPaths(worktree, runner);
+    const liveCommittedIdentityDelta = await committedIdentityPaths(worktree, runner);
+    const headReachableFromOriginMain = worktreeHead !== originMainForHead
+      && (await tryGit(root, ["merge-base", "--is-ancestor", worktreeHead, "origin/main"], runner)) !== undefined;
     const staleProof = priorProof && priorProof.candidateSha !== worktreeHead ? priorProof : undefined;
     const exactProof = priorProof && priorProof.candidateSha === worktreeHead ? priorProof : undefined;
-    const liveCandidateTakesPrecedence = !!staleProof && (headAlreadyIntegrated || liveCommittedDelta.length > 0);
+    // HEAD ancestry is candidate-integration evidence only for a clean
+    // canonical worktree whose committed candidate identity is otherwise
+    // mechanically visible.  A dirty/staged/untracked candidate is a newer
+    // live candidate layered on top of HEAD, so raw reachability of HEAD (for
+    // example an old baseline A after origin/main advanced A -> M) must never
+    // bypass commit + verification of the dirty tree.
+    const headAlreadyIntegrated = dirty.length === 0
+      && headReachableFromOriginMain
+      && (liveCommittedIdentityDelta.length > 0 || !!exactProof);
+    const liveCandidateTakesPrecedence = !!staleProof && (headAlreadyIntegrated || liveCommittedIdentityDelta.length > 0);
 
-    if (liveCandidateTakesPrecedence) {
-      if (dirty.length) {
+    if (dirty.length) {
+      if (issue.state.trim().toLowerCase() === "closed") {
+        throw new BootstrapFinalizeError("UNIQUE_WORK_PRESENT", "refusing to reinterpret dirty worktree as a new candidate after the issue is already closed");
+      }
+      if (liveCandidateTakesPrecedence) {
         throw new BootstrapFinalizeError(
           "STALE_PROOF_LIVE_CANDIDATE_DIRTY",
           `${branch}'s live candidate ${worktreeHead} supersedes stale proof ${staleProof!.candidateSha}, but the canonical worktree is dirty; preserving it for explicit reconciliation`,
         );
       }
+      const intended = options.candidatePaths ? uniqueSortedGitPaths(options.candidatePaths) : dirty;
+      if (dirty.some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "worktree contains changes outside intended candidate paths");
+      await git(worktree, ["add", "--", ...intended], runner);
+      const staged = await git(worktree, ["diff", "--cached", "--name-only"], runner);
+      if (staged.split("\n").filter(Boolean).some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "staging would capture unintended paths");
+      await git(worktree, ["commit", "-m", commitMessage(issue, issueNumber)], runner);
+      say(`bootstrap finalize #${issueNumber} · committed ${await git(worktree, ["rev-parse", "--short", "HEAD"], runner)}`);
+      candidateSha = await git(worktree, ["rev-parse", "HEAD"], runner);
+      if ((await git(worktree, ["status", "--porcelain"], runner)) !== "") throw new BootstrapFinalizeError("DIRTY_AFTER_COMMIT", "candidate worktree remains dirty");
+      needsCommitAndVerify = true;
+      alreadyIntegratedFastPathProven = false;
+    } else if (liveCandidateTakesPrecedence) {
       await invalidateVerifiedFinalizationCandidateProof({
         gitCommonDir,
         issueNumber,
@@ -309,31 +350,20 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
       say(`bootstrap finalize #${issueNumber} · stale verified-candidate proof ${staleProof!.candidateSha.slice(0, 12)} invalidated; live candidate ${worktreeHead.slice(0, 12)} takes precedence`);
       candidateSha = worktreeHead;
       needsCommitAndVerify = !headAlreadyIntegrated;
+      alreadyIntegratedFastPathProven = headAlreadyIntegrated;
     } else if (staleProof) {
       throw new BootstrapFinalizeError(
         "STALE_PROOF_AMBIGUOUS",
         `${branch}'s tip ${worktreeHead} does not match durable verified proof ${staleProof.candidateSha}, and no newer committed live candidate with a real delta was found`,
       );
     } else if (exactProof || headAlreadyIntegrated || priorProofIntegrated) {
-      // Already verified/integrated. Any currently dirty files are unrelated
-      // leftover work, not part of the verified candidate, so they are never
-      // staged or committed here; cleanIntegratedWorkspace() below refuses
-      // cleanup if the worktree isn't clean instead.
       candidateSha = exactProof ? worktreeHead : headAlreadyIntegrated ? worktreeHead : priorProof!.candidateSha;
       needsCommitAndVerify = false;
+      alreadyIntegratedFastPathProven = true;
     } else {
-      const intended = options.candidatePaths ? uniqueSortedGitPaths(options.candidatePaths) : dirty;
-      if (dirty.some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "worktree contains changes outside intended candidate paths");
-      if (dirty.length) {
-        await git(worktree, ["add", "--", ...intended], runner);
-        const staged = await git(worktree, ["diff", "--cached", "--name-only"], runner);
-        if (staged.split("\n").filter(Boolean).some((p) => !intended.includes(p))) throw new BootstrapFinalizeError("UNKNOWN_CHANGES", "staging would capture unintended paths");
-        await git(worktree, ["commit", "-m", commitMessage(issue, issueNumber)], runner);
-        say(`bootstrap finalize #${issueNumber} · committed ${await git(worktree, ["rev-parse", "--short", "HEAD"], runner)}`);
-      }
-      candidateSha = await git(worktree, ["rev-parse", "HEAD"], runner);
-      if ((await git(worktree, ["status", "--porcelain"], runner)) !== "") throw new BootstrapFinalizeError("DIRTY_AFTER_COMMIT", "candidate worktree remains dirty");
+      candidateSha = worktreeHead;
       needsCommitAndVerify = true;
+      alreadyIntegratedFastPathProven = false;
     }
   }
 
@@ -342,7 +372,8 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
   // commit as trivially its own ancestor). Only a *distinct* commit that is
   // reachable from origin/main represents genuinely integrated content.
   const originMainTip = await git(root, ["rev-parse", "origin/main"], runner);
-  const alreadyIntegrated = candidateSha !== originMainTip
+  const alreadyIntegrated = alreadyIntegratedFastPathProven
+    && candidateSha !== originMainTip
     && (await tryGit(root, ["merge-base", "--is-ancestor", candidateSha, "origin/main"], runner)) !== undefined;
 
   if (alreadyIntegrated) {
