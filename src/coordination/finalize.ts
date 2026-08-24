@@ -548,7 +548,25 @@ export async function finalizeIssue(
   // for the full authority surface (notably comments and labels), so missing
   // verification evidence must have been rejected before any integration.
   const authorityChanged = liveFingerprint !== input.verifiedAuthorityFingerprint;
+  const closeComment = input.closeComment ?? "Completed via pi-next automated workflow.";
   if (authorityChanged) {
+    // Idempotent retry after a crash immediately after close(): the authority
+    // surface now necessarily differs from the verification-time fingerprint
+    // because pi-next's own close side effect changed state/comments. Treat
+    // only that already-closed, exact-close-comment state as completed; never
+    // launder a still-open issue's current authority into verified evidence.
+    if (item.state.trim().toLowerCase() === "closed" && item.comments.some((comment) => comment.body === closeComment)) {
+      return {
+        ok: true,
+        issueNumber: input.issueNumber,
+        branch,
+        mergeSha,
+        closed: true,
+        authorityChanged: false,
+        leaseLostAfterMerge: false,
+        requiresReverification: false,
+      };
+    }
     return {
       ok: true,
       issueNumber: input.issueNumber,
@@ -596,7 +614,7 @@ export async function finalizeIssue(
   // duplicating it every retry.
   if (item.state.trim().toLowerCase() !== "closed") {
     emitLifecycleCheckpoint("issue_closed", "before");
-    await workAuthority.close(String(input.issueNumber), input.closeComment ?? "Completed via pi-next automated workflow.");
+    await workAuthority.close(String(input.issueNumber), closeComment);
     emitLifecycleCheckpoint("issue_closed", "after");
   }
 

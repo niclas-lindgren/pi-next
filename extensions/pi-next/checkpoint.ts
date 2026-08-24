@@ -14,7 +14,7 @@ import { issueWorkspaceIdentity } from "./issue-authority.ts";
 import { clearPromotionRequest, readPromotionRequest, writePromotionRequest } from "./promotion-request.ts";
 import { finalizeIssue, FinalizeError } from "../../src/coordination/finalize.ts";
 import type { IssueLeaseAuthority } from "../../src/coordination/issue-leases.ts";
-import { authorityFingerprint, type WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
+import type { WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -199,13 +199,24 @@ export async function checkpointCommit(
   return { branch, hash };
 }
 
+function verifiedAuthorityFingerprintFromReport(report: string): string {
+  const fingerprint = report.match(/^ISSUE_FINGERPRINT:\s*(\S+)$/m)?.[1];
+  if (!fingerprint || fingerprint === "unverified") {
+    throw new Error("Promotion requires verification evidence bound to a live issue/comments fingerprint");
+  }
+  if (!/^AUTHORITY_STATUS:\s*VERIFIED$/m.test(report)) {
+    throw new Error("Promotion requires verification evidence from a live authority check");
+  }
+  return fingerprint;
+}
+
 export async function promotionReadiness(
   cwd: string,
   issueNumber: number,
   runId: string,
   expectedMainSha: string,
   verificationPath: string,
-): Promise<{ branch: string; checkpointSha: string; mainSha: string; fingerprint: string }> {
+): Promise<{ branch: string; checkpointSha: string; mainSha: string; fingerprint: string; verifiedAuthorityFingerprint: string }> {
   const branch = checkpointBranchName(issueNumber, runId);
   const current = await git(cwd, ["branch", "--show-current"]);
   if (current !== branch) throw new Error(`Promotion must start on checkpoint branch ${branch}`);
@@ -220,6 +231,7 @@ export async function promotionReadiness(
   const fingerprint = await workingFingerprint(cwd);
   const recordedFingerprint = verification.match(/^FINGERPRINT:\s*(\S+)$/m)?.[1];
   if (recordedFingerprint !== fingerprint) throw new Error("Verification evidence is stale for the checkpoint head");
+  const verifiedAuthorityFingerprint = verifiedAuthorityFingerprintFromReport(verification);
   const evidenceCommitShas = extractCommitEvidenceShas(verification);
   if (evidenceCommitShas.length) {
     const reachability = await commitsReachableFromRef(cwd, evidenceCommitShas, branch);
@@ -229,7 +241,7 @@ export async function promotionReadiness(
       );
     }
   }
-  return { branch, checkpointSha, mainSha, fingerprint };
+  return { branch, checkpointSha, mainSha, fingerprint, verifiedAuthorityFingerprint };
 }
 
 /**
@@ -256,10 +268,11 @@ async function recordPromotionRequest(
   checkpointSha: string,
   mainSha: string,
   fingerprint: string,
+  verifiedAuthorityFingerprint: string,
 ): Promise<void> {
   const gitCommonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   emitLifecycleCheckpoint("promotion_requested", "before");
-  await writePromotionRequest({ gitCommonDir, issueNumber, runId, branch, checkpointSha, mainSha, fingerprint });
+  await writePromotionRequest({ gitCommonDir, issueNumber, runId, branch, checkpointSha, mainSha, fingerprint, verifiedAuthorityFingerprint });
   recordPiLifecycleJournal(journalCwd(cwd), {
     event: "promotion_requested",
     issueNumber,
@@ -281,7 +294,7 @@ export async function requestPromotion(
   const branch = checkpointBranchName(issueNumber, runId);
   try {
     const ready = await promotionReadiness(cwd, issueNumber, runId, expectedMainSha, verificationPath);
-    await recordPromotionRequest(cwd, issueNumber, runId, ready.branch, ready.checkpointSha, ready.mainSha, ready.fingerprint);
+    await recordPromotionRequest(cwd, issueNumber, runId, ready.branch, ready.checkpointSha, ready.mainSha, ready.fingerprint, ready.verifiedAuthorityFingerprint);
     return { branch: ready.branch, checkpointSha: ready.checkpointSha };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -315,13 +328,14 @@ export async function requestArchiveFinalization(
   issueNumber: number,
   runId: string,
   archiveCommitSha: string,
-  fingerprint: string,
+  verifiedAuthorityFingerprint: string,
 ): Promise<{ branch: string; checkpointSha: string }> {
   const branch = checkpointBranchName(issueNumber, runId);
   try {
     await gitMutation(cwd, ["fetch", "origin", "main"]);
     const mainSha = await git(cwd, ["rev-parse", "refs/remotes/origin/main"]);
-    await recordPromotionRequest(cwd, issueNumber, runId, branch, archiveCommitSha, mainSha, fingerprint);
+    const fingerprint = await workingFingerprint(cwd);
+    await recordPromotionRequest(cwd, issueNumber, runId, branch, archiveCommitSha, mainSha, fingerprint, verifiedAuthorityFingerprint);
     return { branch, checkpointSha: archiveCommitSha };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -353,7 +367,7 @@ export async function finalizeRequestedPromotion(
   workAuthority: WorkAuthorityAdapter,
   identity: { agent: string; runId: string; sessionId: string },
   lifecycle: { projectStatus?: ProjectStatusAuthority } = {},
-): Promise<{ branch: string; mergeSha: string; closed: boolean } | undefined> {
+): Promise<{ branch: string; mergeSha: string; closed: boolean; authorityChanged: boolean; requiresReverification: boolean } | undefined> {
   const gitCommonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   const request = await readPromotionRequest(gitCommonDir, issueNumber);
   if (!request) return undefined;
@@ -368,7 +382,7 @@ export async function finalizeRequestedPromotion(
       sessionId: identity.sessionId,
       candidateSha: request.checkpointSha,
       issueUpdatedAt: issue.updatedAt ?? "",
-      verifiedAuthorityFingerprint: authorityFingerprint(issue),
+      verifiedAuthorityFingerprint: request.verifiedAuthorityFingerprint,
     };
     recordPiLifecycleJournal(journalCwd(cwd), {
       event: "promotion_started",
@@ -420,7 +434,13 @@ export async function finalizeRequestedPromotion(
       outcome: "success",
       deployRelevant: result.closed,
     });
-    return { branch: request.branch, mergeSha: result.mergeSha, closed: result.closed };
+    return {
+      branch: request.branch,
+      mergeSha: result.mergeSha,
+      closed: result.closed,
+      authorityChanged: result.authorityChanged,
+      requiresReverification: result.requiresReverification,
+    };
   } catch (error) {
     const message = error instanceof FinalizeError ? error.message : error instanceof Error ? error.message : String(error);
     recordLifecycleEvent(cwd, {

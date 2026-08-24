@@ -174,10 +174,10 @@ test("checkpointCommit resumes without duplicate commit after crash after branch
   }
 });
 
-async function writePassingVerification(cwd: string): Promise<string> {
+async function writePassingVerification(cwd: string, verifiedAuthorityFingerprint: string): Promise<string> {
   const verificationPath = join(cwd, "..", "VERIFY.md");
   const fingerprint = await workingFingerprint(cwd);
-  await writeFile(verificationPath, `STATUS: PASS\nFINGERPRINT: ${fingerprint}\n`);
+  await writeFile(verificationPath, `STATUS: PASS\nFINGERPRINT: ${fingerprint}\nISSUE_FINGERPRINT: ${verifiedAuthorityFingerprint}\nAUTHORITY_STATUS: VERIFIED\n`);
   return verificationPath;
 }
 
@@ -208,7 +208,8 @@ test("requestPromotion records readiness without touching main; finalizeRequeste
     await checkpointCommit(state.workspace, 638, "run-promote", ["promote.txt"], "checkpoint: promote boundary");
     const candidateSha = await git(state.workspace, "rev-parse", "HEAD");
     const expectedMainSha = await git(state.workspace, "rev-parse", "refs/remotes/origin/main");
-    const verificationPath = await writePassingVerification(state.workspace);
+    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
+    const verificationPath = await writePassingVerification(state.workspace, workAuthority.fingerprint(await workAuthority.get("638")));
 
     await requestPromotion(state.workspace, 638, "run-promote", expectedMainSha, verificationPath);
     // The worker never merges or pushes main itself (#146).
@@ -220,7 +221,6 @@ test("requestPromotion records readiness without touching main; finalizeRequeste
     );
 
     const leaseAuthority = freshLeaseAuthority(638);
-    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
     const result = await finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY);
 
     assert.ok(result);
@@ -248,7 +248,8 @@ test("requestArchiveFinalization records the same kind of request as requestProm
     await git(state.workspace, "add", "archived.txt");
     await git(state.workspace, "commit", "-m", "chore(agent): archive issue #638 plan");
     const archiveCommitSha = await git(state.workspace, "rev-parse", "HEAD");
-    const fingerprint = await workingFingerprint(state.workspace);
+    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
+    const fingerprint = workAuthority.fingerprint(await workAuthority.get("638"));
 
     // The worker no longer pushes to main directly on the archive path
     // either - it only records the same durable request checkpoint
@@ -262,7 +263,6 @@ test("requestArchiveFinalization records the same kind of request as requestProm
     );
 
     const leaseAuthority = freshLeaseAuthority(638);
-    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
     const result = await finalizeRequestedPromotion(state.repo, 638, leaseAuthority, workAuthority, IDENTITY);
 
     assert.ok(result);
@@ -277,6 +277,64 @@ test("requestArchiveFinalization records the same kind of request as requestProm
   }
 });
 
+test("finalizeRequestedPromotion preserves checkpoint verification authority fingerprint instead of laundering live authority", async () => {
+  const state = await fixture();
+  try {
+    await writeFile(`${state.workspace}/stale-authority.txt`, "stale authority boundary\n");
+    await checkpointCommit(state.workspace, 638, "run-stale-authority", ["stale-authority.txt"], "checkpoint: stale authority boundary");
+    const candidateSha = await git(state.workspace, "rev-parse", "HEAD");
+    const expectedMainSha = await git(state.workspace, "rev-parse", "refs/remotes/origin/main");
+    const original = workItem(638, "2026-08-19T00:00:00Z");
+    const workAuthority = new InMemoryWorkAuthority([original]);
+    const verificationPath = await writePassingVerification(state.workspace, workAuthority.fingerprint(original));
+    await requestPromotion(state.workspace, 638, "run-stale-authority", expectedMainSha, verificationPath);
+
+    workAuthority.upsert({ ...original, body: "authority changed after verification", updatedAt: "2026-08-20T00:00:00Z" });
+    const result = await finalizeRequestedPromotion(state.repo, 638, freshLeaseAuthority(638), workAuthority, IDENTITY);
+
+    assert.ok(result);
+    assert.equal(result!.closed, false);
+    assert.equal(result!.authorityChanged, true);
+    assert.equal((await workAuthority.get("638")).state, "open");
+    assert.equal(
+      await git(state.repo, "merge-base", "--is-ancestor", candidateSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
+      "yes",
+    );
+  } finally {
+    await cleanup(state.fixture);
+  }
+});
+
+test("finalizeRequestedPromotion preserves archive verification authority fingerprint instead of laundering live authority", async () => {
+  const state = await fixture();
+  try {
+    await writeFile(`${state.workspace}/archive-stale-authority.txt`, "archive stale authority boundary\n");
+    await git(state.workspace, "add", "archive-stale-authority.txt");
+    await git(state.workspace, "commit", "-m", "chore(agent): archive stale authority issue");
+    const archiveCommitSha = await git(state.workspace, "rev-parse", "HEAD");
+    const original = workItem(638, "2026-08-19T00:00:00Z");
+    const workAuthority = new InMemoryWorkAuthority([original]);
+    await requestArchiveFinalization(state.workspace, 638, "run-archive-stale-authority", archiveCommitSha, workAuthority.fingerprint(original));
+
+    workAuthority.upsert({
+      ...original,
+      comments: [{ id: "authority-comment", author: "user", body: "new requirement", createdAt: "2026-08-20T00:00:00Z", updatedAt: "2026-08-20T00:00:00Z" }],
+    });
+    const result = await finalizeRequestedPromotion(state.repo, 638, freshLeaseAuthority(638), workAuthority, IDENTITY);
+
+    assert.ok(result);
+    assert.equal(result!.closed, false);
+    assert.equal(result!.authorityChanged, true);
+    assert.equal((await workAuthority.get("638")).state, "open");
+    assert.equal(
+      await git(state.repo, "merge-base", "--is-ancestor", archiveCommitSha, "refs/remotes/origin/main").then(() => "yes").catch(() => "no"),
+      "yes",
+    );
+  } finally {
+    await cleanup(state.fixture);
+  }
+});
+
 test("finalizeRequestedPromotion resumes after a crash between push and close without duplicate merge or close", async () => {
   const state = await fixture();
   try {
@@ -284,11 +342,11 @@ test("finalizeRequestedPromotion resumes after a crash between push and close wi
     await checkpointCommit(state.workspace, 638, "run-promote-after", ["promote-after.txt"], "checkpoint: promote after boundary");
     const candidateSha = await git(state.workspace, "rev-parse", "HEAD");
     const expectedMainSha = await git(state.workspace, "rev-parse", "refs/remotes/origin/main");
-    const verificationPath = await writePassingVerification(state.workspace);
+    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
+    const verificationPath = await writePassingVerification(state.workspace, workAuthority.fingerprint(await workAuthority.get("638")));
     await requestPromotion(state.workspace, 638, "run-promote-after", expectedMainSha, verificationPath);
 
     const leaseAuthority = freshLeaseAuthority(638);
-    const workAuthority = new InMemoryWorkAuthority([workItem(638, "2026-08-19T00:00:00Z")]);
 
     await assert.rejects(
       withLifecycleFaultInjection({ checkpoint: "issue_closed", position: "after" }, () =>
