@@ -8,7 +8,6 @@ export const CHECKS = ["npm run typecheck", "npm test"] as const;
 
 export type Disposition = "pass" | "already-satisfied" | "no-change" | "repairable-failure" | "blocked";
 export type WorkerRole = "implementation" | "implementation-retry" | "repair" | "review";
-
 export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "finalization" | "terminal";
 export type BootstrapProgressState = "start" | "ready" | "activity" | "heartbeat" | "pass" | "fail" | "blocked" | "skipped" | "completed";
 
@@ -169,14 +168,13 @@ export interface BootstrapFinalizerReport {
   issueNumber: number;
   branch: string;
   candidateSha: string;
-  pr?: number;
   merged: boolean;
   reachable: boolean;
   issueClosed: boolean;
   worktreeRemoved: boolean;
   localBranchRemoved: boolean;
   localMainSync?: BootstrapFinalizerLocalMainSync;
-  outcome: "finalized" | "already-satisfied" | "integrated-pending-verification";
+  outcome: "finalized" | "already-satisfied" | "integrated-pending-verification" | "integrated-authority-changed";
   pendingExternalVerification?: boolean;
 }
 
