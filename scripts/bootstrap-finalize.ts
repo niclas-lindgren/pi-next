@@ -8,7 +8,7 @@ import { invalidateVerifiedFinalizationCandidateProof, readVerifiedFinalizationC
 import { CANONICAL_STATUS_ARGS, changedFilePathsFromStatus, uniqueSortedGitPaths } from "../src/bootstrap/git-status.js";
 import { emitLifecycleCheckpoint } from "../src/coordination/lifecycle-checkpoints.js";
 import { FinalizeError, type PendingVerificationRequest } from "../src/coordination/finalize.ts";
-import { finalizeWithPostIntegrationReverification } from "../src/coordination/post-integration-reverification.ts";
+import { commitIncidentDiagnosticsBeforeFinalization, finalizeWithPostIntegrationReverification } from "../src/coordination/post-integration-reverification.ts";
 import { REQUIRED_CHECKS } from "../src/coordination/required-checks.ts";
 import {
   authorityFingerprint,
@@ -294,6 +294,11 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     };
   } else {
     if (!worktree) throw new BootstrapFinalizeError("MISSING_WORKTREE", `canonical worktree for ${branch} is missing before integration`);
+    await commitIncidentDiagnosticsBeforeFinalization({
+      root,
+      runCommand: runner,
+      reporter: (line) => say(`bootstrap finalize #${issueNumber} · ${line}`),
+    });
     const coordStatus = await git(root, ["status", "--porcelain"], runner);
     if (coordStatus) throw new BootstrapFinalizeError("ROOT_DIRTY", "coordination checkout is dirty");
 

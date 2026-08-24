@@ -850,6 +850,25 @@ test("finalizer local-main sync is idempotent when main is already current", asy
 // safe (no data loss, no destructive git operation) rather than that root's
 // inconvenient state is silently tolerated.
 
+test("incident diagnostics in the coordination root are committed before finalization", async () => {
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 138);
+    await mkdir(join(f.root, ".pi-next", "diagnostics", "incidents"), { recursive: true });
+    await writeFile(join(f.root, ".pi-next", "diagnostics", "incidents", "incident.json"), "{\"ok\":true}\n");
+    await writeFile(join(f.root, ".pi-next", "diagnostics", "incidents", "last.json"), "{\"ok\":true}\n");
+    const authority = new InMemoryWorkAuthority([workItem(138)]);
+    const lines: string[] = [];
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 138, authority, reporter: (line) => lines.push(line) });
+
+    assert.equal(result.issueClosed, true);
+    assert.equal(await git(f.remote, "show", "main:.pi-next/diagnostics/incidents/incident.json"), "{\"ok\":true}");
+    assert.match(await git(f.root, "log", "--format=%s", "--grep=record finalization incident diagnostics", "origin/main"), /record finalization incident diagnostics/);
+    assert.ok(lines.some((line) => line.includes("committed incident diagnostics")));
+  } finally { await f.cleanup(); }
+});
+
 test("dirty root checkout refuses finalize without losing or touching local work", async () => {
   const f = await fixture();
   try {

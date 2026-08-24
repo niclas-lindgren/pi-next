@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "createdAt": "2026-08-24T20:30:30.235Z",
+  "createdAt": "2026-08-24T20:10:39.669Z",
   "fingerprint": "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
   "classification": {
     "category": "framework",
@@ -19,7 +19,7 @@
     }
   },
   "repository": {
-    "root": "/Users/niclasl/src/pi-next/.worktrees/issue-145",
+    "root": "/Users/niclasl/src/pi-next",
     "identity": "https://github.com/niclas-lindgren/pi-next.git"
   },
   "command": {
@@ -37,7 +37,7 @@
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-85-1787603430161-1967843",
+    "runId": "bootstrap-85-1787602239600-1607147",
     "issueNumber": 85,
     "phase": "terminal",
     "disposition": "finalization-blocked",
