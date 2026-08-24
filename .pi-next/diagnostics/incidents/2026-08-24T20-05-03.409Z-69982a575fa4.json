@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "createdAt": "2026-08-24T20:33:48.044Z",
+  "createdAt": "2026-08-24T20:05:03.409Z",
   "fingerprint": "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
   "classification": {
     "category": "framework",
@@ -8,8 +8,8 @@
     "reason": "typed pi-next framework/controller invariant failure"
   },
   "runtime": {
-    "piNextVersion": "0.2.83",
-    "piNextRevision": "c27ebeb986c5560b6b53c6e144d5ecef4ccf90e2",
+    "piNextVersion": "0.2.82",
+    "piNextRevision": "d0163680dad059d46cdc707573b3e7a6e7879893",
     "node": "v22.23.2",
     "platform": "linux/arm64",
     "tools": {
@@ -19,7 +19,7 @@
     }
   },
   "repository": {
-    "root": "/Users/niclasl/src/pi-next",
+    "root": "/Users/niclasl/src/pi-next/.worktrees/issue-151",
     "identity": "https://github.com/niclas-lindgren/pi-next.git"
   },
   "command": {
@@ -37,7 +37,7 @@
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-85-1787603627975-2058603",
+    "runId": "bootstrap-85-1787601903338-1429723",
     "issueNumber": 85,
     "phase": "terminal",
     "disposition": "finalization-blocked",

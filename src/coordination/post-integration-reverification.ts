@@ -1,13 +1,22 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { loadPiNextConfig } from "./config.ts";
 import { finalizeIssue, type FinalizeInput, type FinalizeResult } from "./finalize.ts";
+import { issueLeaseMatchesOwner, isIssueLeaseFresh } from "./issue-authority.ts";
 import type { IssueLeaseAuthority } from "./issue-leases.ts";
 import type { WorkAuthorityAdapter } from "./work-authority.ts";
 import { REQUIRED_CHECKS } from "./required-checks.ts";
 
 interface MinimalCommandResult { exitCode: number; stdout: string; stderr: string; signal?: string; durationMs?: number; }
 export type ReverificationCommandRunner = (command: string, args: string[], options: { cwd: string }) => Promise<MinimalCommandResult>;
+
+export interface FinalizationResidueCommitResult {
+  status: "clean" | "committed" | "not-incident-only";
+  paths: readonly string[];
+  commitSha?: string;
+  reason?: string;
+}
 
 export interface IntegratedMainVerificationProof {
   version: 1;
@@ -94,6 +103,48 @@ async function git(root: string, args: string[], runner: ReverificationCommandRu
   return result.stdout.trim();
 }
 
+function statusPath(line: string): string | undefined {
+  if (!line.trim()) return undefined;
+  return line.slice(3).split(" -> ").at(-1)?.replace(/^"|"$/g, "");
+}
+
+function incidentDiagnosticsPrefix(root: string): string {
+  const diagnostics = loadPiNextConfig(root).workflow.diagnosticsPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+  return `${diagnostics}/incidents/`;
+}
+
+/** Commit only sanitized incident diagnostics left by prior failed finalizers; all other dirty paths still fail closed. */
+export async function commitIncidentDiagnosticsBeforeFinalization(input: {
+  root: string;
+  runCommand: ReverificationCommandRunner;
+  reporter?: (line: string) => void;
+}): Promise<FinalizationResidueCommitResult> {
+  const raw = await git(input.root, ["status", "--porcelain=v1", "--untracked-files=all"], input.runCommand);
+  const paths = raw.split("\n").map(statusPath).filter((path): path is string => Boolean(path));
+  if (paths.length === 0) return { status: "clean", paths: [] };
+
+  const prefix = incidentDiagnosticsPrefix(input.root);
+  if (paths.some((path) => !path.startsWith(prefix))) {
+    return { status: "not-incident-only", paths, reason: "coordination checkout has non-incident changes" };
+  }
+
+  const branch = await git(input.root, ["branch", "--show-current"], input.runCommand);
+  if (branch !== "main") return { status: "not-incident-only", paths, reason: `coordination checkout is on ${branch || "detached HEAD"}` };
+  await git(input.root, ["fetch", "origin", "main", "--quiet"], input.runCommand);
+  const localMain = await git(input.root, ["rev-parse", "HEAD"], input.runCommand);
+  const originMain = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
+  if (localMain !== originMain) return { status: "not-incident-only", paths, reason: "local main is not exactly origin/main" };
+
+  await git(input.root, ["add", "--", ...paths], input.runCommand);
+  const staged = await git(input.root, ["diff", "--cached", "--name-only"], input.runCommand);
+  if (!staged.trim()) return { status: "clean", paths: [] };
+  await git(input.root, ["commit", "-m", "chore(agent): record finalization incident diagnostics"], input.runCommand);
+  const commitSha = await git(input.root, ["rev-parse", "HEAD"], input.runCommand);
+  await git(input.root, ["push", "origin", "HEAD:main"], input.runCommand);
+  input.reporter?.(`finalization · committed incident diagnostics ${commitSha.slice(0, 12)}`);
+  return { status: "committed", paths, commitSha };
+}
+
 async function cleanMainCheckoutAt(root: string, target: string, runner: ReverificationCommandRunner): Promise<void> {
   const branch = await git(root, ["branch", "--show-current"], runner);
   if (branch !== "main") throw new Error(`post-integration reverification requires the coordination root on main; found ${branch || "detached HEAD"}`);
@@ -130,8 +181,19 @@ export async function reverifyExactIntegratedMain(input: {
 }): Promise<ExactMainReverificationResult> {
   const checks = input.checks ?? REQUIRED_CHECKS;
   await git(input.root, ["fetch", "origin", "main", "--quiet"], input.runCommand);
-  const currentMain = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
+  let currentMain = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
   if (currentMain !== input.mergeSha) return { status: "requires-reverification", mergeSha: currentMain, reason: "main-advanced" };
+
+  const residue = await commitIncidentDiagnosticsBeforeFinalization({
+    root: input.root,
+    runCommand: input.runCommand,
+    reporter: input.reporter,
+  });
+  if (residue.status === "committed") {
+    await git(input.root, ["fetch", "origin", "main", "--quiet"], input.runCommand);
+    currentMain = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
+    return { status: "requires-reverification", mergeSha: currentMain, reason: "main-advanced" };
+  }
 
   await cleanMainCheckoutAt(input.root, input.mergeSha, input.runCommand);
 
@@ -190,6 +252,14 @@ export async function finalizeWithPostIntegrationReverification(input: {
 }): Promise<FinalizeRecoveryDisposition> {
   const maxAttempts = input.maxReverificationAttempts ?? 3;
   const reverifications: ExactMainReverificationResult[] = [];
+  const lease = await input.leaseAuthority.read(input.finalizeInput.issueNumber);
+  if (lease && issueLeaseMatchesOwner(lease, input.finalizeInput) && isIssueLeaseFresh(lease, new Date())) {
+    await commitIncidentDiagnosticsBeforeFinalization({
+      root: input.finalizeInput.cwd,
+      runCommand: input.runCommand,
+      reporter: input.reporter,
+    });
+  }
   let result = await finalizeIssue(input.leaseAuthority, input.workAuthority, input.finalizeInput);
 
   while (result.requiresReverification && reverifications.length < maxAttempts) {
