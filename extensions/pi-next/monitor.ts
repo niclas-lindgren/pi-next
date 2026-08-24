@@ -4,7 +4,8 @@ import { loadPiNextConfig, type PiNextConfig } from "../../src/coordination/conf
 import { createWorkAuthority, type WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
 import { GitHubIssueLeaseAuthority, type IssueLeaseAuthority } from "./issue-leases.ts";
-import { runPiNextLoop, MAX_ISSUES } from "./loop.ts";
+import { MAX_ISSUES } from "./loop.ts";
+import { runProductionLifecycleScheduler } from "./production-lifecycle.ts";
 import { sessionIdentity } from "./live-ctx.ts";
 import { safeNotify } from "./util.ts";
 
@@ -211,7 +212,7 @@ export function startMonitor(ctx: ExtensionCommandContext, onStatus?: (status: M
     config,
     authority: createWorkAuthority(ctx.cwd, config),
     leaseAuthority: new GitHubIssueLeaseAuthority(ctx.cwd),
-    scheduler: async () => runPiNextLoop(String(MAX_ISSUES), ctx),
+    scheduler: async () => { await runProductionLifecycleScheduler({ cwd: ctx.cwd, ctx, entry: "monitor", requestedIssues: MAX_ISSUES }); },
     onStatus,
   });
   monitors.set(key, monitor);
