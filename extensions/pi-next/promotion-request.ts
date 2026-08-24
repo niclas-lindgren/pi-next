@@ -17,7 +17,10 @@ export interface PromotionRequest {
   branch: string;
   checkpointSha: string;
   mainSha: string;
+  /** Candidate/working-tree fingerprint recorded by verification evidence. */
   fingerprint: string;
+  /** Exact work-authority fingerprint that successful final verification used. */
+  verifiedAuthorityFingerprint: string;
   requestedAt: string;
 }
 
@@ -42,7 +45,21 @@ function parseRequest(value: unknown, issueNumber: number): PromotionRequest | u
   if (typeof record.fingerprint !== "string" || !record.fingerprint) return undefined;
   if (typeof record.runId !== "string" || !record.runId) return undefined;
   if (typeof record.requestedAt !== "string" || !record.requestedAt) return undefined;
-  return record as unknown as PromotionRequest;
+  return {
+    version: 1,
+    issueNumber,
+    runId: record.runId,
+    branch: record.branch,
+    checkpointSha: record.checkpointSha,
+    mainSha: record.mainSha,
+    fingerprint: record.fingerprint,
+    // v0.2.73-v0.2.75 requests only carried the candidate/working
+    // fingerprint. They remain readable so finalization fails closed with a
+    // precise missing-authority-evidence error instead of silently ignoring a
+    // durable request or laundering live authority into verified evidence.
+    verifiedAuthorityFingerprint: typeof record.verifiedAuthorityFingerprint === "string" ? record.verifiedAuthorityFingerprint : "",
+    requestedAt: record.requestedAt,
+  };
 }
 
 export async function writePromotionRequest(input: {
@@ -53,6 +70,7 @@ export async function writePromotionRequest(input: {
   checkpointSha: string;
   mainSha: string;
   fingerprint: string;
+  verifiedAuthorityFingerprint: string;
   now?: Date;
 }): Promise<void> {
   const record: PromotionRequest = {
@@ -63,6 +81,7 @@ export async function writePromotionRequest(input: {
     checkpointSha: input.checkpointSha,
     mainSha: input.mainSha,
     fingerprint: input.fingerprint,
+    verifiedAuthorityFingerprint: input.verifiedAuthorityFingerprint,
     requestedAt: (input.now ?? new Date()).toISOString(),
   };
   await mkdir(requestDirectory(input.gitCommonDir), { recursive: true });

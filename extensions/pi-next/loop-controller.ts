@@ -519,13 +519,25 @@ async function applyResult(
     // issue as completed - finalizeRequestedPromotion() is a no-op (returns
     // undefined) when no request is pending.
     try {
-      const leaseAuthority = options.leaseAuthority ?? new GitHubIssueLeaseAuthority(cwd);
-      const workAuthority = options.workAuthority ?? new GitHubWorkAuthority(cwd);
-      await finalizeRequestedPromotion(cwd, issue, leaseAuthority, workAuthority, {
+      const coordinationRoot = runtimeCwdFor(cwd, state);
+      const leaseAuthority = options.leaseAuthority ?? new GitHubIssueLeaseAuthority(coordinationRoot);
+      const workAuthority = options.workAuthority ?? new GitHubWorkAuthority(coordinationRoot);
+      const finalization = await finalizeRequestedPromotion(coordinationRoot, issue, leaseAuthority, workAuthority, {
         agent: "pi-next",
         runId: state.runId,
         sessionId: state.sessionId ?? `${state.runId}-loop`,
       });
+      if (!finalization) {
+        throw new Error(`Issue #${issue} reached archived outcome without a durable promotion/finalization request`);
+      }
+      if (!finalization.closed) {
+        const reason = finalization.authorityChanged
+          ? "live authority changed since final verification; reverify/reconcile before completion"
+          : finalization.requiresReverification
+            ? "integrated main requires exact reverification before completion"
+            : "finalizer integrated candidate but did not close authoritative issue";
+        throw new Error(`Issue #${issue} finalization incomplete: ${reason}`);
+      }
     } catch (error) {
       throw new IssueBoundaryFailure(
         issue,
