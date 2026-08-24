@@ -109,6 +109,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adopt-pattern** — bounded workflow retry controllers distinguish no-candidate generation failures from candidate verification failures. Pi-next now spends one separate fresh implementation retry only when a completed implementation worker produced mechanically proven zero delta, the issue is still open, satisfaction is unproven, and no repair/finalization phase has started.
 - **reject** — accepting unchanged deterministic checks as proof of satisfaction, reusing the first worker conversation, retrying provider/preflight/cancellation failures, or looping after the single zero-delta retry budget is exhausted.
 
+### Evidence-based worker terminal classification (issue #151)
+
+- **adopt-pattern** — Pi's own assistant stream contract separates transport settlement from terminal model outcomes: successful `done`/assistant terminal messages carry a non-error stop reason, while provider/runtime failures are encoded as `error`/`aborted` terminal messages or retry/error events. Pi-next now requires that typed terminal evidence before a worker attempt can be recorded as completed.
+- **reject** — inferring worker success from a resolved `session.prompt()`, tool-call count, token counters, or passing checks on unchanged code. Missing/malformed terminal evidence and provider/model errors remain worker execution failures, distinct from #149's normal completed-zero-delta retry path.
+
 ### Bootstrap lifecycle lock decisions (issue #114)
 
 - **adopt-pattern** — local process lock managers commonly use an atomic lock directory plus bounded owner metadata and heartbeat. The bootstrap utility adopts that filesystem primitive in `.git/pi-next/bootstrap-lifecycle/issue-N.lock`, keeping coordination outside candidate contents and failing closed for live or ambiguous owners.

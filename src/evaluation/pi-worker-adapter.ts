@@ -102,8 +102,8 @@ export class PiWorkerAdapter implements WorkerAdapter {
       const telemetry = usageFromSession(session);
       const activity = telemetry.toolCalls === undefined ? undefined : { modelRounds: 1, toolCalls: telemetry.toolCalls, toolResults: telemetry.toolCalls };
       // A resolved session.prompt() is transport completion, not proof the model turn
-      // succeeded (see #151) - only a mechanically observed terminal assistant result
-      // that isn't itself an error/abort counts as a passing worker attempt.
+      // succeeded (see #151) - only mechanically observed successful terminal
+      // model/provider evidence counts as a passing worker attempt.
       const classification = classifyWorkerCompletion(terminalEvidence);
       if (!classification.ok) {
         return {
@@ -111,7 +111,7 @@ export class PiWorkerAdapter implements WorkerAdapter {
           output: classification.detail,
           code: null,
           signal: null,
-          telemetry: { status: terminalEvidence.sawAssistantMessage ? "partial" : "unavailable", usage: telemetry.usage, activity, model: telemetry.model },
+          telemetry: { status: terminalEvidence.terminalResultObserved ? "partial" : "unavailable", usage: telemetry.usage, activity, model: telemetry.model },
           failure: { code: classification.code, summary: classification.detail, diagnosticExcerpt: classification.detail.slice(-1_000) },
         };
       }

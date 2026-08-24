@@ -235,16 +235,15 @@ export interface CheckReport {
 }
 
 export interface WorkerReport {
-  role: WorkerRole;
-  disposition: "completed" | "failed" | "cancelled" | "timed_out";
+  role: WorkerRole; disposition: "completed" | "failed" | "cancelled" | "timed_out";
   model?: string;
-  durationMs: number;
-  toolCalls: number;
+  durationMs: number; toolCalls: number;
   usage?: WorkerStats;
   reason?: string;
   telemetryWarning?: string;
   reviewResult?: ReviewerResult;
-  stopReason?: string; terminalResultObserved: boolean;
+  stopReason?: string; terminalResultKind?: string;
+  terminalResultObserved: boolean; assistantOutputObserved?: boolean;
 }
 
 export interface BootstrapReport {

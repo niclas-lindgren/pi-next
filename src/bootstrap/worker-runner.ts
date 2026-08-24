@@ -94,7 +94,9 @@ export async function runWorker(
           telemetryWarning: stats.warning,
           reviewResult: role === "review" ? parseReviewResultText(assistantText) : undefined,
           stopReason: terminalEvidence.stopReason,
-          terminalResultObserved: terminalEvidence.sawAssistantMessage,
+          terminalResultKind: terminalEvidence.resultKind,
+          terminalResultObserved: terminalEvidence.terminalResultObserved,
+          assistantOutputObserved: terminalEvidence.assistantOutputObserved || assistantText.length > 0,
         }
       : {
           role,
@@ -106,7 +108,9 @@ export async function runWorker(
           telemetryWarning: stats.warning,
           reason: redact(`${classification.code}: ${classification.detail}`),
           stopReason: terminalEvidence.stopReason,
-          terminalResultObserved: terminalEvidence.sawAssistantMessage,
+          terminalResultKind: terminalEvidence.resultKind,
+          terminalResultObserved: terminalEvidence.terminalResultObserved,
+          assistantOutputObserved: terminalEvidence.assistantOutputObserved || assistantText.length > 0,
         };
     reports.push(report);
     emitProgress(reporter, {
@@ -135,7 +139,9 @@ export async function runWorker(
       telemetryWarning: stats.warning,
       reason: redact(error instanceof Error ? error.message : String(error)),
       stopReason: terminalEvidence.stopReason,
-      terminalResultObserved: terminalEvidence.sawAssistantMessage,
+      terminalResultKind: terminalEvidence.resultKind,
+      terminalResultObserved: terminalEvidence.terminalResultObserved,
+      assistantOutputObserved: terminalEvidence.assistantOutputObserved || assistantText.length > 0,
     };
     reports.push(report);
     emitProgress(reporter, { issueNumber, phase: "worker", state: "fail", role, model, elapsedMs: report.durationMs, toolCalls: report.toolCalls, detail: report.disposition });

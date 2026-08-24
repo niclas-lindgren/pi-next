@@ -48,7 +48,7 @@ test("the #145/#132 zero-evidence shape maps to ok:false with a typed MODEL_TURN
   assert.equal(result.failure?.code, "MODEL_TURN_UNPROVEN");
 });
 
-test("a terminal provider error maps to ok:false with a typed MODEL_TURN_FAILED failure carrying the error detail", async () => {
+test("a terminal assistant error maps to ok:false with a typed MODEL_TURN_FAILED failure carrying the error detail", async () => {
   const factory = fakeFactory(async ({ emit }) => {
     emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "upstream 503" } });
   });
@@ -58,6 +58,31 @@ test("a terminal provider error maps to ok:false with a typed MODEL_TURN_FAILED 
   assert.equal(result.ok, false);
   assert.equal(result.failure?.code, "MODEL_TURN_FAILED");
   assert.match(result.failure?.summary ?? "", /upstream 503/);
+});
+
+test("a provider error event maps to ok:false with a typed PROVIDER_ERROR failure", async () => {
+  const factory = fakeFactory(async ({ emit }) => {
+    emit({ type: "provider_error", code: "rate_limit", message: "429 too many requests" });
+  });
+  const adapter = new SdkSessionWorkerAdapter(factory);
+  const result = await adapter.run({ cwd: "/tmp/fixture", prompt: "do the task" }, new AbortController().signal);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.telemetry.status, "partial");
+  assert.equal(result.failure?.code, "PROVIDER_ERROR");
+  assert.match(result.failure?.summary ?? "", /429/);
+});
+
+test("prompt rejection remains a typed worker execution failure", async () => {
+  const factory = fakeFactory(async () => {
+    throw new Error("session transport failed");
+  });
+  const adapter = new SdkSessionWorkerAdapter(factory);
+  const result = await adapter.run({ cwd: "/tmp/fixture", prompt: "do the task" }, new AbortController().signal);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failure?.code, "WORKER_EXECUTION_FAILED");
+  assert.match(result.failure?.summary ?? "", /session transport failed/);
 });
 
 test("timeout maps to ok:false with a WORKER_TIMEOUT failure code", async () => {
