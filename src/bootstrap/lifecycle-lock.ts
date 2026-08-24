@@ -37,10 +37,12 @@ function lockDir(root: string, issueNumber: number, gitCommonDir?: string): stri
 
 function recordPath(dir: string): string { return join(dir, "owner.json"); }
 
+const bootstrapLifecycleOperations = new Set<BootstrapLifecycleOperation>(["self-host", "finalize", "bootstrap", "explicit", "auto", "monitor"]);
+
 function isRecord(value: unknown, issueNumber: number): value is BootstrapLifecycleLockRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
-  return v.version === 1 && v.issueNumber === issueNumber && typeof v.runId === "string" && v.runId.length > 0 && typeof v.pid === "number" && Number.isInteger(v.pid) && v.pid > 0 && (v.operation === "self-host" || v.operation === "finalize") && typeof v.phase === "string" && typeof v.startedAt === "string" && typeof v.heartbeatAt === "string" && typeof v.cwd === "string";
+  return v.version === 1 && v.issueNumber === issueNumber && typeof v.runId === "string" && v.runId.length > 0 && typeof v.pid === "number" && Number.isInteger(v.pid) && v.pid > 0 && typeof v.operation === "string" && bootstrapLifecycleOperations.has(v.operation as BootstrapLifecycleOperation) && typeof v.phase === "string" && typeof v.startedAt === "string" && typeof v.heartbeatAt === "string" && typeof v.cwd === "string";
 }
 
 async function readRecord(dir: string, issueNumber: number): Promise<BootstrapLifecycleLockRecord> {

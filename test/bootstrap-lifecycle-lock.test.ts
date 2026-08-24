@@ -62,6 +62,17 @@ test("same issue lifecycle lock is exclusive and unrelated issues do not conflic
   } finally { await f.cleanup(); }
 });
 
+test("shared-kernel lifecycle operations are valid lock owners", async () => {
+  const f = await fixture();
+  try {
+    for (const operation of ["bootstrap", "explicit", "auto", "monitor"] as const) {
+      const lock = await acquireBootstrapLifecycleLock({ root: f.root, issueNumber: 150, operation, phase: "worker", heartbeatMs: 0 });
+      await assert.rejects(() => acquireBootstrapLifecycleLock({ root: f.root, issueNumber: 150, operation: "finalize", heartbeatMs: 0 }), (error) => error instanceof BootstrapLifecycleLockError && error.code === "ACTIVE_OWNER" && error.message.includes(`active ${operation} owner`));
+      await lock.release();
+    }
+  } finally { await f.cleanup(); }
+});
+
 test("atomic acquisition lets exactly one simultaneous contender win", async () => {
   const f = await fixture();
   try {
