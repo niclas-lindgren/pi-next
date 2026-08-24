@@ -85,6 +85,7 @@ import {
   WorkflowStateProviderError,
   workflowState,
 } from "./workflow-state-provider.ts";
+import { runProductionSingleIssueLifecycle } from "./production-lifecycle.ts";
 
 /**
  * Delivers through the shared lifecycle-aware host boundary (#583) instead
@@ -463,50 +464,23 @@ export async function runIssueScopedPrompt(
   });
   if (executionCwd !== coordinationCwd) trackCrashLoggerCwd(executionCwd);
   try {
-    // Child workers own their process cwd, so concurrent issue workers never
-    // observe or clobber each other's canonical worktrees. The parent host
-    // session is not a freshness boundary and is never replaced for this
-    // issue-scoped command, including when an authority adapter is injected.
-    const phase = existsSync(planFile(executionCwd)) ? "implementation" : "planning";
-    const dispatch = createWorkerDispatch({
-      phase,
-      hasPlan: phase === "implementation",
+    const result = await runProductionSingleIssueLifecycle({
+      cwd: coordinationCwd,
       issueNumber: claimedLease.issueNumber,
+      entry: "explicit",
+      runId: claimedLease.runId,
+      allowRepair: true,
+      review: false,
+      finalize: true,
+    }, {
+      worker: workerOverride,
+      onWorkLog: (event) => {
+        const next = { ...event, issueNumber: event.issueNumber ?? claimedLease.issueNumber };
+        display?.event(next);
+        if (onWorkLog) onWorkLog(next);
+      },
     });
-    await executeIssueWorker(
-        executionCwd,
-        buildPiNextPrompt(executionCwd, args, undefined, dispatch),
-        workerOverride,
-        (elapsedMs) =>
-          notifySafely(
-            ctx,
-            `Issue worker for #${claimedLease.issueNumber} still running (${Math.round(elapsedMs / 1_000)}s)`,
-            "info",
-          ),
-        {
-          issueNumber: claimedLease.issueNumber,
-          runId: claimedLease.runId,
-          phase,
-          dispatch,
-          display,
-          onActivity: (event: WorkerWorkLogEvent) => {
-            if (currentGeneration()?.isDisposed()) return;
-            const next = {
-              ...event,
-              issueNumber: event.issueNumber ?? claimedLease.issueNumber,
-            };
-            display?.event(next);
-            if (onWorkLog) onWorkLog(next);
-            else {
-              notifySafely(
-                ctx,
-                `pi-next #${next.issueNumber ?? "?"} · ${next.phase} · ${next.kind} · ${next.summary}`,
-                "info",
-              );
-            }
-          },
-        },
-      );
+    notifySafely(ctx, `pi-next #${claimedLease.issueNumber} ${result.disposition}`, result.disposition === "pass" || result.disposition === "already-satisfied" ? "info" : "warning");
   } finally {
     await heartbeat.stop();
     try {
@@ -519,27 +493,6 @@ export async function runIssueScopedPrompt(
         notifySafely(
           ctx,
           `Issue lease release failed: ${error instanceof Error ? error.message : String(error)}`,
-          "warning",
-        );
-      }
-    }
-    if (
-      !existsSync(planFile(executionCwd))
-    ) {
-      try {
-        await removeCompletedWorkflowArtifacts(
-          executionCwd,
-          claimedLease.issueNumber,
-        );
-        await cleanupCompletedIssueWorktree(
-          coordinationCwd,
-          executionCwd,
-          claimedLease.issueNumber,
-        );
-      } catch (error) {
-        notifySafely(
-          ctx,
-          `Issue #${claimedLease.issueNumber} workspace retained after completion cleanup could not be proven: ${error instanceof Error ? error.message : String(error)}`,
           "warning",
         );
       }

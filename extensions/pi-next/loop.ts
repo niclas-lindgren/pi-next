@@ -92,6 +92,7 @@ import {
   WorkflowStateProviderError,
 } from "./workflow-state-provider.ts";
 import { publishSelfAssessmentFindings, refreshFindingApprovals } from "./self-assessment.ts";
+import { runProductionLifecycleScheduler } from "./production-lifecycle.ts";
 
 export { MAX_ISSUES, readLoopState, writeLoopResult } from "./loop-state.ts";
 export { ForegroundSupervisor } from "./foreground-supervisor.ts";
@@ -1249,31 +1250,21 @@ export async function runPiNextLoop(
 
   const requestedIssues = parseLoopLimit(input);
   const createdAt = loopNow();
-  const state: LoopState = {
-    version: 1,
-    runId: `${createdAt.replace(/[:.]/g, "-")}-${process.pid}`,
-    sessionId: sessionIdentity(ctx),
+  const runId = `${createdAt.replace(/[:.]/g, "-")}-${process.pid}`;
+  // New auto execution is queue scheduling over the shared lifecycle kernel.
+  // The legacy ForegroundSupervisor remains only for explicit resume of old
+  // interrupted loop-state records above; fresh `/pi-next auto` does not enter
+  // the duplicate worker/repair/finalization state machine.
+  bindLiveAutoRun(ctx, runId);
+  await runProductionLifecycleScheduler({
+    cwd: ctx.cwd,
+    ctx,
+    entry: "auto",
     requestedIssues,
-    remainingIssues: requestedIssues,
-    step: 0,
-    settledStep: 0,
-    maxSteps: Math.min(MAX_STEPS, Math.max(10, requestedIssues * 20)),
-    completedIssues: [],
-    deferredIssues: [],
-    issueMetrics: [],
-    status: "running",
-    stopRequested: false,
-    createdAt,
-    updatedAt: createdAt,
-    metrics: emptyLoopMetrics(),
-    coordinationCwd: ctx.cwd,
-  };
-  writeJsonAtomic(loopStateFile(ctx.cwd, state.runId), state);
-  // Establish presentation identity before the supervisor starts its first
-  // child-worker turn. This is not an ownership decision; the lease and
-  // canonical workspace remain the workflow authority.
-  bindLiveAutoRun(ctx, state.runId);
-  await new ForegroundSupervisor(ctx, onWorkLog, onWorkerState).launch(state);
+    runId,
+    onWorkLog,
+    onWorkerState,
+  });
 }
 
 export function registerPiNextLoopCommand(
