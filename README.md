@@ -173,7 +173,7 @@ The bootstrap utility runs one bounded issue worker from a clean coordination ch
 npm run bootstrap:self-host -- --issue 75
 ```
 
-It prepares the canonical `.worktrees/issue-75` / `agent/issue-75` workspace, installs or validates worktree-local dependencies from the committed lockfile before launching Pi, fetches the complete issue, runs deterministic checks outside the worker, and reports bounded candidate state (including dirty uncommitted work). It leaves merge and issue closure to the operator. To re-grade an existing candidate without another implementation turn, use:
+It prepares the canonical `.worktrees/issue-75` / `agent/issue-75` workspace, installs or validates worktree-local dependencies from the committed lockfile before launching Pi, fetches the complete issue, runs deterministic checks outside the worker, and reports bounded candidate state (including dirty uncommitted work). The bounded Pi worker honors the configured Pi default model, and when launched from an interactive Pi session it starts from that session's `PI_PROVIDER` / `PI_MODEL` / `PI_REASONING_LEVEL` while still disabling worker compaction, retries, extensions, skills, prompts, themes, and context-file loading. It leaves merge and issue closure to the operator. To re-grade an existing candidate without another implementation turn, use:
 
 ```sh
 npm run bootstrap:self-host -- --issue 75 --verify-only

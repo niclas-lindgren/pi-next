@@ -5,6 +5,37 @@ import { runCommand } from "./command-runner.js";
 import { WorkerFactory } from "./types.js";
 import { bounded, redact } from "./utils.js";
 
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+export interface BootstrapWorkerSettingsOverrides {
+  compaction: { enabled: false };
+  retry: { enabled: false };
+  defaultProvider?: string;
+  defaultModel?: string;
+  defaultThinkingLevel?: string;
+}
+
+export function bootstrapWorkerSettingsOverridesFromEnv(env: NodeJS.ProcessEnv = process.env): BootstrapWorkerSettingsOverrides {
+  const overrides: BootstrapWorkerSettingsOverrides = {
+    compaction: { enabled: false },
+    retry: { enabled: false },
+  };
+  if (env.PI_PROVIDER && env.PI_MODEL) {
+    overrides.defaultProvider = env.PI_PROVIDER;
+    overrides.defaultModel = env.PI_MODEL;
+  }
+  if (env.PI_REASONING_LEVEL && PI_THINKING_LEVELS.has(env.PI_REASONING_LEVEL)) {
+    overrides.defaultThinkingLevel = env.PI_REASONING_LEVEL;
+  }
+  return overrides;
+}
+
+export function createBootstrapWorkerSettingsManager(sdk: any, cwd: string, agentDir: string, env: NodeJS.ProcessEnv = process.env): any {
+  const settingsManager = sdk.SettingsManager.create(cwd, agentDir);
+  settingsManager.applyOverrides(bootstrapWorkerSettingsOverridesFromEnv(env));
+  return settingsManager;
+}
+
 function forbiddenWorkerCommand(command: string): boolean {
   return /(^|[;&|\n])\s*(?:sudo\s+)?(?:gh(?:\s|$)|git\s+(?:push|merge|reset|rebase|worktree|checkout|switch|update-ref)|git\s+branch\s+-[dD]|rm\s+-rf\s+\.git)/i.test(command)
     || /\bgh\s+(?:issue|pr|api)\b/i.test(command);
@@ -32,10 +63,12 @@ export async function createDefaultWorkerFactory(): Promise<WorkerFactory> {
   const sdk = await import("@earendil-works/pi-coding-agent") as any;
   const modelRuntime = await sdk.ModelRuntime.create();
   return async ({ cwd, role }) => {
-    const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+    const agentDir = sdk.getAgentDir() || resolve(homedir(), ".pi", "agent");
+    const settingsManager = createBootstrapWorkerSettingsManager(sdk, cwd, agentDir);
     const loader = new sdk.DefaultResourceLoader({
       cwd,
-      agentDir: sdk.getAgentDir() || resolve(homedir(), ".pi", "agent"),
+      agentDir,
+      settingsManager,
       noExtensions: true,
       noSkills: true,
       noPromptTemplates: true,

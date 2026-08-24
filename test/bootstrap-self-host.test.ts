@@ -8,6 +8,8 @@ import { test } from "node:test";
 
 import {
   BootstrapSetupError,
+  bootstrapWorkerSettingsOverridesFromEnv,
+  createBootstrapWorkerSettingsManager,
   fetchRoadmapIssues,
   main,
   resolveNextIssue,
@@ -128,6 +130,47 @@ function lockedDependencies(
     now: () => new Date("2026-01-01T00:00:00.000Z"),
   };
 }
+
+test("bootstrap worker settings honor Pi defaults and current interactive model", () => {
+  let createArgs: { cwd: string; agentDir: string } | undefined;
+  let inMemoryCalled = false;
+  const settingsManager = {
+    overrides: [] as unknown[],
+    applyOverrides(overrides: unknown) { this.overrides.push(overrides); },
+  };
+  const sdk = {
+    SettingsManager: {
+      create: (cwd: string, agentDir: string) => {
+        createArgs = { cwd, agentDir };
+        return settingsManager;
+      },
+      inMemory: () => {
+        inMemoryCalled = true;
+        return settingsManager;
+      },
+    },
+  };
+
+  assert.equal(createBootstrapWorkerSettingsManager(sdk, "/repo", "/agent", {
+    PI_PROVIDER: "openai-codex",
+    PI_MODEL: "gpt-5.5",
+    PI_REASONING_LEVEL: "high",
+  }), settingsManager);
+  assert.deepEqual(createArgs, { cwd: "/repo", agentDir: "/agent" });
+  assert.equal(inMemoryCalled, false);
+  assert.deepEqual(settingsManager.overrides, [{
+    compaction: { enabled: false },
+    retry: { enabled: false },
+    defaultProvider: "openai-codex",
+    defaultModel: "gpt-5.5",
+    defaultThinkingLevel: "high",
+  }]);
+
+  assert.deepEqual(bootstrapWorkerSettingsOverridesFromEnv({}), {
+    compaction: { enabled: false },
+    retry: { enabled: false },
+  });
+});
 
 function fakeFactory(
   sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }>,
