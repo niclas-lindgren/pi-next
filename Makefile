@@ -2,13 +2,23 @@
 
 RELEASE_LEVEL ?= patch
 RELEASE_FLAGS ?=
+RELEASE_NOTES ?=
+
+ifeq ($(firstword $(MAKECMDGOALS)),release)
+RELEASE_NOTES_FROM_GOALS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+ifneq ($(strip $(RELEASE_NOTES_FROM_GOALS)),)
+override RELEASE_NOTES := $(RELEASE_NOTES_FROM_GOALS)
+$(foreach goal,$(filter-out release,$(RELEASE_NOTES_FROM_GOALS)),$(eval $(goal):;@:))
+endif
+endif
 
 .PHONY: help release release-patch release-minor release-major check bootstrap bootstrap-next
 
 help:
 	@printf '%s\n' \
 	  'make check                         Run typecheck and tests' \
-	  'make release [RELEASE_LEVEL=...]  Test, bump, commit, tag, and push a release' \
+	  'make release [notes...]           Test, auto-note, bump, commit, tag, and push a release' \
+	  '                                  (or RELEASE_NOTES="...")' \
 	  'make release-patch                 Prepare the next patch release' \
 	  'make release-minor                 Prepare the next minor release' \
 	  'make release-major                 Prepare the next major release' \
@@ -33,7 +43,7 @@ bootstrap-%:
 	npm run bootstrap:self-host -- --issue $*
 
 release:
-	npm run release -- $(RELEASE_LEVEL) --push $(RELEASE_FLAGS)
+	RELEASE_NOTES="$(RELEASE_NOTES)" npm run release -- $(RELEASE_LEVEL) --push $(RELEASE_FLAGS)
 
 release-patch:
 	$(MAKE) release RELEASE_LEVEL=patch

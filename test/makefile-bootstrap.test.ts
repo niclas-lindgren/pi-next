@@ -13,8 +13,10 @@ async function makeDryRun(target: string): Promise<string> {
   return result.stdout;
 }
 
-test("make help lists the bootstrap commands", async () => {
+test("make help lists the release and bootstrap commands", async () => {
   const result = await exec("make", ["help"], { cwd: packageRoot, encoding: "utf8" });
+  assert.match(result.stdout, /make release \[notes\.\.\.\]\s+Test, auto-note, bump, commit, tag, and push a release/);
+  assert.match(result.stdout, /RELEASE_NOTES="\.\.\."/);
   assert.match(result.stdout, /make bootstrap\s+Run the next self-host issue/);
   assert.match(result.stdout, /make bootstrap-N\s+Run self-host for issue N/);
   assert.match(result.stdout, /make bootstrap-next\s+Show\/select the next self-host issue only/);
@@ -41,6 +43,16 @@ test("make bootstrap-abc rejects a non-numeric issue suffix", async () => {
     exec("make", ["bootstrap-abc"], { cwd: packageRoot, encoding: "utf8" }),
     /is not a valid issue number/,
   );
+});
+
+test("make release passes empty release notes by default", async () => {
+  const stdout = await makeDryRun("release");
+  assert.match(stdout, /RELEASE_NOTES="" npm run release -- patch --push/);
+});
+
+test("make release treats extra goals as release-note text", async () => {
+  const result = await exec("make", ["-n", "release", "Ship", "release", "notes"], { cwd: packageRoot, encoding: "utf8" });
+  assert.match(result.stdout, /RELEASE_NOTES="Ship release notes" npm run release -- patch --push/);
 });
 
 test("make check still wraps typecheck and test", async () => {

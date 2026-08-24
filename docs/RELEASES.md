@@ -15,8 +15,11 @@ hold back a fix whose risk is greater than the cost of another tag.
 ## Release gate
 
 Before `scripts/release.mjs` can change `package.json`, create a tag, or push,
-`CHANGELOG.md` must contain complete entries for both the shipped version and
-the next version. Each entry must include:
+`CHANGELOG.md` must contain a complete entry for the shipped version. The release
+command automatically creates or completes the next-version entry before the
+release commit. `make release` uses empty free-form notes text; `make release
+some notes` (or `make release RELEASE_NOTES="some notes"`) uses that text as
+the new entry's introductory release notes. Each entry must include:
 
 - material changes;
 - compatibility, configuration, and schema changes;

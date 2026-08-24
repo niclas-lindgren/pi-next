@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateReleaseNotes } from "./release-notes.mjs";
+import { ensurePreparedReleaseNotes, validateReleaseNotes } from "./release-notes.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -13,6 +13,7 @@ const flags = new Set(args.filter((arg) => arg.startsWith("--")));
 
 if (!level || !["patch", "minor", "major"].includes(level) || [...flags].some((flag) => !["--dry-run", "--push", "--publish"].includes(flag))) {
   console.error("Usage: npm run release -- <patch|minor|major> [--dry-run] [--push] [--publish]");
+  console.error("Set RELEASE_NOTES to the free-form notes text; empty text creates a section-only entry.");
   process.exit(2);
 }
 if (flags.has("--publish") && !flags.has("--push")) {
@@ -55,14 +56,17 @@ try {
 
   const current = packageVersion();
   const version = nextVersion(current, level);
-  const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
-  validateReleaseNotes(changelog, current, version);
+  const changelogPath = join(root, "CHANGELOG.md");
+  const changelog = readFileSync(changelogPath, "utf8");
+  const preparedReleaseNotes = ensurePreparedReleaseNotes(changelog, version, process.env.RELEASE_NOTES || "");
+  validateReleaseNotes(preparedReleaseNotes.changelog, current, version);
   const tag = `v${version}`;
   if (git("tag", "--list", tag) === tag) {
     throw new Error(`tag ${tag} already exists`);
   }
 
   console.log(`Release ${current} -> ${version}`);
+  console.log(preparedReleaseNotes.changed ? "Release notes will be prepared in CHANGELOG.md." : "Release notes already prepared in CHANGELOG.md.");
   console.log("Release notes validated for the shipped and prepared versions.");
   if (flags.has("--dry-run")) {
     console.log("Dry run: no files, commits, tags, pushes, or publishes changed.");
@@ -71,8 +75,11 @@ try {
 
   run("npm", ["run", "typecheck"]);
   run("npm", ["test"]);
+  if (preparedReleaseNotes.changed) {
+    writeFileSync(changelogPath, preparedReleaseNotes.changelog);
+  }
   run("npm", ["version", version, "--no-git-tag-version"]);
-  run("git", ["add", "package.json", "package-lock.json"]);
+  run("git", ["add", "CHANGELOG.md", "package.json", "package-lock.json"]);
   run("git", ["commit", "-m", `chore(release): v${version}`]);
   run("git", ["tag", "-a", tag, "-m", `Release ${tag}`]);
 
