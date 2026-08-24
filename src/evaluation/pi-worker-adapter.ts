@@ -10,6 +10,7 @@ import {
   type WorkerTerminalResult,
   type WorkerUsageTelemetry,
 } from "../coordination/worker-adapter.ts";
+import { classifyWorkerCompletion, createWorkerTerminalEvidence, observeWorkerEvent } from "../coordination/worker-terminal-result.ts";
 
 async function runShell(cwd: string, command: string, signal?: AbortSignal): Promise<{ exitCode: number; output: string }> {
   const { spawn } = await import("node:child_process");
@@ -90,19 +91,36 @@ export class PiWorkerAdapter implements WorkerAdapter {
       });
       session = result.session;
       emit?.({ type: "runtime", startedAt, lastActivityAt: startedAt, alive: true });
+      let terminalEvidence = createWorkerTerminalEvidence();
       unsubscribe = session.subscribe?.((event: unknown) => {
         if (typeof event === "object" && event !== null && (event as { type?: string }).type === "tool_execution_end") {
           emit?.({ type: "activity", phase: task.phase, kind: "tool", summary: "Pi tool execution completed" });
         }
+        terminalEvidence = observeWorkerEvent(terminalEvidence, event);
       });
       await session.prompt(task.prompt);
       const telemetry = usageFromSession(session);
+      const activity = telemetry.toolCalls === undefined ? undefined : { modelRounds: 1, toolCalls: telemetry.toolCalls, toolResults: telemetry.toolCalls };
+      // A resolved session.prompt() is transport completion, not proof the model turn
+      // succeeded (see #151) - only a mechanically observed terminal assistant result
+      // that isn't itself an error/abort counts as a passing worker attempt.
+      const classification = classifyWorkerCompletion(terminalEvidence);
+      if (!classification.ok) {
+        return {
+          ok: false,
+          output: classification.detail,
+          code: null,
+          signal: null,
+          telemetry: { status: terminalEvidence.sawAssistantMessage ? "partial" : "unavailable", usage: telemetry.usage, activity, model: telemetry.model },
+          failure: { code: classification.code, summary: classification.detail, diagnosticExcerpt: classification.detail.slice(-1_000) },
+        };
+      }
       return {
         ok: true,
         output: "Pi worker completed; independent grader determines pass/fail.",
         code: 0,
         signal: null,
-        telemetry: { status: telemetry.usage ? "complete" : "partial", usage: telemetry.usage, activity: telemetry.toolCalls === undefined ? undefined : { modelRounds: 1, toolCalls: telemetry.toolCalls, toolResults: telemetry.toolCalls }, model: telemetry.model },
+        telemetry: { status: telemetry.usage ? "complete" : "partial", usage: telemetry.usage, activity, model: telemetry.model },
       };
     } catch (error) {
       const telemetry = session ? usageFromSession(session) : {};

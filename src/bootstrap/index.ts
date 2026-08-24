@@ -9,6 +9,7 @@ export * from "./dependencies.js";
 export * from "./task-packet.js";
 export * from "./worker-factory.js";
 export * from "./worker-runner.js";
+export * from "./worker-adapter-bridge.js";
 export * from "./candidate.js";
 export * from "./verification.js";
 export * from "./reviewer.js";

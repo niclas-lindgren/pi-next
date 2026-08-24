@@ -2,6 +2,7 @@ import { BootstrapError } from "./errors.js";
 import { BootstrapReporter, WorkerFactory, WorkerReport, WorkerRole, WorkerSession, WorkerStats } from "./types.js";
 import { extractAssistantTextDelta, parseReviewResultText } from "./reviewer.js";
 import { emitProgress, progressToolName, redact } from "./utils.js";
+import { classifyWorkerCompletion, createWorkerTerminalEvidence, observeWorkerEvent } from "../coordination/worker-terminal-result.js";
 
 function workerStats(session: WorkerSession): { toolCalls: number; usage?: WorkerStats; warning?: string } {
   const stats = session.getSessionStats?.();
@@ -45,6 +46,7 @@ export async function runWorker(
   let model: string | undefined;
   let lastSafeProgress = started;
   let cancelParent: (() => void) | undefined;
+  let terminalEvidence = createWorkerTerminalEvidence();
   emitProgress(reporter, { issueNumber, phase: "worker", state: "start", role });
   if (heartbeatMs > 0) {
     heartbeat = setInterval(() => {
@@ -68,6 +70,7 @@ export async function runWorker(
       }
       const delta = extractAssistantTextDelta(event);
       if (delta) assistantText = `${assistantText}${delta}`.slice(-16_000);
+      terminalEvidence = observeWorkerEvent(terminalEvidence, event);
     });
     const cancellation = new Promise<never>((_, reject) => {
       cancelParent = () => { controller.abort(); reject(new BootstrapError(`worker ${role} cancelled`)); };
@@ -79,18 +82,43 @@ export async function runWorker(
     });
     await Promise.race([session.prompt(prompt), timeout, cancellation]);
     const stats = workerStats(session);
-    const report: WorkerReport = {
-      role,
-      disposition: "completed",
-      model,
-      durationMs: Date.now() - started,
-      toolCalls: Math.max(toolCalls, stats.toolCalls),
-      usage: stats.usage,
-      telemetryWarning: stats.warning,
-      reviewResult: role === "review" ? parseReviewResultText(assistantText) : undefined,
-    };
+    const classification = classifyWorkerCompletion(terminalEvidence);
+    const report: WorkerReport = classification.ok
+      ? {
+          role,
+          disposition: "completed",
+          model,
+          durationMs: Date.now() - started,
+          toolCalls: Math.max(toolCalls, stats.toolCalls),
+          usage: stats.usage,
+          telemetryWarning: stats.warning,
+          reviewResult: role === "review" ? parseReviewResultText(assistantText) : undefined,
+          stopReason: terminalEvidence.stopReason,
+          terminalResultObserved: terminalEvidence.sawAssistantMessage,
+        }
+      : {
+          role,
+          disposition: "failed",
+          model,
+          durationMs: Date.now() - started,
+          toolCalls: Math.max(toolCalls, stats.toolCalls),
+          usage: stats.usage,
+          telemetryWarning: stats.warning,
+          reason: redact(`${classification.code}: ${classification.detail}`),
+          stopReason: terminalEvidence.stopReason,
+          terminalResultObserved: terminalEvidence.sawAssistantMessage,
+        };
     reports.push(report);
-    emitProgress(reporter, { issueNumber, phase: "worker", state: "completed", role, model, elapsedMs: report.durationMs, toolCalls: report.toolCalls });
+    emitProgress(reporter, {
+      issueNumber,
+      phase: "worker",
+      state: classification.ok ? "completed" : "fail",
+      role,
+      model,
+      elapsedMs: report.durationMs,
+      toolCalls: report.toolCalls,
+      detail: classification.ok ? undefined : report.disposition,
+    });
     return report;
   } catch (error) {
     const timedOut = error instanceof BootstrapError && error.message.includes("timed out");
@@ -106,6 +134,8 @@ export async function runWorker(
       usage: stats.usage,
       telemetryWarning: stats.warning,
       reason: redact(error instanceof Error ? error.message : String(error)),
+      stopReason: terminalEvidence.stopReason,
+      terminalResultObserved: terminalEvidence.sawAssistantMessage,
     };
     reports.push(report);
     emitProgress(reporter, { issueNumber, phase: "worker", state: "fail", role, model, elapsedMs: report.durationMs, toolCalls: report.toolCalls, detail: report.disposition });

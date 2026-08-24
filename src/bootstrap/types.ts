@@ -245,6 +245,7 @@ export interface WorkerReport {
   reason?: string;
   telemetryWarning?: string;
   reviewResult?: ReviewerResult;
+  stopReason?: string; terminalResultObserved: boolean;
 }
 
 export interface BootstrapReport {

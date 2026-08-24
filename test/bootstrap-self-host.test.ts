@@ -15,12 +15,14 @@ import {
   runBootstrapCli,
   runBootstrapLifecycle,
   runCommand,
+  runWorker,
   type BootstrapDependencies,
   type BootstrapProgressEvent,
   type CommandResult,
   type Issue,
   type RoadmapIssue,
   type WorkerFactory,
+  type WorkerReport,
   type WorkerSession,
 } from "../scripts/bootstrap-self-host.ts";
 
@@ -161,6 +163,7 @@ function fakeFactory(
             });
           }
         }
+        listener?.({ type: "message_end", message: { role: "assistant", stopReason: "end_turn" } });
       },
       abort: async () => {
         record.aborted = true;
@@ -369,6 +372,140 @@ test("timeout aborts and disposes the fresh worker", async () => {
     assert.equal(sessions[0]!.disposed, true);
   } finally {
     await fixtureState.cleanup();
+  }
+});
+
+test("#145/#132 regression: a resolved prompt with zero tools/tokens and no terminal model result is not misclassified as completed", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory: WorkerFactory = async ({ cwd }) => {
+      const record = { role: "implementation", prompt: "", disposed: false, aborted: false };
+      sessions.push(record);
+      return {
+        model: { provider: "openai-codex", id: "gpt-5.5" },
+        subscribe: () => () => undefined,
+        prompt: async () => {
+          void cwd;
+          // Resolves with no tool activity, no tokens, and no observed terminal
+          // assistant result - the exact #145/#132 false-completion shape.
+        },
+        dispose: () => { record.disposed = true; },
+        getSessionStats: () => ({ toolCalls: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+      };
+    };
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.equal(report.workerAttempts[0]!.disposition, "failed");
+    assert.notEqual(report.workerAttempts[0]!.disposition, "completed");
+    assert.match(report.workerAttempts[0]!.reason ?? "", /MODEL_TURN_UNPROVEN/);
+    assert.equal(report.implementationOutcome, "failed");
+    assert.notEqual(report.implementationOutcome, "unproven-no-change");
+    assert.equal(report.disposition, "blocked");
+    assert.equal(sessions[0]!.disposed, true);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("a terminal provider error surfaces as a typed worker failure rather than completed", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory: WorkerFactory = async () => {
+      const record = { role: "implementation", prompt: "", disposed: false, aborted: false };
+      sessions.push(record);
+      let listener: ((event: unknown) => void) | undefined;
+      return {
+        model: { provider: "openai-codex", id: "gpt-5.5" },
+        subscribe: (next) => { listener = next; return () => { if (listener === next) listener = undefined; }; },
+        prompt: async () => {
+          listener?.({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "upstream provider 503" } });
+        },
+        dispose: () => { record.disposed = true; },
+      };
+    };
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.equal(report.workerAttempts[0]!.disposition, "failed");
+    assert.match(report.workerAttempts[0]!.reason ?? "", /MODEL_TURN_FAILED/);
+    assert.match(report.workerAttempts[0]!.reason ?? "", /upstream provider 503/);
+    assert.equal(report.implementationOutcome, "failed");
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("a worker execution failure does not consume the zero-delta implementation retry budget", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string }> = [];
+    const factory: WorkerFactory = async ({ role }) => {
+      sessions.push({ role });
+      return {
+        model: { provider: "openai-codex", id: "gpt-5.5" },
+        subscribe: () => () => undefined,
+        prompt: async () => undefined,
+        dispose: () => undefined,
+      };
+    };
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation"]);
+    assert.equal(report.implementationOutcome, "failed");
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("two concurrent worker sessions retain isolated terminal-result classification", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-worker-concurrency-"));
+  try {
+    const failingFactory: WorkerFactory = async () => {
+      let listener: ((event: unknown) => void) | undefined;
+      return {
+        model: { provider: "fake", id: "failing" },
+        subscribe: (next) => { listener = next; return () => { if (listener === next) listener = undefined; }; },
+        prompt: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          listener?.({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "session A failure" } });
+        },
+        dispose: () => undefined,
+      };
+    };
+    const succeedingFactory: WorkerFactory = async () => {
+      let listener: ((event: unknown) => void) | undefined;
+      return {
+        model: { provider: "fake", id: "succeeding" },
+        subscribe: (next) => { listener = next; return () => { if (listener === next) listener = undefined; }; },
+        prompt: async () => {
+          listener?.({ type: "message_end", message: { role: "assistant", stopReason: "end_turn" } });
+        },
+        dispose: () => undefined,
+      };
+    };
+    const reportsA: WorkerReport[] = [];
+    const reportsB: WorkerReport[] = [];
+    const [reportA, reportB] = await Promise.all([
+      runWorker(failingFactory, "implementation", "task A", cwd, 5_000, reportsA, 1, undefined, 0),
+      runWorker(succeedingFactory, "implementation", "task B", cwd, 5_000, reportsB, 2, undefined, 0),
+    ]);
+
+    assert.equal(reportA.disposition, "failed");
+    assert.match(reportA.reason ?? "", /session A failure/);
+    assert.equal(reportB.disposition, "completed");
+    assert.equal(reportB.reason, undefined);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 
@@ -1077,6 +1214,7 @@ test("reports bounded progress, activity, heartbeats and checks without leaking 
           listener?.({ type: "tool_execution_end", toolName: "read", args: { secret: "ghp_PROGRESS_SECRET" } });
           await writeFile(join(cwd, "progress-candidate.txt"), "candidate\n");
           await new Promise((resolve) => setTimeout(resolve, 30));
+          listener?.({ type: "message_end", message: { role: "assistant", stopReason: "end_turn" } });
         },
         dispose: () => undefined,
       };

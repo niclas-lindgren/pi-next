@@ -5,6 +5,8 @@ export * from "./config.ts";
 export * from "./worker-dispatch.ts";
 export * from "./skill-registry.ts";
 export * from "./worker-adapter.ts";
+export * from "./worker-terminal-result.ts";
+export * from "./lifecycle-disposition.ts";
 export * from "./adversarial-review.ts";
 export * from "./feedback.ts";
 export * from "./self-assessment.ts";
