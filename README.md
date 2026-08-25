@@ -96,7 +96,7 @@ Pi-next never assumes `AGENTS.md`, `.agents/skills`, or a product-specific polic
 
 Create a disposable test repository, configure its model/provider and the project's authority adapter, then start Pi there. Inspect the available commands with `/pi-next` and run `/pi-next-doctor` and `/pi-next-status` before enabling an automatic loop. Pi-next can run coding workers with shell, file, and Git access, so its host process has the permissions of the user running Pi.
 
-Runtime state is kept under `.pi/`, issue worktrees under `.worktrees/`, and local bounded diagnostics under `.pi-next/diagnostics/`; all are ignored by Git so they do not block automatic workflows.
+Runtime state is kept under `.pi/` and issue worktrees under `.worktrees/`, both ignored by Git.
 
 ## Command reference
 
@@ -183,18 +183,26 @@ npm run bootstrap:self-host -- --issue 75 --verify-only
 
 ### Release automation
 
-Read the batching policy and consumer pin-bump contract in [`docs/RELEASES.md`](docs/RELEASES.md). The hosted exact-tag gate (`.github/workflows/release-gate.yml`) rechecks pushed immutable tags on GitHub.
+Install the repository's local pre-push hook once for fast feedback. It does not replace the hosted exact-tag gate: `.github/workflows/release-gate.yml` rechecks the pushed immutable tag on GitHub.
 
-Prepare releases explicitly when you want a release boundary:
+Read the batching policy and consumer pin-bump contract in [`docs/RELEASES.md`](docs/RELEASES.md).
+
+The local hook:
 
 ```sh
-make release                         # test, bump, commit, tag, and push (patch)
-make release RELEASE_LEVEL=minor     # prepare and push a minor release
+npm run hooks:install
+```
+
+The hook validates pushes to `main`. When a main push contains package code without a version bump, it runs `make release` (a patch release by default), creates the release commit and tag, and safely stops the original push. Rerun the push with `--follow-tags` after choosing a different level with `PI_NEXT_RELEASE_LEVEL=minor|major` if needed:
+
+```sh
+make release                         # test, bump, commit, and tag (patch)
+make release RELEASE_LEVEL=minor     # prepare a minor release
 npm run release -- patch --push       # explicitly push main and the tag
 npm run release -- patch --push --publish  # also publish to npm
 ```
 
-Use `--dry-run` to preview the next version. Releases must be prepared from a clean `main` checkout. Ordinary pushes no longer run a local pre-push release/test hook; package changes on `main` become consumer-facing only when `make release` or `npm run release` creates the release tag.
+Use `--dry-run` to preview the next version. Releases must be prepared from a clean `main` checkout. Ordinary documentation-only pushes remain ordinary commits; package changes on `main` become intentional release boundaries.
 
 ## Versioning and compatibility
 
