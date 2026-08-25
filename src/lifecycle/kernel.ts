@@ -18,6 +18,7 @@ import { hasExactVerifiedFinalizationCandidate } from "../bootstrap/finalization
 import { runBootstrapFinalize } from "../../scripts/bootstrap-finalize.ts";
 import { loadPiNextConfig } from "../coordination/config.ts";
 import { incidentBundleFromLifecycleResult, readRunJournalIfAvailable, reportIncidentBundle } from "../coordination/incident-reporting.ts";
+import { commitIncidentDiagnosticsBeforeFinalization } from "../coordination/post-integration-reverification.ts";
 
 export type LifecycleEntryPoint = "bootstrap" | "explicit" | "auto" | "monitor";
 
@@ -237,6 +238,15 @@ export async function runSingleIssueLifecycle(
             config,
             github: config.incidentReporting.autoCreateFrameworkIncidents && bundle.classification.reportability === "upstream",
           });
+          // A written-but-uncommitted incident bundle otherwise leaves the
+          // coordination root dirty until some later issue happens to reach
+          // finalization (the only other caller of this same safe commit).
+          // Auto/monitor scheduling can run many issue-local, no-finalization
+          // cycles in a row, so commit it immediately: this is the same
+          // guarded helper finalize already trusts (main-only, exact
+          // origin/main, incident-paths-only), never gitignored, never left
+          // to accumulate as unrelated dirty state.
+          await commitIncidentDiagnosticsBeforeFinalization({ root: cwd, runCommand: runner });
         }
       } catch {
         // Incident capture/reporting is observational and must never alter the preserved candidate lifecycle result.

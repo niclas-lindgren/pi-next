@@ -4,6 +4,3 @@ dist/
 .worktrees/
 *.log
 coverage/
-
-# Local pi-next runtime diagnostics (kept locally, not release/workflow input)
-.pi-next/diagnostics/

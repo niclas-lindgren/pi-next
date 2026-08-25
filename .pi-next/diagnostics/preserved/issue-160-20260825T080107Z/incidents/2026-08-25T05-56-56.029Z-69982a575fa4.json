@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "createdAt": "2026-08-25T05:56:56.029Z",
+  "fingerprint": "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
+  "classification": {
+    "category": "framework",
+    "reportability": "upstream",
+    "reason": "typed pi-next framework/controller invariant failure"
+  },
+  "runtime": {
+    "piNextVersion": "0.2.85",
+    "piNextRevision": "83bda2eebf2321046458cdc7e0b8e66c39241ca2",
+    "node": "v22.23.2",
+    "platform": "linux/arm64",
+    "tools": {
+      "git": "git version 2.43.0",
+      "gh": "gh version 2.98.0 (2026-08-20)",
+      "npm": "10.9.8"
+    }
+  },
+  "repository": {
+    "root": "/Users/niclasl/src/pi-next",
+    "identity": "https://github.com/niclas-lindgren/pi-next.git"
+  },
+  "command": {
+    "mode": "bootstrap"
+  },
+  "source": {
+    "issueNumber": 85
+  },
+  "failure": {
+    "subsystem": "bootstrap-finalizer",
+    "phase": "finalization",
+    "code": "CI_NOT_PASSING",
+    "reason": "required CI FAIL",
+    "boundary": "pi-next"
+  },
+  "lifecycle": {
+    "entry": "bootstrap",
+    "runId": "bootstrap-85-1787637415965-2903264",
+    "issueNumber": 85,
+    "phase": "terminal",
+    "disposition": "finalization-blocked",
+    "implementation": "PASS",
+    "verification": "PASS",
+    "finalization": "BLOCKED",
+    "repair": "NOT_NEEDED",
+    "workerAttempts": []
+  },
+  "candidate": {
+    "head": "r",
+    "baseline": "b"
+  },
+  "reproductionHints": [
+    "Inspect preserved worktree .worktrees/issue-85",
+    "Re-run deterministic checks: none recorded"
+  ]
+}
