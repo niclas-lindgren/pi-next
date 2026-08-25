@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -413,6 +413,268 @@ test("timeout aborts and disposes the fresh worker", async () => {
     assert.equal(report.workerAttempts[0]!.disposition, "timed_out");
     assert.equal(sessions[0]!.aborted, true);
     assert.equal(sessions[0]!.disposed, true);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("timed-out worker with tracked and untracked verified delta is recovered as implemented", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (_role, cwd) => {
+      await writeFile(join(cwd, "docs", "EVALUATION_AND_RELIABILITY.md"), "# Evaluation\nRecovered after timeout.\n");
+      await writeFile(join(cwd, "timeout-untracked.txt"), "candidate\n");
+      await new Promise<void>(() => undefined);
+    });
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.equal(report.workerAttempts[0]!.disposition, "timed_out");
+    assert.equal(report.workerAttempts[0]!.assistantOutputObserved, false);
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.disposition, "pass");
+    assert.equal(report.finalizationReady, true);
+    assert.equal(report.candidateReadyForReview, true);
+    assert.equal(report.implementationAttemptCount, 1);
+    assert.equal(sessions.length, 1);
+    assert.deepEqual(report.candidate.changedFiles.sort(), ["docs/EVALUATION_AND_RELIABILITY.md", "timeout-untracked.txt"]);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("timed-out worker with zero delta remains blocked as an implementation failure", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async () => new Promise<void>(() => undefined));
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.equal(report.workerAttempts[0]!.disposition, "timed_out");
+    assert.equal(report.candidateHasDelta, false);
+    assert.equal(report.implementationOutcome, "failed");
+    assert.equal(report.finalizationReady, false);
+    assert.equal(report.disposition, "blocked");
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("timed-out worker with delta and failing checks can spend the normal bounded repair", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    let checkRuns = 0;
+    const factory = fakeFactory(sessions, async (role, cwd) => {
+      if (role === "implementation") {
+        await writeFile(join(cwd, "timeout-needs-repair.txt"), "candidate\n");
+        await new Promise<void>(() => undefined);
+      }
+      await writeFile(join(cwd, "timeout-repair.txt"), "repair\n");
+    });
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: true, review: false, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, factory, () => (checkRuns++ === 0 ? 1 : 0), []),
+    );
+
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation", "repair"]);
+    assert.equal(report.workerAttempts[0]!.disposition, "timed_out");
+    assert.equal(report.repairOutcome, "completed");
+    assert.equal(report.mechanicalPass, true);
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.finalizationReady, true);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("timed-out worker with delta but failing checks is a verification failure, not a successful implementation", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (_role, cwd) => {
+      await writeFile(join(cwd, "timeout-failing.txt"), "candidate\n");
+      await new Promise<void>(() => undefined);
+    });
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, factory, () => 1, []),
+    );
+
+    assert.equal(report.workerAttempts[0]!.disposition, "timed_out");
+    assert.equal(report.candidateHasDelta, true);
+    assert.equal(report.mechanicalPass, false);
+    assert.equal(report.implementationOutcome, "failed");
+    assert.equal(report.disposition, "repairable-failure");
+    assert.match(report.failureReason ?? "", /npm run typecheck|deterministic failure/);
+    assert.doesNotMatch(report.failureReason ?? "", /timed out/);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("timed-out verified candidate still runs independent review when review is enabled", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (role, cwd) => {
+      if (role === "review") return;
+      await writeFile(join(cwd, "timeout-reviewed.txt"), "candidate\n");
+      await new Promise<void>(() => undefined);
+    }, undefined, (role) => role === "review" ? { verdict: "pass" } : undefined);
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: true, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.deepEqual(sessions.map((session) => session.role), ["implementation", "review"]);
+    assert.equal(report.workerAttempts[0]!.disposition, "timed_out");
+    assert.equal(report.reviewer?.disposition, "completed");
+    assert.equal(report.reviewPass, true);
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.finalizationReady, true);
+    assert.equal(report.disposition, "pass");
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("operator cancellation is not reinterpreted as autonomous candidate success", async () => {
+  const fixtureState = await fixture();
+  try {
+    const controller = new AbortController();
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const factory = fakeFactory(sessions, async (_role, cwd) => {
+      await writeFile(join(cwd, "cancelled-candidate.txt"), "candidate\n");
+      controller.abort();
+      await new Promise<void>(() => undefined);
+    });
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000, signal: controller.signal },
+      dependenciesFor(fixtureState.root, factory, () => 0, []),
+    );
+
+    assert.equal(report.workerAttempts[0]!.disposition, "cancelled");
+    assert.equal(report.candidateHasDelta, true);
+    assert.equal(report.mechanicalPass, true);
+    assert.equal(report.implementationOutcome, "failed");
+    assert.equal(report.finalizationReady, false);
+    assert.equal(report.candidateReadyForReview, false);
+    assert.equal(report.disposition, "blocked");
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("preserved timed-out verified candidate resumes without a new implementation worker", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const firstFactory = fakeFactory(sessions, async (_role, cwd) => {
+      await writeFile(join(cwd, "resume-timeout.txt"), "candidate\n");
+      await new Promise<void>(() => undefined);
+    });
+    await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, firstFactory, () => 0, []),
+    );
+
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, async () => { throw new Error("implementation worker must not relaunch"); }, () => 0, []),
+    );
+
+    assert.equal(report.attempts, 0);
+    assert.equal(report.implementationAttemptCount, 0);
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.finalizationReady, true);
+    assert.equal(report.disposition, "pass");
+    assert.equal(sessions.length, 1);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("timed-out verified candidate behind origin main remains freshness-blocked for finalization", async () => {
+  const fixtureState = await fixture();
+  try {
+    const firstFactory = fakeFactory([], async (_role, cwd) => {
+      await writeFile(join(cwd, "behind-timeout.txt"), "candidate\n");
+      await new Promise<void>(() => undefined);
+    });
+    await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, firstFactory, () => 0, []),
+    );
+    await writeFile(join(fixtureState.root, "main-after-timeout.txt"), "main\n");
+    await git(fixtureState.root, "add", "main-after-timeout.txt");
+    await git(fixtureState.root, "commit", "-qm", "advance main after timeout");
+    await git(fixtureState.root, "push", "-q", "origin", "main");
+
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, async () => { throw new Error("implementation worker must not relaunch"); }, () => 0, []),
+    );
+
+    assert.equal(report.attempts, 0);
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.candidate.behindOriginMain, true);
+    assert.equal(report.finalizationReady, false);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("dirty coordination root still blocks fresh bootstrap work without a canonical candidate", async () => {
+  const fixtureState = await fixture();
+  try {
+    await writeFile(join(fixtureState.root, "operator-root-note.txt"), "leave me alone\n");
+    const commands: string[] = [];
+    await assert.rejects(
+      runBootstrap(
+        { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+        dependenciesFor(fixtureState.root, fakeFactory([], async () => undefined), () => 0, commands),
+      ),
+      /coordination checkout is dirty/,
+    );
+    assert.ok(!commands.some((command) => command.includes("fetch origin main")));
+    assert.equal(await readFile(join(fixtureState.root, "operator-root-note.txt"), "utf8"), "leave me alone\n");
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
+test("dirty coordination root does not block resume of preserved timed-out candidate", async () => {
+  const fixtureState = await fixture();
+  try {
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const firstFactory = fakeFactory(sessions, async (_role, cwd) => {
+      await writeFile(join(cwd, "dirty-root-resume.txt"), "candidate\n");
+      await new Promise<void>(() => undefined);
+    });
+    await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 10 },
+      dependenciesFor(fixtureState.root, firstFactory, () => 0, []),
+    );
+    await writeFile(join(fixtureState.root, "operator-root-note.txt"), "leave me alone\n");
+
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, async () => { throw new Error("implementation worker must not relaunch"); }, () => 0, []),
+    );
+
+    assert.equal(report.attempts, 0);
+    assert.equal(report.implementationOutcome, "implemented");
+    assert.equal(report.finalizationReady, true);
+    assert.equal(await readFile(join(fixtureState.root, "operator-root-note.txt"), "utf8"), "leave me alone\n");
+    assert.match(await git(fixtureState.root, "status", "--porcelain"), /operator-root-note\.txt/);
+    assert.equal(sessions.length, 1);
   } finally {
     await fixtureState.cleanup();
   }

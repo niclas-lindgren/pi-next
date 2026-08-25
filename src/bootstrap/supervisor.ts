@@ -26,7 +26,7 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   emitProgress(reporter, { issueNumber: options.issueNumber, phase: "preflight", state: "start" });
   let repository: RepositoryState;
   try {
-    repository = await prepareRepository(cwd, runner);
+    repository = await prepareRepository(cwd, runner, { issueNumber: options.issueNumber });
     emitProgress(reporter, { issueNumber: options.issueNumber, phase: "preflight", state: "pass" });
   } catch (error) {
     emitProgress(reporter, { issueNumber: options.issueNumber, phase: "preflight", state: "fail" });
@@ -131,11 +131,14 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   }
   let checks = await runChecks(worktree.path, runner, timeoutMs, options.issueNumber, reporter, heartbeatMs, options.signal);
   const latestImplementationWorker = retryWorker ?? initialWorker;
-  const implementationCompleted = options.verifyOnly || resumeExistingCandidate || latestImplementationWorker?.disposition === "completed";
+  const workerProtocolCompleted = options.verifyOnly || resumeExistingCandidate || latestImplementationWorker?.disposition === "completed";
+  const operatorCancelled = !options.verifyOnly && !resumeExistingCandidate && (options.signal?.aborted === true || latestImplementationWorker?.disposition === "cancelled");
+  const repairCandidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
+  const repairCandidateHasDelta = hasCandidateDelta(repairCandidate);
+  const timedOutCandidateRecoverable = latestImplementationWorker?.disposition === "timed_out" && repairCandidateHasDelta && !operatorCancelled;
+  const implementationEvidenceSupportsVerification = workerProtocolCompleted || timedOutCandidateRecoverable;
   let repairOutcome: BootstrapReport["repairOutcome"] = checks.every((check) => check.passed) ? "not-needed" : options.allowRepair ? "ineligible" : "disabled";
-  if (!checks.every((check) => check.passed) && options.allowRepair && implementationCompleted) {
-    const repairCandidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
-    const repairCandidateHasDelta = repairCandidate.changedFiles.length > 0 || repairCandidate.committedChanges || repairCandidate.uncommittedChanges;
+  if (!checks.every((check) => check.passed) && options.allowRepair && implementationEvidenceSupportsVerification) {
     const evidence = failureEvidence(checks);
     if (repairCandidateHasDelta && evidence) {
       const currentCandidateEvidence = await candidateEvidence(worktree.path, repository.baselineRevision, repairCandidate.headRevision, runner);
@@ -149,21 +152,24 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   const candidate = await readCandidateState(worktree.path, repository.baselineRevision, runner);
   const candidateHasDelta = hasCandidateDelta(candidate);
   let reviewer: WorkerReport | undefined;
-  if (options.review && candidateHasDelta && implementationCompleted && checks.every((check) => check.passed)) {
+  const mechanicalPass = checks.length === CHECKS.length && checks.every((check) => check.passed);
+  const candidateRecoveryAllowed = !operatorCancelled && (workerProtocolCompleted || (latestImplementationWorker?.disposition === "timed_out" && candidateHasDelta));
+  if (options.review && candidateHasDelta && candidateRecoveryAllowed && mechanicalPass) {
     const reviewEvidence = await candidateEvidence(worktree.path, repository.baselineRevision, candidate.headRevision, runner);
     const reviewPrompt = buildWorkerPrompt(issue, worktree.path, contextFiles, "review", undefined, reviewEvidence);
     reviewer = await runWorker(await getFactory(), "review", reviewPrompt, worktree.path, timeoutMs, workerAttempts, options.issueNumber, reporter, heartbeatMs, options.signal);
   }
 
-  const mechanicalPass = checks.length === CHECKS.length && checks.every((check) => check.passed);
   const reviewerResult = reviewer?.reviewResult;
   const reviewPass = options.review ? candidateHasDelta ? reviewer?.disposition === "completed" && reviewPassed(reviewerResult) : undefined : undefined;
   const closedByAuthority = issue.state === "CLOSED";
   const noChangeReason = !candidateHasDelta && mechanicalPass ? closedByAuthority ? "authoritative issue state is CLOSED; no candidate changes were produced" : "no candidate changes were produced and satisfaction was not mechanically proven" : undefined;
-  const implementationOutcome: BootstrapReport["implementationOutcome"] = !implementationCompleted ? "failed" : candidateHasDelta ? "implemented" : implementationRetryBudgetExhausted ? "retry-exhausted" : mechanicalPass ? closedByAuthority ? "already-satisfied" : "unproven-no-change" : "failed";
+  const candidateImplemented = candidateHasDelta && mechanicalPass && candidateRecoveryAllowed;
+  const implementationOutcome: BootstrapReport["implementationOutcome"] = candidateImplemented ? "implemented" : !workerProtocolCompleted ? "failed" : implementationRetryBudgetExhausted ? "retry-exhausted" : mechanicalPass ? closedByAuthority ? "already-satisfied" : "unproven-no-change" : "failed";
   const finalizationReady = implementationOutcome === "implemented" && mechanicalPass && !candidate.behindOriginMain && (options.review ? reviewPass === true : true);
-  const disposition: Disposition = !implementationCompleted ? "blocked" : !mechanicalPass ? "repairable-failure" : !candidateHasDelta ? closedByAuthority ? "already-satisfied" : "no-change" : options.review && reviewPass !== true ? "blocked" : "pass";
-  const reason = disposition === "pass" || disposition === "already-satisfied" ? undefined : (implementationRetryBudgetExhausted ? "implementation retry budget exhausted after repeated zero-delta completed attempts" : noChangeReason) ?? (reviewer && reviewPass !== true ? "independent review did not return a passing structured verdict" : latestImplementationWorker?.reason ?? (failureEvidence(checks) || "worker did not complete deterministic verification"));
+  const disposition: Disposition = operatorCancelled || (!workerProtocolCompleted && !candidateRecoveryAllowed) ? "blocked" : !mechanicalPass ? "repairable-failure" : !candidateHasDelta ? closedByAuthority ? "already-satisfied" : "no-change" : options.review && reviewPass !== true ? "blocked" : "pass";
+  const verificationFailureReason = failureEvidence(checks);
+  const reason = disposition === "pass" || disposition === "already-satisfied" ? undefined : (implementationRetryBudgetExhausted ? "implementation retry budget exhausted after repeated zero-delta completed attempts" : noChangeReason) ?? (reviewer && reviewPass !== true ? "independent review did not return a passing structured verdict" : !mechanicalPass ? verificationFailureReason ?? latestImplementationWorker?.reason ?? "worker did not complete deterministic verification" : latestImplementationWorker?.reason ?? "worker did not complete deterministic verification");
   const report: BootstrapReport = {
     issueNumber: options.issueNumber,
     attempts: workerAttempts.length,
@@ -182,7 +188,7 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     reviewerResult,
     mechanicalPass,
     reviewPass,
-    candidateReadyForReview: mechanicalPass && candidateHasDelta,
+    candidateReadyForReview: mechanicalPass && candidateHasDelta && candidateRecoveryAllowed,
     finalizationReady,
     implementationOutcome,
     implementationAttemptCount: workerAttempts.filter((attempt) => attempt.role === "implementation" || attempt.role === "implementation-retry").length,

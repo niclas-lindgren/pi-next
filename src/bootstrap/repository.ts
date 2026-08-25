@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 import { BootstrapError } from "./errors.js";
 import { CommandRunner, RepositoryState, WorktreeEntry } from "./types.js";
 import { assertCommand, git, gitOptional, isDirectory } from "./git-utils.js";
+import { readCandidateState } from "./candidate.js";
+import { candidateHasDelta } from "./zero-delta-retry-policy.js";
 
 function parseWorktrees(text: string): WorktreeEntry[] {
   const entries: WorktreeEntry[] = [];
@@ -19,15 +21,41 @@ function parseWorktrees(text: string): WorktreeEntry[] {
   return entries;
 }
 
-export async function prepareRepository(cwd: string, runner: CommandRunner): Promise<RepositoryState> {
+async function baselineForDirtyResumeInspection(root: string, runner: CommandRunner): Promise<string> {
+  const originMain = await gitOptional(root, ["rev-parse", "--verify", "refs/remotes/origin/main^{commit}"], runner);
+  if (originMain.exitCode === 0 && originMain.stdout.trim()) return originMain.stdout.trim();
+  return git(root, ["rev-parse", "HEAD"], runner);
+}
+
+async function hasExistingCanonicalCandidate(
+  root: string,
+  issueNumber: number,
+  baselineRevision: string,
+  runner: CommandRunner,
+): Promise<boolean> {
+  const branch = `agent/issue-${issueNumber}`;
+  const path = resolve(root, ".worktrees", `issue-${issueNumber}`);
+  const entries = parseWorktrees(await git(root, ["worktree", "list", "--porcelain"], runner));
+  const registered = entries.find((entry) => resolve(entry.path) === path);
+  if (!registered || registered.branch !== branch) return false;
+  const state = await readCandidateState(path, baselineRevision, runner);
+  return candidateHasDelta(state);
+}
+
+export async function prepareRepository(cwd: string, runner: CommandRunner, options: { issueNumber?: number } = {}): Promise<RepositoryState> {
   const root = await git(cwd, ["rev-parse", "--show-toplevel"], runner);
   const branch = await git(root, ["branch", "--show-current"], runner);
   if (branch !== "main") throw new BootstrapError(`coordination checkout must be on main, found ${branch || "detached HEAD"}`);
-  if ((await git(root, ["status", "--porcelain"], runner)) !== "") {
-    throw new BootstrapError("coordination checkout is dirty; preserving it and refusing to start");
-  }
   if (resolve(cwd).includes(`${resolve(root)}/.worktrees/`)) {
     throw new BootstrapError("bootstrap must be started from the coordination checkout, not an issue worktree");
+  }
+  const rootStatus = await git(root, ["status", "--porcelain"], runner);
+  if (rootStatus !== "") {
+    const mayResumeCanonicalCandidate = options.issueNumber !== undefined
+      && await hasExistingCanonicalCandidate(root, options.issueNumber, await baselineForDirtyResumeInspection(root, runner), runner);
+    if (!mayResumeCanonicalCandidate) {
+      throw new BootstrapError("coordination checkout is dirty; preserving it and refusing to start");
+    }
   }
   const fetched = await runner("git", ["-C", root, "fetch", "origin", "main", "--quiet"], { cwd: root });
   assertCommand(fetched, "fetch origin main");

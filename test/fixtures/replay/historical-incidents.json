@@ -251,6 +251,23 @@
     },
     {
       "version": 1,
+      "name": "historical: bootstrap worker timeout left verified dirty candidate",
+      "provenance": "Normalized from the 2026-08-25 bootstrap #160 run where a 30-minute implementation timeout left tracked and untracked candidate work and required checks passed.",
+      "invariant": "A substantive candidate delta plus deterministic verification may advance after a worker timeout; recovery must not relaunch implementation merely to obtain a completed assistant message.",
+      "runId": "hist-2026-08-25-issue-160-timeout-verified-candidate",
+      "issueNumber": 160,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "bootstrap" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-160", "branch": "agent/issue-160", "headSha": "ffc076fe51757af5bb4423b1ea74af0fb089eabf" } },
+        { "event": "worker_started", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation" } },
+        { "event": "worker_finished", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation", "ok": false, "code": null, "signal": "timeout", "telemetryStatus": "timed_out", "summary": "candidate delta preserved; assistant terminal completion absent" } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "1601601601601601601601601601601601601600", "summary": "npm run typecheck and npm test passed against the preserved dirty candidate" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "authorityOpen": true },
+      "expect": { "nextAction": "promote_candidate", "mustNotRepeat": ["start_worker", "run_worker", "verify_candidate"] }
+    },
+    {
+      "version": 1,
       "name": "historical: dirty baseline branch was mistaken for integrated candidate",
       "provenance": "Normalized from issue #157: origin/main advanced while the canonical issue worktree held dirty tracked and untracked candidate files on the old baseline HEAD.",
       "invariant": "Dirty canonical candidate state takes precedence over raw HEAD ancestry; closure and cleanup cannot run while the exact dirty candidate is not the integrated SHA/tree.",
