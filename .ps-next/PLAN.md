@@ -1,0 +1,52 @@
+# Plan: Converge auto/loop onto the shared lifecycle scheduler (#166, #165)
+**Goal:** Fresh /pi-next auto's status/footer become a faithful typed projection of the shared lifecycle scheduler (idle/completed/budget-yield/blocked instead of a collapsed 'stopped'), and /pi-next-loop stop/cancel/resume route through runProductionLifecycleScheduler/runLifecycleScheduler/runSingleIssueLifecycle via a durable AbortSignal-based cancellation contract instead of the legacy ForegroundSupervisor/loop-controller.ts, which are deleted once no longer needed.
+**Created:** 2026-08-25
+**Intent:** Issue #146 unified fresh execution onto the shared lifecycle kernel, but the status projection and operator control (stop/resume) paths were left on the legacy loop model, producing collapsed status output and a stop command that cannot reach a running fresh scheduler; #166 and #165 close that gap.
+**Baseline:** e1890b8c3026e2b329e3b8b675c4f84bd1155b91
+
+## Tasks
+- [x] Extended LoopStatus and LoopPresentationState unions with 'budget-yield' and changed production-lifecycle.ts's finalState.status assignment to directly use the scheduler's typed result.disposition instead of collapsing everything but 'blocked' into 'stopped'. — 2026-08-25
+  - Files: extensions/pi-next/loop-state.ts, extensions/pi-next/production-lifecycle.ts
+  - Approach: Extend the LoopStatus union (loop-state.ts:50) to cover the true set of terminal dispositions if needed, and change production-lifecycle.ts's finalState status assignment (~line 275, currently `result.disposition === "blocked" ? "blocked" : "stopped"`) to map result.disposition to its real typed status (idle/completed/budget-yield/blocked/cancelled/failed) instead of collapsing everything else into "stopped".
+- [ ] Propagate typed disposition through footer/status presentation (issue #166)
+  - Files: extensions/pi-next/loop-status.ts, extensions/pi-next/auto-progress.ts
+  - Approach: Update LoopPresentationState derivation and auto-progress.ts's status switch (line ~44, `case "stopped": return "stopped";`) to render each distinct disposition rather than collapsing to "stopped"; clear active-issue/worker-live fields once an issue reaches terminal state while retaining a bounded latest-result summary, per issue #166 requirement 4.
+- [ ] Harden footer heartbeat to always resolve the live run (issue #166)
+  - Files: extensions/pi-next/loop-status.ts, extensions/pi-next/loop.ts
+  - Approach: Audit listLoopStates/current-run selection in loop-status.ts for staleness now that status values are corrected, ensuring the footer heartbeat picks the live run from durable evidence (authoritativeRunId / authority-backed lease read) rather than only matching on status === "running", so the Campsty #647/#640 contradiction guard still holds for the new terminal states.
+- [ ] Add durable stop/cancellation contract with AbortController wiring (issue #165)
+  - Files: extensions/pi-next/loop.ts, extensions/pi-next/production-lifecycle.ts
+  - Approach: In loop.ts, construct an AbortController per fresh scheduler run and register it (in-memory, keyed by runId, via the existing live-ctx.ts binding or a small module-level registry) so /pi-next-loop stop calls .abort() on the in-process controller for the running scheduler and passes controller.signal into runProductionLifecycleScheduler's already-threaded signal option, instead of only writing stopRequested to the persisted LoopState file.
+- [ ] Enforce stop-intent checks at scheduler boundaries (issue #165)
+  - Files: src/lifecycle/scheduler.ts
+  - Approach: Add signal.aborted checks in runLifecycleScheduler before selection, before claim, and between issue iterations, returning a typed early-exit result (e.g. disposition "cancelled") on abort, without touching kernel.ts's claim/authority/verification/finalization internals (issue #146 boundary).
+- [ ] Route resume through shared scheduler or reject legacy state (issue #165)
+  - Files: extensions/pi-next/loop.ts, extensions/pi-next/loop-state.ts
+  - Approach: In loop.ts's resume handler (~line 1254), inspect the persisted LoopState's shape/version; if it was produced by the unified scheduler, call runProductionLifecycleScheduler/runSingleIssueLifecycle with a fresh AbortController instead of `new ForegroundSupervisor(...).launch(resumed)` (line 1297); if it is legacy pre-migration state, reject explicitly with an actionable migration-guidance error instead of launching ForegroundSupervisor.
+- [ ] Delete ForegroundSupervisor and loop-controller.ts legacy state machine (issue #165)
+  - Files: extensions/pi-next/foreground-supervisor.ts, extensions/pi-next/loop-controller.ts, extensions/pi-next/loop.ts, test/workflow-state-preflight.test.ts, test/abandoned-recovery.test.ts, test/host-retention.test.ts, test/auto-status.test.ts, test/host-memory.test.ts, test/plan-recovery-controller.test.ts, test/lifecycle-scenarios.test.ts, test/convergence-persistence.test.ts, test/worker-failure.test.ts, test/worker-recovery.test.ts
+  - Approach: Once no supported resume/stop/cancel path depends on ForegroundSupervisor or loop-controller.ts, remove both files and their imports/re-exports from loop.ts, then re-audit each listed test file individually — delete tests exclusively covering the removed code, keep/adapt any assertions covering still-needed shared behavior (do not delete a test file wholesale without verifying it has no independent coverage value).
+- [ ] Add deterministic zero-LLM regression tests for both issues
+  - Files: test/production-lifecycle.test.ts, test/loop-status.test.ts, test/auto-status.test.ts, test/auto-progress.test.ts
+  - Approach: Using the existing scripted-worker/fake-authority/disposable-git/deterministic-clock pattern, add cases for idle vs completed vs budget-yield vs blocked terminal reporting, stale-state rejection, restart-from-durable-evidence, stop-while-idle, stop-between-issues, stop-during-worker reaching the lifecycle AbortSignal, resume-through-scheduler without ForegroundSupervisor, and legacy-state rejected with actionable guidance.
+
+## Notes
+Do not change claim/authority/candidate/verification/finalization semantics owned by src/lifecycle/kernel.ts (issue #146). No parallel-issue-execution work (issue #152, out of scope). No new dashboard/UI - footer/status stays plain text via ctx.ui.setStatus. Candidate/worktree and authority invariants (leases, ownership CAS) must remain safe across every cancellation/stop boundary. A legacy persisted LoopState must be migrated mechanically or rejected explicitly with actionable guidance, never silently misinterpreted. All new behavior needs deterministic zero-LLM regression tests.
+
+## Acceptance Criteria
+- [ ] The status footer output contains distinct lifecycle states (idle, completed, budget-yield, blocked, cancelled, failed) instead of collapsing them all into "stopped".
+- [ ] Running /pi-next-loop stop against a live fresh scheduler run causes it to exit via the shared lifecycle scheduler's AbortSignal and report the exact boundary at which it stopped, not via ForegroundSupervisor.
+- [ ] Running /pi-next-loop resume on unified-scheduler-produced state calls runProductionLifecycleScheduler or runSingleIssueLifecycle and does not re-enter ForegroundSupervisor; resume on unsupported legacy state fails with an explicit, actionable migration error instead of silently launching ForegroundSupervisor.
+- [ ] After the migration, extensions/pi-next/foreground-supervisor.ts and loop-controller.ts's duplicate state machine are removed, and the codebase contains no remaining references to ForegroundSupervisor outside a bounded, explicitly rejected legacy-state error path.
+- [ ] All new deterministic regression tests (scripted workers, fake authority, disposable git, deterministic clocks) pass, covering idle/completed/budget-yield/blocked reporting, stop/cancel boundaries, and legacy-state rejection, with zero LLM/model token consumption.
+
+## Log
+<!-- PS-next appends entries here after each task is executed -->
+<!-- Entry format: ### YYYY-MM-DD — [task name] / **Done:** / **Rationale:** / **Findings:** / **Files:** / **Commit:** -->
+
+### 2026-08-25 — Extended LoopStatus and LoopPresentationState unions with 'budget-yield' and changed production-lifecycle.ts's finalState.status assignment to directly use the scheduler's typed result.disposition instead of collapsing everything but 'blocked' into 'stopped'.
+**Rationale:** The scheduler's disposition type is exactly idle/completed/budget-yield/blocked, a strict subset of LoopStatus, so a direct assignment (status: result.disposition) is both simpler and fully typed; no need to invent unused 'cancelled' status since disposition never produces it.
+**Findings:** Also had to add 'budget-yield' to LoopPresentationState in loop-status.ts (footer/status projection), which tsc flagged as an unhandled case; typecheck and the relevant test suites (production-lifecycle, loop-status, consumer-smoke, incident-reporting: 22/22) pass.
+LESSONS: The status/footer projection (loop-status.ts LoopPresentationState) mirrors LoopStatus and must be kept in sync whenever the LoopStatus union changes, or tsc will fail with an unassignable-type error at the presentation assignment.
+**Files:** extensions/pi-next/loop-state.ts (+1/-0), extensions/pi-next/loop-status.ts (+1/-0), extensions/pi-next/production-lifecycle.ts (+1/-1)
+**Commit:** [pending — fill after commit]

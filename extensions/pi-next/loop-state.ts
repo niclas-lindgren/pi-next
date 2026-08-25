@@ -52,6 +52,7 @@ export type LoopStatus =
   | "completed"
   | "idle"
   | "blocked"
+  | "budget-yield"
   | "failed"
   | "stopped"
   | "interrupted";

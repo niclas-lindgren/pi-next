@@ -272,7 +272,7 @@ export async function runProductionLifecycleScheduler(
   const latest = result.latest;
   const finalState = {
     ...(JSON.parse(readFileSync(loopStateFile(options.cwd, runId), "utf8")) as LoopState),
-    status: result.disposition === "blocked" ? "blocked" as const : "stopped" as const,
+    status: result.disposition,
     remainingIssues: Math.max(0, requestedIssues - result.settled),
     completedIssues: result.results.filter((item) => item.disposition === "pass" || item.disposition === "already-satisfied").map((item) => item.issueNumber),
     deferredIssues: result.results.filter((item) => item.disposition !== "pass" && item.disposition !== "already-satisfied").map((item) => ({ issueNumber: item.issueNumber, reason: String(item.disposition), deferredAt: loopNow(), kind: "blocked" as const })),

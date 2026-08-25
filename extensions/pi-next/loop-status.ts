@@ -17,6 +17,7 @@ export type LoopPresentationState =
   | "completed"
   | "idle"
   | "blocked"
+  | "budget-yield"
   | "failed"
   | "stopped"
   | "interrupted";
