@@ -15,7 +15,6 @@ import {
   type AuthorityWorkItem,
   type IssueLease,
 } from "../src/coordination/index.ts";
-import type { WorkerTask } from "../src/coordination/worker-adapter.ts";
 import { classifyFailure } from "../extensions/pi-next/failure-scope.ts";
 import { containIssueLocalFailure } from "../extensions/pi-next/loop.ts";
 import {
@@ -23,11 +22,6 @@ import {
   type LoopState,
 } from "../extensions/pi-next/loop-state.ts";
 import { PlanAuthorityError } from "../extensions/pi-next/util-core.ts";
-import type {
-  IssueWorkerOptions,
-  IssueWorkerResult,
-  IssueWorkerRunner,
-} from "../extensions/pi-next/util-core.ts";
 import {
   runLifecycleScenario,
   type LifecycleScenarioContext,
@@ -110,28 +104,6 @@ async function candidateCommit(
     `feat: candidate for #${issueNumber}`,
   );
   return { path: worktree.path, sha };
-}
-
-function scriptedRunner(
-  context: LifecycleScenarioContext,
-): IssueWorkerRunner {
-  return async (cwd: string, prompt: string, options: IssueWorkerOptions = {}) => {
-    const controller = options.signal ? undefined : new AbortController();
-    const task: WorkerTask = {
-      cwd,
-      prompt,
-      issueNumber: options.issueNumber,
-      runId: options.runId,
-      phase: options.phase,
-      dispatch: options.dispatch,
-      coordinationCwd: options.coordinationCwd,
-      readOnly: options.readOnly,
-    };
-    return context.worker.run(
-      task,
-      options.signal ?? controller!.signal,
-    ) as Promise<IssueWorkerResult>;
-  };
 }
 
 test("scenario 1: two owners race for one issue and exactly one wins", async () => {

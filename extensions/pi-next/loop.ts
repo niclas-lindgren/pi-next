@@ -5,24 +5,20 @@ import type {
 import { readFileSync, unlinkSync } from "node:fs";
 import { relative } from "node:path";
 
-import { trackCrashLoggerCwd } from "./crash-log.ts";
 import {
   reconcileWorkspacePlan,
   validateCanonicalExecutionState,
   validateWorkspacePlan,
 } from "./execution-boundary.ts";
 import { commitExplicitPaths } from "./commit-safety.ts";
-import { cleanupCompletedIssueWorktree } from "./main-refresh.ts";
 import {
   CandidateDiscoveryError,
   candidateShortlist,
 } from "./issue-candidates.ts";
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
 import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
-import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
 import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import {
-  classifyFailure,
   IssueHandoffError,
   type FailureClassification,
 } from "./failure-scope.ts";
@@ -36,15 +32,12 @@ import {
   releaseIssueLease,
   reconcileIssueLeaseForResume,
   parseLeaseFromAuthority,
-  startIssueLeaseHeartbeat,
 } from "./issue-leases.ts";
 import {
-  emptyLoopMetrics,
   loopNow,
   listLoopStates,
   loopStateFile,
   markIssueDisposition,
-  MAX_STEPS,
   parseLoopLimit,
   readLoopState,
   type LoopState,
@@ -62,15 +55,7 @@ import {
   relativeWorkflowPaths,
 } from "./plan-write.ts";
 import { workflowArtifacts } from "./plan-read.ts";
-import type { IssueWorkerRunner } from "./util-core.ts";
-import {
-  PiWorkerAdapter,
-  issueWorkerRunnerFromAdapter,
-  type PiWorkerCompatibleAdapter,
-} from "./pi-worker-adapter.ts";
-import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
-import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
 import { bindLiveAutoRun, getLiveCtx, getLiveCtxForRun, sessionIdentity } from "./live-ctx.ts";
 import { renderLoopStatus, type IdentityMismatchDetails } from "./loop-status.ts";
 import {
@@ -82,12 +67,10 @@ import { commitIncidentDiagnosticsBeforeFinalization } from "../../src/coordinat
 import { runCommand } from "../../src/bootstrap/command-runner.ts";
 import { issueLeaseMatchesOwner } from "./issue-authority.ts";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
-import { createWorkAuthority } from "../../src/coordination/work-authority.ts";
 import {
   preflightWorkflowStateProvider,
   WorkflowStateProviderError,
 } from "./workflow-state-provider.ts";
-import { publishSelfAssessmentFindings, refreshFindingApprovals } from "./self-assessment.ts";
 import { runProductionLifecycleScheduler } from "./production-lifecycle.ts";
 import { abortRun, registerRunAbortController } from "./run-cancellation.ts";
 
@@ -235,13 +218,6 @@ export function replacementWorkerContext(issueNumber?: number, runId?: string): 
     );
   }
   return live;
-}
-
-function workerActivityText(event: WorkerWorkLogEvent): string {
-  const issue = event.issueNumber ? `#${event.issueNumber}` : "#?";
-  const run = event.runId ? ` · ${event.runId.slice(0, 12)}` : "";
-  const paths = event.relatedPaths?.length ? ` · ${event.relatedPaths.join(", ")}` : "";
-  return `pi-next ${issue}${run} · ${event.phase} · ${event.kind} · ${event.summary}${paths}`;
 }
 
 /**

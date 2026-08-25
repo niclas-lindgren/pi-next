@@ -5,14 +5,14 @@ import type {
 import { existsSync } from "node:fs";
 
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
-import { createWorkAuthority, type AuthorityWorkItem } from "../../src/coordination/work-authority.ts";
+import { createWorkAuthority } from "../../src/coordination/work-authority.ts";
 import { isIssueLeaseFresh } from "./issue-authority.ts";
 import { findingPublicationEligible, type SelfAssessmentFinding } from "../../src/coordination/self-assessment.ts";
 import { sanitizeFeedbackText } from "../../src/coordination/feedback.ts";
 import { readHealthState, readSelfAssessmentFindings } from "./self-assessment.ts";
 import { trackCrashLoggerCwd } from "./crash-log.ts";
 import { sessionIdentity } from "./live-ctx.ts";
-import { reportRuntimeFailure, reportWorkerToolFailures } from "./feedback-runtime.ts";
+import { reportRuntimeFailure } from "./feedback-runtime.ts";
 import { LocalIssueLeaseAuthority } from "./local-lease.ts";
 import {
   CandidateDiscoveryError,
@@ -27,9 +27,6 @@ import {
   currentSupervisorStatus,
   formatSupervisorStatus,
 } from "./supervisor-status.ts";
-import {
-  cleanupCompletedIssueWorktree,
-} from "./main-refresh.ts";
 import {
   GitHubIssueLeaseAuthority,
   claimIssueLease,
@@ -51,7 +48,6 @@ import {
   quarantineInheritedArtifacts,
   quarantineLegacyRootArtifacts,
   registerPiNextLoopCommand,
-  removeCompletedWorkflowArtifacts,
   runPiNextLoop,
   MAX_ISSUES,
 } from "./loop.ts";
@@ -62,22 +58,16 @@ import {
   guardedHostCall,
   markerFile,
   PlanAuthorityError,
-  planFile,
   resolvePlanIdentity,
   safeNotify,
 } from "./util.ts";
 import {
-  runIssueWorker,
-  type IssueWorkerOptions,
   type IssueWorkerRunner,
 } from "./util-core.ts";
-import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, appendWorkerWorkLog, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay } from "./worker-display.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
-import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
 import { readLastIncidentBundle, reportIncidentBundle } from "../../src/coordination/incident-reporting.ts";
-import { createWorkerFailureEvidence, WorkerFailureError } from "./worker-failure.ts";
 import {
   formatWorkflowState,
   preflightWorkflowStateProvider,
@@ -253,56 +243,6 @@ interface ClaimedIssueWorkspace {
   leaseAuthority: IssueLeaseAuthority;
   claimedLease: IssueLease;
   executionCwd: string;
-}
-
-async function executeIssueWorker(
-  cwd: string,
-  prompt: string,
-  runner: IssueWorkerRunner = runIssueWorker,
-  onProgress?: (elapsedMs: number) => void,
-  observer?: Pick<IssueWorkerOptions, "issueNumber" | "runId" | "phase" | "dispatch" | "onActivity" | "onWorkerState" | "display">,
-): Promise<void> {
-  const generation = currentGeneration();
-  const task = runner(cwd, prompt, {
-    signal: generation?.signal,
-    onProgress,
-    ...observer,
-  });
-  const result = generation
-    ? await generation.track(task, { kind: "subprocess" })
-    : await task;
-  await reportWorkerToolFailures(cwd, result.telemetry.toolFailures, result.telemetry.recoveredToolFailureFingerprints);
-  if (!result.ok) {
-    const evidence = result.failure ?? createWorkerFailureEvidence(
-      { output: result.output, code: result.code, signal: result.signal },
-      {
-        issueNumber: observer?.issueNumber,
-        runId: observer?.runId,
-        phase: observer?.phase,
-        dispatch: observer?.dispatch,
-      },
-    );
-    const feedback = await reportRuntimeFailure(cwd, {
-      stage: observer?.phase || "worker",
-      category: evidence.category,
-      severity: evidence.severity,
-      outcome: "failed",
-      code: evidence.code,
-      summary: evidence.summary,
-      error: evidence.diagnosticExcerpt,
-      issueNumber: evidence.issueNumber,
-      runId: evidence.runId,
-      diagnosticRefs: evidence.diagnosticRefs,
-      diagnostic: {
-        phase: evidence.phase,
-        role: evidence.role,
-        model: evidence.modelPolicy?.model,
-        exitCode: evidence.exitCode,
-        signal: evidence.signal,
-      },
-    });
-    throw new WorkerFailureError(evidence, feedback);
-  }
 }
 
 /**
