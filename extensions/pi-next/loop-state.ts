@@ -214,6 +214,13 @@ export interface LoopState {
   planRepair?: PlanRepairState;
   /** Last payload-free parent-host memory boundary; restart_required preserves ownership for recovery. */
   hostMemory?: HostMemoryState;
+  /**
+   * Set once an automatic abandoned-run recovery attempt finds this state
+   * terminal but not explicitly recoverable. Excludes it from future
+   * `recoverableAbandonedAutoRun` candidacy so a doomed recovery attempt
+   * (and its warning) is not repeated on every later `auto` invocation.
+   */
+  autoResumeBlockedAt?: string;
 }
 
 export interface LoopResult {
