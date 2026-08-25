@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildWorkerPrompt } from "../src/bootstrap/task-packet.ts";
+import { buildWorkerPrompt, loadContextFiles } from "../src/bootstrap/task-packet.ts";
 import type { Issue } from "../src/bootstrap/types.ts";
 
 const issue: Issue = { number: 82, title: "Context", body: "Do the task", comments: [] };
@@ -19,6 +22,34 @@ Keep safety instructions.
 
 Run relevant tests.
 `;
+
+test("loadContextFiles does not require pi-next-only reliability docs in other repositories", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-next-context-"));
+  try {
+    await writeFile(join(root, "AGENTS.md"), "# External project\nNo pi-next reliability docs here.\n");
+
+    const files = await loadContextFiles(root, issue);
+
+    assert.deepEqual(files.map((file) => file.path), ["AGENTS.md"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loadContextFiles still fails for explicitly referenced missing repository docs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-next-context-"));
+  try {
+    await writeFile(join(root, "AGENTS.md"), "# External project\nRead docs/MISSING_GUIDE.md before coding.\n");
+    await mkdir(join(root, "docs"));
+
+    await assert.rejects(
+      () => loadContextFiles(root, issue),
+      /referenced repository document is missing: docs\/MISSING_GUIDE\.md/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("implementation worker packet omits duplicated kernel lifecycle loop from AGENTS", () => {
   const prompt = buildWorkerPrompt(issue, "/tmp/work", [{ path: "AGENTS.md", content: agents }], "implementation");
