@@ -135,8 +135,14 @@ function notifySafely(
 async function authoritativeStatusRun(
   cwd: string,
 ): Promise<{ authoritativeRunId?: string; authorityUnavailable: boolean }> {
+  // `activeLease` is only ever populated by the legacy loop-controller path
+  // (#165 migration); the unified scheduler (production-lifecycle.ts) claims
+  // per-issue leases through the shared kernel and never mirrors them onto
+  // the persisted LoopState. Requiring `activeLease` here would silently
+  // exclude every fresh-scheduler run from authoritative resolution, so the
+  // Campsty #647/#640 contradiction guard would never fire for them (#166).
   const candidates = listLoopStates(cwd)
-    .filter((state) => state.activeIssueNumber && state.activeLease)
+    .filter((state) => state.activeIssueNumber)
     .slice(0, 20);
   if (!candidates.length) return { authorityUnavailable: false };
   const authority = new GitHubIssueLeaseAuthority(cwd);
@@ -144,7 +150,20 @@ async function authoritativeStatusRun(
   for (const state of candidates) {
     try {
       const lease = await authority.read(state.activeIssueNumber!);
-      if (lease && issueLeaseMatchesOwner(lease, state.activeLease as IssueLease)) {
+      // A fresh-scheduler run never persisted its own lease identity locally,
+      // so its expected identity is reconstructed from the same convention
+      // `runProductionLifecycleScheduler`'s `claim` uses when it calls
+      // `claimIssueLease` (production-lifecycle.ts), instead of trusting a
+      // legacy `activeLease` field that run never wrote.
+      const expected: Pick<IssueLease, "issueNumber" | "agent" | "runId" | "sessionId"> = state.activeLease
+        ? (state.activeLease as IssueLease)
+        : {
+            issueNumber: state.activeIssueNumber!,
+            agent: "pi-next",
+            runId: `${state.runId}:issue-${state.activeIssueNumber}`,
+            sessionId: `${state.runId}-issue-${state.activeIssueNumber}`,
+          };
+      if (lease && issueLeaseMatchesOwner(lease, expected)) {
         return { authoritativeRunId: state.runId, authorityUnavailable: false };
       }
     } catch {
