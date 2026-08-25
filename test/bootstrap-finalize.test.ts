@@ -118,6 +118,15 @@ async function fastForwardIntegratedCandidate(root: string, remote: string, issu
   return { worktree, sha };
 }
 
+/**
+ * Simulates an unrelated commit landing on main concurrently with the
+ * caller's own work. Retries the push after re-fetching and rebasing onto
+ * the current tip: this scratch clone's view of origin/main can be a moment
+ * stale by the time it pushes (observed in CI, not locally - see #163),
+ * exactly the "someone else advanced main first" case this helper exists to
+ * simulate, so treat a rejected push as a signal to catch up rather than a
+ * test failure.
+ */
 async function pushUnrelatedMainCommit(root: string, remote: string, file: string, content = `${file}\n`): Promise<string> {
   const scratch = `${root}-scratch-${file.replace(/[^a-z0-9-]/gi, "-")}`;
   await exec("git", ["clone", "-q", remote, scratch]);
@@ -126,7 +135,16 @@ async function pushUnrelatedMainCommit(root: string, remote: string, file: strin
   await writeFile(join(scratch, file), content);
   await git(scratch, "add", file);
   await git(scratch, "commit", "-qm", `chore(release): ${file}`);
-  await git(scratch, "push", "-q", "origin", "HEAD:main");
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await git(scratch, "push", "-q", "origin", "HEAD:main");
+      break;
+    } catch (error) {
+      if (attempt === 4) throw error;
+      await git(scratch, "fetch", "-q", "origin", "main");
+      await git(scratch, "rebase", "-q", "origin/main");
+    }
+  }
   const sha = await git(scratch, "rev-parse", "HEAD");
   await rm(scratch, { recursive: true, force: true });
   await git(root, "fetch", "origin", "main", "--quiet");
