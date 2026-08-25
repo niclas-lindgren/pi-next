@@ -19,7 +19,8 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 async function freshPiHostProbe(cwd: string, env: NodeJS.ProcessEnv, revision: string): Promise<{ commands: Array<{ name: string; sourceInfo: { origin: string; source: string } }>; doctor: string; status: string }> {
-  const child = spawn(pi, ["--mode", "rpc", "--no-session", "--offline", "--approve"], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+  const childEnv = { ...env, PWD: cwd };
+  const child = spawn(pi, ["--mode", "rpc", "--no-session", "--offline", "--approve"], { cwd, env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
   let buffer = "";
   const events: Array<Record<string, unknown>> = [];
   let resolveEvent: ((event: Record<string, unknown>) => void) | undefined;
@@ -104,7 +105,7 @@ test("fresh consumer installs a pinned package and completes a disposable transi
     await exec("chmod", ["+x", sshStub]);
     process.env.GIT_SSH_COMMAND = sshStub;
     process.env.PI_NEXT_TEST_REMOTE = packageRemote;
-    const env = { ...process.env, HOME: home };
+    const env = { ...process.env, HOME: home, PWD: consumer };
     await mkdir(home, { recursive: true });
     const source = `git:git@127.0.0.1:repo/pi-next.git@${revision}`;
     await exec(pi, ["install", "-l", source, "--approve"], { cwd: consumer, env });
