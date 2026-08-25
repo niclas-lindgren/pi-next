@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { runCommand } from "./command-runner.js";
 import { WorkerFactory } from "./types.js";
 import { bounded, redact } from "./utils.js";
+import { forbiddenWorkerCommand } from "../coordination/forbidden-worker-command.js";
 
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -34,11 +35,6 @@ export function createBootstrapWorkerSettingsManager(sdk: any, cwd: string, agen
   const settingsManager = sdk.SettingsManager.create(cwd, agentDir);
   settingsManager.applyOverrides(bootstrapWorkerSettingsOverridesFromEnv(env));
   return settingsManager;
-}
-
-function forbiddenWorkerCommand(command: string): boolean {
-  return /(^|[;&|\n])\s*(?:sudo\s+)?(?:gh(?:\s|$)|git\s+(?:push|merge|reset|rebase|worktree|checkout|switch|update-ref)|git\s+branch\s+-[dD]|rm\s+-rf\s+\.git)/i.test(command)
-    || /\bgh\s+(?:issue|pr|api)\b/i.test(command);
 }
 
 function makeSafeBashTool(cwd: string, defineToolImpl: (definition: unknown) => unknown) {

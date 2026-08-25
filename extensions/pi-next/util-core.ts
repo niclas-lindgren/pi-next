@@ -254,7 +254,18 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
   }
   const isolatedExtensionArgs = options.executableArgs
     ? []
-    : ["--no-approve", "--no-extensions", "--extension", workerExtensionPath()];
+    : [
+        "--no-approve",
+        "--no-extensions",
+        "--extension",
+        workerExtensionPath(),
+        // Mutable production workers get the pi-next extension's sandboxed
+        // safe_bash tool (which enforces forbiddenWorkerCommand()) instead
+        // of Pi's unrestricted built-in bash, so authority/main-branch/gh
+        // operations can't bypass pi_next_git's request_promotion contract
+        // via a raw shell (#162). Read-only reviewers already get --no-tools.
+        ...(options.readOnly ? [] : ["--exclude-tools", "bash"]),
+      ];
   const dispatchArgs = options.dispatch?.modelPolicy?.model
     ? ["--model", options.dispatch.modelPolicy.model]
     : [];

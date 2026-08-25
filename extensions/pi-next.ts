@@ -6,6 +6,7 @@ import { registerContextPruning } from "./pi-next/context-pruning.ts";
 import { registerCheckTool } from "./pi-next/tools-check.ts";
 import { registerGitTool } from "./pi-next/tools-git.ts";
 import { registerInspectTool } from "./pi-next/tools-inspect.ts";
+import { registerSafeBashTool } from "./pi-next/tools-safe-bash.ts";
 import { registerUpdateTool } from "./pi-next/tools-update.ts";
 import { registerWorkerWorkLogRenderer } from "./pi-next/work-log.ts";
 
@@ -28,4 +29,5 @@ export default function piNextExtension(pi: ExtensionAPI) {
   registerWorkerWorkLogRenderer(pi);
   registerCheckTool(pi);
   registerGitTool(pi);
+  registerSafeBashTool(pi);
 }
