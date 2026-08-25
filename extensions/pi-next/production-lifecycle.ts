@@ -1,12 +1,21 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 
-import { runLifecycleScheduler, runSingleIssueLifecycle, type IssueLifecycleExecutor, type LifecycleReporter, type LifecycleSchedulerResult, type UnifiedLifecycleResult } from "../../src/lifecycle/index.ts";
+import { runLifecycleScheduler, runSingleIssueLifecycle, LifecycleSchedulerClaimConflict, type IssueLifecycleExecutor, type LifecycleReporter, type LifecycleSchedulerClaimHandle, type LifecycleSchedulerResult, type UnifiedLifecycleResult } from "../../src/lifecycle/index.ts";
 import type { BootstrapDependencies, BootstrapOptions, Issue } from "../../src/bootstrap/types.ts";
 import { loadPiNextConfig, type PiNextConfig } from "../../src/coordination/config.ts";
 import { createWorkAuthority, type AuthorityWorkItem, type WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 import { candidateShortlist } from "./issue-candidates.ts";
-import { GitHubIssueLeaseAuthority, type IssueLeaseAuthority } from "./issue-leases.ts";
+import {
+  GitHubIssueLeaseAuthority,
+  claimIssueLease,
+  startIssueLeaseHeartbeat,
+  releaseIssueLease,
+  LeaseConflictError,
+  ISSUE_LEASE_DURATION_MS,
+  type IssueLeaseAuthority,
+} from "./issue-leases.ts";
+import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { PiWorkerAdapter, issueWorkerRunnerFromAdapter, type PiWorkerCompatibleAdapter } from "./pi-worker-adapter.ts";
 import type { IssueWorkerRunner, IssueWorkerRuntime } from "./util-core.ts";
 import { loopNow, loopStateFile, emptyLoopMetrics, MAX_STEPS, type LoopState } from "./loop-state.ts";
@@ -171,6 +180,10 @@ export async function runProductionLifecycleScheduler(
     if (event.projection) updateProjectionState(options.cwd, runId, event.projection);
     options.reporter?.(event);
   };
+  // Fresh-owner races lost after selection are excluded for the rest of this
+  // scheduler run, mirroring the legacy loop's scheduler-skip bookkeeping
+  // (#146): a race is a local candidate skip, never a global stop.
+  const raceExcluded: number[] = [];
   const result = await runLifecycleScheduler({
     cwd: options.cwd,
     entry: options.entry,
@@ -188,8 +201,52 @@ export async function runProductionLifecycleScheduler(
         leaseAuthority,
         completedIssues: completed.filter((item) => item.disposition === "pass" || item.disposition === "already-satisfied").map((item) => item.issueNumber),
         deferredIssues: completed.filter((item) => item.disposition !== "pass" && item.disposition !== "already-satisfied").map((item) => item.issueNumber),
+        schedulerExcludedIssues: raceExcluded,
       });
       return shortlist.candidateIssueNumber ? { issueNumber: shortlist.candidateIssueNumber } : undefined;
+    },
+    // Selection above only reads leases as an optimization; absence there is
+    // never proof of ownership. This performs the actual CAS claim that
+    // explicit `/pi-next <issue>` already performs before entering the
+    // shared kernel, so auto/monitor share the identical ownership fence.
+    claim: async (selection) => {
+      const acquiredAt = new Date();
+      let lease;
+      try {
+        lease = await claimIssueLease(leaseAuthority, {
+          issueNumber: selection.issueNumber,
+          agent: "pi-next",
+          runId: `${runId}:issue-${selection.issueNumber}`,
+          sessionId: `${runId}-issue-${selection.issueNumber}`,
+          acquiredAt: acquiredAt.toISOString(),
+          expiresAt: new Date(acquiredAt.getTime() + ISSUE_LEASE_DURATION_MS).toISOString(),
+        }, acquiredAt, { cwd: options.cwd, recordEvent: recordLifecycleEvent });
+      } catch (error) {
+        if (error instanceof LeaseConflictError) throw new LifecycleSchedulerClaimConflict(selection, error);
+        throw error;
+      }
+      const heartbeat = startIssueLeaseHeartbeat(leaseAuthority, lease, { signal: options.signal });
+      const release: LifecycleSchedulerClaimHandle["release"] = async () => {
+        await heartbeat.stop();
+        try {
+          await releaseIssueLease(leaseAuthority, heartbeat.getLease(), { cwd: options.cwd, recordEvent: recordLifecycleEvent });
+        } catch (error) {
+          // A conflict here means a different fresh owner already recovered
+          // this lease (e.g. after a takeover); nothing to release.
+          if (!(error instanceof LeaseConflictError)) throw error;
+        }
+      };
+      return { release };
+    },
+    onClaimConflict: (selection) => {
+      raceExcluded.push(selection.issueNumber);
+      recordLifecycleEvent(options.cwd, {
+        event: "scheduler_skip",
+        issueNumber: selection.issueNumber,
+        runId,
+        outcome: "skip",
+        reasonCode: "fresh_owner",
+      });
     },
     requeryAuthority: async (lifecycleResult) => { await authority.get(String(lifecycleResult.issueNumber)); },
   }, {

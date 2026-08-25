@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -25,7 +25,7 @@ async function fixture() {
   await git(root, "config", "user.email", "finalize@example.invalid");
   await git(root, "config", "user.name", "Finalize Test");
   await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { typecheck: "true", test: "true" } }));
-  await writeFile(join(root, ".gitignore"), ".worktrees/\n");
+  await writeFile(join(root, ".gitignore"), ".worktrees/\n.pi-next/diagnostics/\n");
   await writeFile(join(root, "README.md"), "base\n");
   await git(root, "add", ".");
   await git(root, "commit", "-qm", "base");
@@ -848,12 +848,13 @@ test("finalizer local-main sync is idempotent when main is already current", asy
 // cleaning, stashing, resetting, fast-forwarding, or committing user-owned root
 // changes.
 
-test("incident diagnostics in the coordination root are committed before finalization", async () => {
+test("incident diagnostics in the coordination root are preserved locally without blocking finalization", async () => {
   const f = await fixture();
   try {
     await dirtyCandidate(f.root, 138);
     await mkdir(join(f.root, ".pi-next", "diagnostics", "incidents"), { recursive: true });
-    await writeFile(join(f.root, ".pi-next", "diagnostics", "incidents", "incident.json"), "{\"ok\":true}\n");
+    const incidentPath = join(f.root, ".pi-next", "diagnostics", "incidents", "incident.json");
+    await writeFile(incidentPath, "{\"ok\":true}\n");
     await writeFile(join(f.root, ".pi-next", "diagnostics", "incidents", "last.json"), "{\"ok\":true}\n");
     const authority = new InMemoryWorkAuthority([workItem(138)]);
     const lines: string[] = [];
@@ -861,9 +862,11 @@ test("incident diagnostics in the coordination root are committed before finaliz
     const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 138, authority, reporter: (line) => lines.push(line) });
 
     assert.equal(result.issueClosed, true);
-    assert.equal(await git(f.remote, "show", "main:.pi-next/diagnostics/incidents/incident.json"), "{\"ok\":true}");
-    assert.match(await git(f.root, "log", "--format=%s", "--grep=record finalization incident diagnostics", "origin/main"), /record finalization incident diagnostics/);
-    assert.ok(lines.some((line) => line.includes("committed incident diagnostics")));
+    assert.equal(await readFile(incidentPath, "utf8"), "{\"ok\":true}\n");
+    assert.equal(await git(f.root, "status", "--porcelain"), "");
+    await assert.rejects(git(f.remote, "show", "main:.pi-next/diagnostics/incidents/incident.json"));
+    assert.equal(await git(f.root, "log", "--format=%s", "--grep=record finalization incident diagnostics", "origin/main"), "");
+    assert.equal(lines.some((line) => line.includes("committed incident diagnostics")), false);
   } finally { await f.cleanup(); }
 });
 
