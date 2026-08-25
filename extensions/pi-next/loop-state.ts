@@ -45,7 +45,8 @@ export type LoopOutcome =
   | "yield_issue"
   | "blocked"
   | "idle"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export type LoopStatus =
   | "running"
@@ -55,7 +56,8 @@ export type LoopStatus =
   | "budget-yield"
   | "failed"
   | "stopped"
-  | "interrupted";
+  | "interrupted"
+  | "cancelled";
 
 export interface LoopUsage {
   input: number;

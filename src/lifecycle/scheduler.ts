@@ -61,7 +61,7 @@ export interface LifecycleSchedulerResult {
   entry: "auto" | "monitor";
   settled: number;
   results: UnifiedLifecycleResult[];
-  disposition: "idle" | "completed" | "budget-yield" | "blocked";
+  disposition: "idle" | "completed" | "budget-yield" | "blocked" | "cancelled";
   latest?: UnifiedLifecycleResult;
 }
 
@@ -75,6 +75,15 @@ function isIssueLocalContinuable(result: UnifiedLifecycleResult): boolean {
  * policy; it intentionally contains no worker, repair, verification,
  * recovery or finalization state machine.
  */
+function cancelled(
+  options: LifecycleSchedulerOptions,
+  entry: "auto" | "monitor",
+  results: UnifiedLifecycleResult[],
+  latest?: UnifiedLifecycleResult,
+): LifecycleSchedulerResult {
+  return { runId: options.runId, entry, settled: results.length, results, disposition: "cancelled", latest: latest ?? results.at(-1) };
+}
+
 export async function runLifecycleScheduler(
   options: LifecycleSchedulerOptions,
   dependencies: SingleIssueLifecycleDependencies = {},
@@ -84,10 +93,16 @@ export async function runLifecycleScheduler(
   const results: UnifiedLifecycleResult[] = [];
   const maxIssues = Math.max(0, Math.trunc(options.policy.maxIssues));
   while (results.length < maxIssues) {
+    // Before selection: never discover a fresh candidate once a stop has
+    // already been requested (issue #165).
+    if (options.signal?.aborted) return cancelled(options, entry, results);
     const selection = await options.discover(results);
     if (!selection) {
       return { runId: options.runId, entry, settled: results.length, results, disposition: results.length === 0 ? "idle" : "completed", latest: results.at(-1) };
     }
+    // Before claim: a selection made just before abort must not go on to
+    // claim ownership of an issue this run is no longer going to work.
+    if (options.signal?.aborted) return cancelled(options, entry, results);
     let claim: LifecycleSchedulerClaimHandle | undefined;
     if (options.claim) {
       try {
@@ -122,6 +137,11 @@ export async function runLifecycleScheduler(
         return { runId: options.runId, entry, settled: results.length, results, disposition: "blocked", latest: result };
       }
     }
+    // Between issue iterations: an abort that fired while this issue's
+    // lifecycle was in flight (the signal is also threaded through to the
+    // worker boundary inside runSingleIssueLifecycle/kernel.ts) must stop the
+    // run here rather than discovering and claiming another issue.
+    if (options.signal?.aborted) return cancelled(options, entry, results, result);
   }
   return { runId: options.runId, entry, settled: results.length, results, disposition: "budget-yield", latest: results.at(-1) };
 }

@@ -244,3 +244,88 @@ test("canonical projection prevents Campsty #647-style footer/worker contradicti
     assert.equal(events.some((event) => event.activeIssue === 640), false);
   } finally { await f.cleanup(); }
 });
+
+test("scheduler reports cancelled before selection when already aborted (#165)", async () => {
+  const f = await fixture();
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    const discovered: number[] = [];
+    const scheduler = await runLifecycleScheduler({
+      cwd: f.root,
+      runId: "queue-cancel-before-selection",
+      allowRepair: true,
+      review: false,
+      finalize: false,
+      policy: { maxIssues: 2 },
+      signal: controller.signal,
+      discover: async () => {
+        discovered.push(1);
+        return { issueNumber: 900 };
+      },
+    }, {}, async (options: { issueNumber: number }) => report(options.issueNumber));
+    assert.equal(scheduler.disposition, "cancelled");
+    assert.equal(scheduler.settled, 0);
+    assert.equal(discovered.length, 0, "an already-aborted run must never call discover");
+  } finally { await f.cleanup(); }
+});
+
+test("scheduler reports cancelled before claim when abort lands during selection (#165)", async () => {
+  const f = await fixture();
+  try {
+    const controller = new AbortController();
+    const claimed: number[] = [];
+    const scheduler = await runLifecycleScheduler({
+      cwd: f.root,
+      runId: "queue-cancel-before-claim",
+      allowRepair: true,
+      review: false,
+      finalize: false,
+      policy: { maxIssues: 2 },
+      signal: controller.signal,
+      discover: async () => {
+        // Selection itself resolves the abort, mirroring a stop request that
+        // lands while discovery is in flight.
+        controller.abort();
+        return { issueNumber: 901 };
+      },
+      claim: async (selection) => {
+        claimed.push(selection.issueNumber);
+        return { release: async () => {} };
+      },
+    }, {}, async (options: { issueNumber: number }) => report(options.issueNumber));
+    assert.equal(scheduler.disposition, "cancelled");
+    assert.equal(scheduler.settled, 0);
+    assert.deepEqual(claimed, [], "a selection made just before abort must never go on to claim");
+  } finally { await f.cleanup(); }
+});
+
+test("scheduler reports cancelled between issue iterations instead of discovering another candidate (#165)", async () => {
+  const f = await fixture();
+  try {
+    const controller = new AbortController();
+    const discovered: number[] = [];
+    const scheduler = await runLifecycleScheduler({
+      cwd: f.root,
+      runId: "queue-cancel-between-issues",
+      allowRepair: true,
+      review: false,
+      finalize: false,
+      policy: { maxIssues: 2 },
+      signal: controller.signal,
+      discover: async () => {
+        discovered.push(discovered.length);
+        return discovered.length === 1 ? { issueNumber: 902 } : undefined;
+      },
+    }, {}, async (options: { issueNumber: number }) => {
+      // Abort lands while this issue's own lifecycle/worker boundary is
+      // still in flight (the same signal is threaded through to it).
+      controller.abort();
+      return report(options.issueNumber);
+    });
+    assert.equal(scheduler.disposition, "cancelled");
+    assert.equal(scheduler.settled, 1);
+    assert.equal(scheduler.latest?.issueNumber, 902);
+    assert.equal(discovered.length, 1, "an abort observed after the first issue settles must not discover a second candidate");
+  } finally { await f.cleanup(); }
+});

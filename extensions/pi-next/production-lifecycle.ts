@@ -278,7 +278,15 @@ export async function runProductionLifecycleScheduler(
     deferredIssues: result.results.filter((item) => item.disposition !== "pass" && item.disposition !== "already-satisfied").map((item) => ({ issueNumber: item.issueNumber, reason: String(item.disposition), deferredAt: loopNow(), kind: "blocked" as const })),
     activeIssueNumber: latest?.issueNumber,
     updatedAt: loopNow(),
-    lastOutcome: result.disposition === "completed" ? "done" as const : result.disposition === "idle" ? "idle" as const : result.disposition === "budget-yield" ? "yield_issue" as const : "block_issue" as const,
+    lastOutcome: result.disposition === "completed"
+      ? "done" as const
+      : result.disposition === "idle"
+        ? "idle" as const
+        : result.disposition === "budget-yield"
+          ? "yield_issue" as const
+          : result.disposition === "cancelled"
+            ? "cancelled" as const
+            : "block_issue" as const,
     lastReason: `unified lifecycle scheduler ${result.disposition}${latest ? ` after #${latest.issueNumber} (${latest.disposition})` : ""}`,
   };
   writeJsonAtomic(loopStateFile(options.cwd, runId), finalState);

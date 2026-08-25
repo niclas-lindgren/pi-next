@@ -20,7 +20,8 @@ export type LoopPresentationState =
   | "budget-yield"
   | "failed"
   | "stopped"
-  | "interrupted";
+  | "interrupted"
+  | "cancelled";
 
 export interface LoopStatusRecord {
   state: LoopState;

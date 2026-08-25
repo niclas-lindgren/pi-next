@@ -49,6 +49,7 @@ function phaseLabel(
     case "failed": return "failed";
     case "stopped": return "stopped";
     case "interrupted": return "interrupted";
+    case "cancelled": return "cancelled";
     default: break;
   }
 
