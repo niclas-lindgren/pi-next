@@ -46,10 +46,54 @@ function nextVersion(current, bump) {
   return parts.join(".");
 }
 
+function incidentDiagnosticsPrefix() {
+  let diagnosticsPath = ".pi-next/diagnostics";
+  try {
+    const config = JSON.parse(readFileSync(join(root, ".pi-next", "config.json"), "utf8"));
+    if (typeof config?.workflow?.diagnosticsPath === "string") diagnosticsPath = config.workflow.diagnosticsPath;
+  } catch {
+    // No local override; the default diagnostics path stands.
+  }
+  return `${diagnosticsPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "")}/incidents/`;
+}
+
+/**
+ * Autonomous bootstrap/monitor runs can leave sanitized incident-diagnostic
+ * residue in the coordination root between release attempts (#145). Rather
+ * than hard-fail every release on this one well-understood, safe-to-absorb
+ * case, commit and push it exactly like the runtime's own
+ * commitIncidentDiagnosticsBeforeFinalization guard: only when every dirty
+ * path is under the incident-diagnostics prefix, on main, and local main is
+ * exactly origin/main. Any other dirty state still fails the check below.
+ */
+function absorbIncidentDiagnosticsResidue() {
+  const raw = git("status", "--porcelain=v1", "--untracked-files=all");
+  if (!raw) return;
+  const paths = raw.split("\n")
+    .map((line) => line.slice(3).split(" -> ").at(-1)?.replace(/^"|"$/g, ""))
+    .filter(Boolean);
+  if (!paths.length) return;
+  const prefix = incidentDiagnosticsPrefix();
+  if (paths.some((path) => !path.startsWith(prefix))) return;
+  try {
+    git("fetch", "origin", "main", "--quiet");
+    if (git("rev-parse", "HEAD") !== git("rev-parse", "refs/remotes/origin/main")) return;
+    git("add", "--", ...paths);
+    if (!git("diff", "--cached", "--name-only")) return;
+    git("commit", "-m", "chore(agent): record finalization incident diagnostics");
+    git("push", "origin", "HEAD:main");
+    console.log(`Absorbed incident-diagnostics-only residue before release: ${paths.join(", ")}`);
+  } catch (error) {
+    // Best-effort only; the clean-tree check below remains the source of truth.
+    console.warn(`Could not absorb incident-diagnostics residue automatically: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 try {
   if (git("rev-parse", "--abbrev-ref", "HEAD") !== "main") {
     throw new Error("releases must be prepared from the main branch");
   }
+  absorbIncidentDiagnosticsResidue();
   if (git("status", "--porcelain")) {
     throw new Error("working tree must be clean before releasing");
   }
