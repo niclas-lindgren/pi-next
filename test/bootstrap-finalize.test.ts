@@ -867,6 +867,35 @@ test("incident diagnostics in the coordination root are committed before finaliz
   } finally { await f.cleanup(); }
 });
 
+test("a modified (already-tracked) incident last.json is still committed even when it sorts first in git status", async () => {
+  // Regression: a tracked, modified-only file has a 2-character porcelain
+  // status code that itself starts with a space (" M path"). The shared
+  // git() helper's blanket .trim() on the whole multi-line status blob eats
+  // that leading space off only the first status line, corrupting exactly
+  // that path's parse and making it look like a non-incident change - which
+  // silently defeated this entire commit path whenever last.json was the
+  // only/first dirty entry.
+  const f = await fixture();
+  try {
+    await dirtyCandidate(f.root, 139);
+    await mkdir(join(f.root, ".pi-next", "diagnostics", "incidents"), { recursive: true });
+    await writeFile(join(f.root, ".pi-next", "diagnostics", "incidents", "last.json"), "{\"ok\":1}\n");
+    await git(f.root, "add", ".pi-next/diagnostics/incidents/last.json");
+    await git(f.root, "commit", "-qm", "seed tracked last.json");
+    await git(f.root, "push", "origin", "main");
+    // Now modify (not create) it: the ONLY dirty path, whose status line is
+    // " M .pi-next/diagnostics/incidents/last.json" - exactly the corrupted-
+    // first-line shape.
+    await writeFile(join(f.root, ".pi-next", "diagnostics", "incidents", "last.json"), "{\"ok\":2}\n");
+    const authority = new InMemoryWorkAuthority([workItem(139)]);
+
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 139, authority });
+
+    assert.equal(result.issueClosed, true);
+    assert.equal(await git(f.remote, "show", "main:.pi-next/diagnostics/incidents/last.json"), "{\"ok\":2}");
+  } finally { await f.cleanup(); }
+});
+
 test("dirty root checkout still refuses a not-yet-integrated finalize without touching local work", async () => {
   const f = await fixture();
   try {

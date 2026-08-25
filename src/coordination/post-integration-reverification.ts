@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { prepareDependencies } from "../bootstrap/dependencies.ts";
+import { CANONICAL_STATUS_ARGS, changedFilePathsFromStatus, parseGitStatus } from "../bootstrap/git-status.ts";
 import { loadPiNextConfig } from "./config.ts";
 import { finalizeIssue, type FinalizeInput, type FinalizeResult } from "./finalize.ts";
 import { issueLeaseMatchesOwner, isIssueLeaseFresh } from "./issue-authority.ts";
@@ -104,9 +105,17 @@ async function git(root: string, args: string[], runner: ReverificationCommandRu
   return result.stdout.trim();
 }
 
-function statusPath(line: string): string | undefined {
-  if (!line.trim()) return undefined;
-  return line.slice(3).split(" -> ").at(-1)?.replace(/^"|"$/g, "");
+/**
+ * Raw (untrimmed) stdout, for `git status --porcelain` output specifically.
+ * git()'s blanket `.trim()` eats the leading space off a " M path"-style
+ * first line (a 2-character status code that itself starts with a space),
+ * corrupting exactly that one path. Pair with parseGitStatus's own
+ * resilient two-pattern parse - not a second ad-hoc line parser here.
+ */
+async function gitRaw(root: string, args: string[], runner: ReverificationCommandRunner): Promise<string> {
+  const result = await runner("git", ["-C", root, ...args], { cwd: root });
+  if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`);
+  return result.stdout;
 }
 
 function incidentDiagnosticsPrefix(root: string): string {
@@ -120,8 +129,8 @@ export async function commitIncidentDiagnosticsBeforeFinalization(input: {
   runCommand: ReverificationCommandRunner;
   reporter?: (line: string) => void;
 }): Promise<FinalizationResidueCommitResult> {
-  const raw = await git(input.root, ["status", "--porcelain=v1", "--untracked-files=all"], input.runCommand);
-  const paths = raw.split("\n").map(statusPath).filter((path): path is string => Boolean(path));
+  const raw = await gitRaw(input.root, [...CANONICAL_STATUS_ARGS], input.runCommand);
+  const paths = changedFilePathsFromStatus(raw);
   if (paths.length === 0) return { status: "clean", paths: [] };
 
   const prefix = incidentDiagnosticsPrefix(input.root);
@@ -202,11 +211,10 @@ async function cleanupExactMainVerificationWorkspace(input: {
 }): Promise<void> {
   const gitDir = await git(input.workspace, ["rev-parse", "--git-dir"], input.runner).catch(() => undefined);
   if (!gitDir) return;
-  const status = await git(input.workspace, ["status", "--porcelain", "--untracked-files=all", "--ignored=matching"], input.runner).catch(() => "");
-  const unsafeResidue = status.split("\n").filter((line) => {
-    const path = statusPath(line);
-    if (!path) return false;
-    return !(line.startsWith("!! ") && (path === "node_modules" || path.startsWith("node_modules/")));
+  const status = await gitRaw(input.workspace, ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"], input.runner).catch(() => "");
+  const unsafeResidue = parseGitStatus(status).filter((entry) => {
+    const ignored = entry.index === "!" && entry.worktree === "!";
+    return !(ignored && (entry.path === "node_modules" || entry.path.startsWith("node_modules/")));
   });
   if (unsafeResidue.length > 0) {
     input.reporter?.(`post-integration reverification · preserved dirty verification workspace ${input.workspace}`);

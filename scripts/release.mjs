@@ -67,7 +67,12 @@ function incidentDiagnosticsPrefix() {
  * exactly origin/main. Any other dirty state still fails the check below.
  */
 function absorbIncidentDiagnosticsResidue() {
-  const raw = git("status", "--porcelain=v1", "--untracked-files=all");
+  // Porcelain status lines are a fixed 2-character status code (which may
+  // itself start with a space, e.g. " M path") followed by a space and the
+  // path. Trimming the whole multi-line output - as the shared git() helper
+  // does - eats that leading space off only the first line and corrupts its
+  // path, so this reads raw output directly instead.
+  const raw = execFileSync("git", ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"], { encoding: "utf8" }).replace(/\n+$/, "");
   if (!raw) return;
   const paths = raw.split("\n")
     .map((line) => line.slice(3).split(" -> ").at(-1)?.replace(/^"|"$/g, ""))
