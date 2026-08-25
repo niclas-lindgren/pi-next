@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "createdAt": "2026-08-25T19:46:56.615Z",
+  "createdAt": "2026-08-25T19:22:13.489Z",
   "fingerprint": "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
   "classification": {
     "category": "framework",
@@ -9,7 +9,7 @@
   },
   "runtime": {
     "piNextVersion": "0.3.1",
-    "piNextRevision": "4ea5245b1d5b6901f3e1b00439697d0b0c3e4636",
+    "piNextRevision": "93fc8a357a63b0b3a23e148c1804d44a00de3cdd",
     "node": "v22.23.2",
     "platform": "linux/arm64",
     "tools": {
@@ -37,7 +37,7 @@
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-85-1787687216542-3686664",
+    "runId": "bootstrap-85-1787685733408-3151187",
     "issueNumber": 85,
     "phase": "terminal",
     "disposition": "finalization-blocked",
