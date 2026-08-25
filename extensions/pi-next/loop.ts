@@ -2,7 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { relative } from "node:path";
 
 import { trackCrashLoggerCwd } from "./crash-log.ts";
@@ -47,14 +47,13 @@ import {
   emptyLoopMetrics,
   loopNow,
   listLoopStates,
-  loopResultFile,
   loopStateFile,
   markIssueDisposition,
   MAX_STEPS,
   parseLoopLimit,
   readLoopState,
-  safeLoopBoundary,
   type LoopState,
+  type LoopStatus,
 } from "./loop-state.ts";
 import {
   PlanAuthorityError,
@@ -90,7 +89,6 @@ import {
   createSupervisorRuntime,
   type SupervisorRuntime,
 } from "./supervisor-runtime.ts";
-import { ForegroundSupervisor } from "./foreground-supervisor.ts";
 import { issueLeaseMatchesOwner } from "./issue-authority.ts";
 import { loadPiNextConfig } from "../../src/coordination/config.ts";
 import { createWorkAuthority } from "../../src/coordination/work-authority.ts";
@@ -107,6 +105,16 @@ export { ForegroundSupervisor } from "./foreground-supervisor.ts";
 export type { LoopOutcome, LoopResult, LoopState } from "./loop-state.ts";
 
 const AUTO_STATUS_KEY = "pi-next-auto";
+
+// The retired loop-controller.ts state machine is the only writer of
+// "interrupted"/"stopped" (loop.ts:291/860/1043, loop-controller.ts). The
+// unified scheduler (production-lifecycle.ts) never writes either — a
+// stopped/aborted fresh run settles as "cancelled" instead. These two lists
+// are therefore a reliable structural discriminator between legacy
+// pre-migration state and unified-scheduler-produced state (issue #165).
+const LEGACY_RESUMABLE_STATUSES: readonly LoopStatus[] = ["interrupted", "stopped"];
+const UNIFIED_RESUMABLE_STATUSES: readonly LoopStatus[] = ["cancelled"];
+const RESUMABLE_STATUSES: readonly LoopStatus[] = [...LEGACY_RESUMABLE_STATUSES, ...UNIFIED_RESUMABLE_STATUSES];
 
 /**
  * Delivers through the shared lifecycle-aware host boundary (#583) instead
@@ -1282,57 +1290,67 @@ export async function runPiNextLoop(
   if (input === "resume") {
     const current = requestedRunId
       ? readLoopState(ctx.cwd, requestedRunId)
-      : selectRun((state) => ["interrupted", "stopped"].includes(state.status));
+      : selectRun((state) => RESUMABLE_STATUSES.includes(state.status));
     if (
       !current ||
       current.remainingIssues <= 0 ||
-      !["interrupted", "stopped"].includes(current.status)
+      !RESUMABLE_STATUSES.includes(current.status)
     ) {
       notifySafely(
         ctx,
-        "No interrupted or stopped pi-next loop is available.",
+        "No interrupted, stopped, or cancelled pi-next loop is available.",
         "warning",
       );
       return;
     }
 
-    const pendingResult = existsSync(loopResultFile(ctx.cwd, current.runId));
-    let settledStep = current.settledStep;
-    if (!pendingResult && current.step > current.settledStep) {
-      const boundary = await safeLoopBoundary(ctx.cwd, false);
-      if (!boundary.safe) {
-        notifySafely(
-          ctx,
-          `Cannot resume unattended loop from unsafe state: ${boundary.reason}`,
-          "warning",
-        );
-        return;
-      }
-      settledStep = current.step;
+    if (LEGACY_RESUMABLE_STATUSES.includes(current.status)) {
+      // Legacy pre-migration state was produced by the retired
+      // loop-controller.ts/ForegroundSupervisor state machine, which no
+      // longer runs (issue #165). Its shape (step/settledStep bookkeeping,
+      // activeLease, planRepair, ...) was never designed to be read by the
+      // unified scheduler, so it is rejected explicitly with actionable
+      // guidance rather than silently misinterpreted or launched through a
+      // state machine that is being retired.
+      notifySafely(
+        ctx,
+        `Run ${current.runId} is legacy pre-migration state (status "${current.status}") and can no longer be resumed automatically. ` +
+          `Inspect it with "/pi-next-loop status ${current.runId} verbose", then either finish any in-progress work manually or discard the run and start a fresh "/pi-next auto" (the retired ForegroundSupervisor/loop-controller.ts state machine can no longer resume it).`,
+        "warning",
+      );
+      return;
     }
 
-    const resumed: LoopState = {
-      ...current,
-      sessionId: current.sessionId || sessionIdentity(ctx),
-      settledStep,
-      status: "running",
-      stopRequested: false,
-      updatedAt: loopNow(),
-      lastReason: "Resumed by user from a clean boundary",
-    };
-    writeJsonAtomic(loopStateFile(ctx.cwd, resumed.runId), resumed);
-    bindLiveAutoRun(ctx, resumed.runId);
-    await new ForegroundSupervisor(ctx, onWorkLog, onWorkerState).launch(resumed);
+    // Unified-scheduler-produced state (status "cancelled"): continue it
+    // through the same shared scheduler entry point fresh `/pi-next auto`
+    // uses, with a fresh in-process AbortController, instead of the retired
+    // ForegroundSupervisor.
+    bindLiveAutoRun(ctx, current.runId);
+    const controller = new AbortController();
+    const unregister = registerRunAbortController(current.runId, controller);
+    try {
+      await runProductionLifecycleScheduler({
+        cwd: ctx.cwd,
+        ctx,
+        entry: "auto",
+        requestedIssues: current.remainingIssues,
+        runId: current.runId,
+        onWorkLog,
+        onWorkerState,
+        signal: controller.signal,
+      });
+    } finally {
+      unregister();
+    }
     return;
   }
 
   const requestedIssues = parseLoopLimit(input);
   const createdAt = loopNow();
   const runId = `${createdAt.replace(/[:.]/g, "-")}-${process.pid}`;
-  // New auto execution is queue scheduling over the shared lifecycle kernel.
-  // The legacy ForegroundSupervisor remains only for explicit resume of old
-  // interrupted loop-state records above; fresh `/pi-next auto` does not enter
-  // the duplicate worker/repair/finalization state machine.
+  // New auto execution is queue scheduling over the shared lifecycle kernel;
+  // it never enters the retired ForegroundSupervisor/loop-controller.ts
+  // worker/repair/finalization state machine (issue #165).
   bindLiveAutoRun(ctx, runId);
   const controller = new AbortController();
   const unregister = registerRunAbortController(runId, controller);
