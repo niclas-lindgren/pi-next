@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.3.1 - prepared release
+
+### Material changes
+
+### Compatibility/configuration/schema
+
+### Breaking/behavior changes
+
+### Security/safety
+
+### Upgrade guidance
+
 ## 0.3.0 - prepared release
 
 ### Material changes
