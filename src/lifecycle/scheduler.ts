@@ -9,11 +9,49 @@ export interface LifecycleSchedulerPolicy {
   continueAfterIssueLocalFailure?: boolean;
 }
 
+export interface LifecycleSchedulerClaimHandle {
+  release: () => Promise<void>;
+}
+
+/**
+ * Atomically claims authoritative ownership of a scheduler-selected issue
+ * before it enters the canonical single-issue lifecycle boundary. Must
+ * throw {@link LifecycleSchedulerClaimConflict} when another owner already
+ * holds a fresh claim; any other error is a discovery/authority failure and
+ * must propagate rather than be treated as an available candidate.
+ */
+export type LifecycleSchedulerClaim = (
+  selection: LifecycleSchedulerSelection,
+) => Promise<LifecycleSchedulerClaimHandle>;
+
+/**
+ * Raised by a {@link LifecycleSchedulerClaim} to signal that the selected
+ * candidate lost an ownership race. This is a scheduler-local candidate
+ * skip, never a worker failure and never a reason to stop the run.
+ */
+export class LifecycleSchedulerClaimConflict extends Error {
+  constructor(readonly selection: LifecycleSchedulerSelection, cause?: unknown) {
+    super(`Issue #${selection.issueNumber} lost the scheduler claim race`);
+    this.name = "LifecycleSchedulerClaimConflict";
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
 export interface LifecycleSchedulerOptions extends Omit<SingleIssueLifecycleOptions, "workItem" | "entry" | "runId"> {
   entry?: Extract<LifecycleEntryPoint, "auto" | "monitor">;
   runId: string;
   policy: LifecycleSchedulerPolicy;
   discover: (completed: readonly UnifiedLifecycleResult[]) => Promise<LifecycleSchedulerSelection | undefined>;
+  /**
+   * Optional atomic ownership claim performed immediately before a selected
+   * candidate enters the canonical single-issue lifecycle, and released
+   * immediately after it terminates. Omitting this preserves prior
+   * behavior for callers (e.g. bootstrap) that already own ownership
+   * semantics elsewhere; production auto/monitor scheduling must supply it
+   * so every entry point claims through the same fence.
+   */
+  claim?: LifecycleSchedulerClaim;
+  onClaimConflict?: (selection: LifecycleSchedulerSelection, error: LifecycleSchedulerClaimConflict) => void;
   requeryAuthority?: (result: UnifiedLifecycleResult) => Promise<void>;
   reporter?: LifecycleReporter;
 }
@@ -50,13 +88,33 @@ export async function runLifecycleScheduler(
     if (!selection) {
       return { runId: options.runId, entry, settled: results.length, results, disposition: results.length === 0 ? "idle" : "completed", latest: results.at(-1) };
     }
-    const result = await runSingleIssueLifecycle({
-      ...options,
-      entry,
-      runId: `${options.runId}:issue-${selection.issueNumber}`,
-      workItem: { issueNumber: selection.issueNumber },
-      reporter: options.reporter,
-    }, dependencies, execute);
+    let claim: LifecycleSchedulerClaimHandle | undefined;
+    if (options.claim) {
+      try {
+        claim = await options.claim(selection);
+      } catch (error) {
+        if (error instanceof LifecycleSchedulerClaimConflict) {
+          // Another owner won the race after selection. This is a
+          // scheduler-local candidate skip: no result is recorded and no
+          // issue mutation happened, so the run continues by requerying.
+          options.onClaimConflict?.(selection, error);
+          continue;
+        }
+        throw error;
+      }
+    }
+    let result: UnifiedLifecycleResult;
+    try {
+      result = await runSingleIssueLifecycle({
+        ...options,
+        entry,
+        runId: `${options.runId}:issue-${selection.issueNumber}`,
+        workItem: { issueNumber: selection.issueNumber },
+        reporter: options.reporter,
+      }, dependencies, execute);
+    } finally {
+      await claim?.release();
+    }
     results.push(result);
     await options.requeryAuthority?.(result);
     if (result.disposition !== "pass" && result.disposition !== "already-satisfied") {

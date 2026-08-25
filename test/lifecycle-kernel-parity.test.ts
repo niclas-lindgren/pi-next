@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 
 import { runBootstrapLifecycle, type BootstrapReport } from "../src/bootstrap/index.ts";
-import { runSingleIssueLifecycle, runLifecycleScheduler, type UnifiedLifecycleResult } from "../src/lifecycle/index.ts";
+import { runSingleIssueLifecycle, runLifecycleScheduler, LifecycleSchedulerClaimConflict, type UnifiedLifecycleResult } from "../src/lifecycle/index.ts";
 
 const exec = promisify(execFile);
 const zero = "0".repeat(40);
@@ -158,6 +158,67 @@ test("bootstrap and production entries share dirty-baseline finalization diverge
     assert.equal(production.disposition, "finalization-blocked");
     assert.deepEqual(bootstrap.finalizationFailure, production.finalizationFailure);
     assert.equal(production.candidatePreserved, true);
+  } finally { await f.cleanup(); }
+});
+
+test("scheduler claim conflict is a scheduler-local skip, not a global stop (#146)", async () => {
+  const f = await fixture();
+  try {
+    const excluded = new Set<number>();
+    const discovered: number[] = [];
+    const claimed: number[] = [];
+    const conflicts: number[] = [];
+    const scheduler = await runLifecycleScheduler({
+      cwd: f.root,
+      runId: "queue-claim-conflict",
+      allowRepair: true,
+      review: false,
+      finalize: false,
+      policy: { maxIssues: 1 },
+      discover: async () => {
+        discovered.push(900);
+        return excluded.has(900) ? undefined : { issueNumber: 900 };
+      },
+      claim: async (selection) => {
+        throw new LifecycleSchedulerClaimConflict(selection);
+      },
+      onClaimConflict: (selection) => {
+        conflicts.push(selection.issueNumber);
+        excluded.add(selection.issueNumber);
+      },
+    }, {}, async (options: { issueNumber: number }) => {
+      claimed.push(options.issueNumber);
+      return report(options.issueNumber);
+    });
+    assert.equal(scheduler.disposition, "idle");
+    assert.equal(scheduler.results.length, 0);
+    assert.deepEqual(conflicts, [900]);
+    assert.equal(claimed.length, 0, "a lost claim race must never execute the worker");
+    assert.equal(discovered.length, 2, "the scheduler must requery discovery after a claim conflict instead of stopping");
+  } finally { await f.cleanup(); }
+});
+
+test("scheduler releases a successful claim after the issue settles, before requerying authority (#146)", async () => {
+  const f = await fixture();
+  try {
+    const order: string[] = [];
+    const execute = async (options: { issueNumber: number }) => {
+      order.push("execute");
+      return report(options.issueNumber);
+    };
+    const scheduler = await runLifecycleScheduler({
+      cwd: f.root,
+      runId: "queue-claim-release",
+      allowRepair: true,
+      review: false,
+      finalize: false,
+      policy: { maxIssues: 1 },
+      discover: async () => ({ issueNumber: 900 }),
+      claim: async () => ({ release: async () => { order.push("release"); } }),
+      requeryAuthority: async () => { order.push("requery"); },
+    }, {}, execute as never);
+    assert.equal(scheduler.disposition, "budget-yield");
+    assert.deepEqual(order, ["execute", "release", "requery"]);
   } finally { await f.cleanup(); }
 });
 

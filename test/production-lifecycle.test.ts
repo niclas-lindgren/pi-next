@@ -13,6 +13,7 @@ import { renderLoopStatus } from "../extensions/pi-next/loop-status.ts";
 import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordination/work-authority.ts";
 import { DEFAULT_PI_NEXT_CONFIG, type PiNextConfig } from "../src/coordination/config.ts";
 import type { BootstrapReport } from "../src/bootstrap/types.ts";
+import type { IssueLease, IssueLeaseAuthority } from "../src/coordination/issue-leases.ts";
 
 const exec = promisify(execFile);
 const zero = "0".repeat(40);
@@ -76,6 +77,32 @@ const leaseAuthority = {
   remove: async () => undefined,
 };
 
+/** A real compare-and-swap store, unlike the always-empty stub above, so a
+ * genuine claim race between two concurrent schedulers has exactly one
+ * winner. */
+class CasLeaseAuthority implements IssueLeaseAuthority {
+  private readonly leases = new Map<number, IssueLease>();
+
+  async read(issueNumber: number): Promise<IssueLease | undefined> {
+    return this.leases.get(issueNumber);
+  }
+
+  async create(issueNumber: number, lease: IssueLease): Promise<void> {
+    if (this.leases.has(issueNumber)) throw new Error("already exists");
+    this.leases.set(issueNumber, lease);
+  }
+
+  async replace(issueNumber: number, expected: IssueLease, lease: IssueLease): Promise<void> {
+    if (this.leases.get(issueNumber) !== expected) throw new Error("compare-and-swap failed");
+    this.leases.set(issueNumber, lease);
+  }
+
+  async remove(issueNumber: number, expected: IssueLease): Promise<void> {
+    if (this.leases.get(issueNumber) !== expected) throw new Error("compare-and-swap failed");
+    this.leases.delete(issueNumber);
+  }
+}
+
 test("production explicit issue execution invokes the shared single-issue kernel", async () => {
   const f = await fixture();
   try {
@@ -114,6 +141,66 @@ test("production auto is a scheduler over the shared lifecycle and re-queries au
     assert.equal(result.disposition, "budget-yield");
     assert.deepEqual(seen, [201, 202]);
     assert.deepEqual(result.results.map((entry) => entry.disposition), ["pass", "pass"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("two fresh production auto schedulers racing the same issue: exactly one claims and executes, the loser mutates nothing (#146)", async () => {
+  const f = await fixture();
+  try {
+    const authority = new InMemoryWorkAuthority([item(900)]);
+    const sharedLeaseAuthority = new CasLeaseAuthority();
+    const executed: number[] = [];
+
+    // Deterministically force overlap at the exact moment that matters: the
+    // second scheduler must attempt selection/claim while the first still
+    // authoritatively holds the lease, proving a live race is resolved to
+    // exactly one owner rather than merely never colliding by luck.
+    let resolveFirstClaimed: () => void;
+    const firstClaimed = new Promise<void>((resolve) => { resolveFirstClaimed = resolve; });
+    const originalCreate = sharedLeaseAuthority.create.bind(sharedLeaseAuthority);
+    sharedLeaseAuthority.create = async (issueNumber, lease) => {
+      await originalCreate(issueNumber, lease);
+      resolveFirstClaimed();
+    };
+    let releaseFirstWorker: () => void;
+    const secondHasRaced = new Promise<void>((resolve) => { releaseFirstWorker = resolve; });
+
+    const firstPromise = runProductionLifecycleScheduler({
+      cwd: f.root,
+      entry: "auto",
+      requestedIssues: 1,
+      runId: "prod-auto-race-a",
+    }, { authority, config: f.config, leaseAuthority: sharedLeaseAuthority }, async (options) => {
+      executed.push(options.issueNumber);
+      await secondHasRaced;
+      return report(options.issueNumber);
+    });
+
+    await firstClaimed;
+    const second = await runProductionLifecycleScheduler({
+      cwd: f.root,
+      entry: "auto",
+      requestedIssues: 1,
+      runId: "prod-auto-race-b",
+    }, { authority, config: f.config, leaseAuthority: sharedLeaseAuthority }, async (options) => {
+      executed.push(options.issueNumber);
+      return report(options.issueNumber);
+    });
+    releaseFirstWorker!();
+    const first = await firstPromise;
+
+    // Exactly one scheduler ever ran the worker for #900.
+    assert.deepEqual(executed, [900]);
+    assert.equal(first.results.length, 1);
+    assert.equal(first.results[0]!.disposition, "pass");
+    // The loser never mutated anything: it safely continued/requeried and
+    // ended idle instead of throwing, stalling, or stopping the process.
+    assert.equal(second.results.length, 0);
+    assert.equal(second.disposition, "idle");
+    // The lease is fully released after the winner's issue settles.
+    assert.equal(await sharedLeaseAuthority.read(900), undefined);
   } finally {
     await f.cleanup();
   }
