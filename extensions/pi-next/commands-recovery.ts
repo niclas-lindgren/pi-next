@@ -416,6 +416,7 @@ export async function recoverableAbandonedAutoRun(
         : undefined;
     return (
       ["running", "interrupted", "stopped"].includes(state.status) &&
+      !state.autoResumeBlockedAt &&
       state.remainingIssues > 0 &&
       typeof issueNumber === "number" &&
       Number.isSafeInteger(issueNumber) &&
@@ -498,6 +499,15 @@ export async function prepareAbandonedAutoResume(
   // because its previous transition happened to be settled.
   if (state.status === "running") return { ok: true };
   if (!isExplicitlyRecoverableState(state)) {
+    // This terminal state can never become explicitly recoverable on a later
+    // pass: its status and lease do not change just by asking again. Mark it
+    // so `recoverableAbandonedAutoRun` stops proposing it as a candidate on
+    // every subsequent `auto` invocation, without altering the durable
+    // status (e.g. a deliberate operator "stopped" stays "stopped").
+    writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), {
+      ...state,
+      autoResumeBlockedAt: new Date().toISOString(),
+    });
     return {
       ok: false,
       reason:
@@ -744,12 +754,12 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
                 return;
               }
               if (outcome.blockedReason) {
+                // An abandoned run that cannot be resumed is not a reason to
+                // refuse a fresh `auto` invocation: fall through to the
+                // normal handler so a new run can still start.
                 safeNotify(ctx, outcome.blockedReason, "warning");
-                return;
-              }
-              if (outcome.recoveryStatus === "no_runnable_transition") {
+              } else if (outcome.recoveryStatus === "no_runnable_transition") {
                 safeNotify(ctx, "Abandoned pi-next recovery created no runnable issue transition", "warning");
-                return;
               }
               if (outcome.recovered) {
                 safeNotify(

@@ -202,7 +202,12 @@ test("generic operator stops are not automatically reactivated", async () => {
 
     assert.equal(prepared.ok, false);
     assert.match(prepared.reason || "", /not an explicitly recoverable restart condition/);
-    assert.equal(readLoopState(cwd, state.runId)?.status, "stopped");
+    const persisted = readLoopState(cwd, state.runId);
+    assert.equal(persisted?.status, "stopped");
+    assert.ok(persisted?.autoResumeBlockedAt);
+
+    const rediscovered = await recoverableAbandonedAutoRun(cwd, new MemoryAuthority(stale));
+    assert.equal(rediscovered, undefined);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
