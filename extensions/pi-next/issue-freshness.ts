@@ -138,6 +138,42 @@ export async function getLiveIssueFingerprint(
   };
 }
 
+export interface LiveIssueDetail {
+  number: number;
+  title: string;
+  state: string;
+  body: string;
+  comments: { author: string; createdAt: string; body: string }[];
+}
+
+/**
+ * Read-only, controller-side fetch of the live issue and its comments for a
+ * worker to inspect via `pi_next_inspect(action="issue")`. Runs through the
+ * configured work-authority adapter (unrestricted GitHub access), never the
+ * worker's sandboxed shell, so this stays available even though the worker
+ * shell itself has no GitHub CLI authority.
+ */
+export async function getLiveIssueDetail(
+  cwd: string,
+  issueNumber: number,
+  authority?: WorkAuthorityAdapter,
+): Promise<LiveIssueDetail> {
+  const config = loadPiNextConfig(cwd);
+  const adapter = authority ?? createWorkAuthority(cwd, config);
+  const item = await adapter.get(String(issueNumber));
+  return {
+    number: item.number ?? issueNumber,
+    title: item.title,
+    state: item.state,
+    body: item.body,
+    comments: item.comments.map((comment) => ({
+      author: comment.author,
+      createdAt: comment.createdAt,
+      body: comment.body,
+    })),
+  };
+}
+
 export async function checkIssueFreshness(
   cwd: string,
   issueNumber: number,

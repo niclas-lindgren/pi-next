@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
 
 import { currentTask, validatePlan } from "./plan.ts";
+import { issueNumber } from "./plan-write.ts";
 import {
   changeFiles,
   markerFile,
@@ -11,6 +12,7 @@ import {
   planFile,
 } from "./util.ts";
 import { formatWorkflowState, workflowState } from "./workflow-state-provider.ts";
+import { getLiveIssueDetail } from "./issue-freshness.ts";
 
 const scopeSchema = Type.Union([
   Type.Literal("all"),
@@ -41,13 +43,14 @@ export function registerInspectTool(pi: ExtensionAPI) {
     name: "pi_next_inspect",
     label: "Pi Next Inspect",
     description:
-      "Inspect workflow state, current task, plan validity, handoff safety, or staged/unstaged/untracked plan drift.",
+      "Inspect workflow state, current task, plan validity, handoff safety, staged/unstaged/untracked plan drift, or the live GitHub issue and its comments.",
     parameters: Type.Union([
       Type.Object({ action: Type.Literal("state"), args: Type.Optional(Type.String()) }),
       Type.Object({ action: Type.Literal("current_task") }),
       Type.Object({ action: Type.Literal("validate") }),
       Type.Object({ action: Type.Literal("handoff") }),
       Type.Object({ action: Type.Literal("drift"), scope: Type.Optional(scopeSchema) }),
+      Type.Object({ action: Type.Literal("issue"), issueNumber: Type.Optional(Type.Integer({ minimum: 1 })) }),
     ]),
     async execute(_id, params, signal, _update, ctx) {
       if (params.action === "state") {
@@ -78,6 +81,32 @@ export function registerInspectTool(pi: ExtensionAPI) {
             },
           ],
           details: { valid: !errors.length, errors },
+        };
+      }
+
+      if (params.action === "issue") {
+        const number = params.issueNumber ?? issueNumber(existsSync(planFile(ctx.cwd)) ? readPlan(ctx.cwd) : "");
+        if (!number) {
+          return {
+            content: [{ type: "text", text: "No issueNumber provided and no active PLAN.md identifies one." }],
+            details: { ok: false },
+          };
+        }
+        const detail = await getLiveIssueDetail(ctx.cwd, number);
+        const text = [
+          `#${detail.number} [${detail.state}] ${detail.title}`,
+          "",
+          detail.body,
+          "",
+          detail.comments.length
+            ? detail.comments
+                .map((comment) => `--- comment by ${comment.author || "unknown"} at ${comment.createdAt} ---\n${comment.body}`)
+                .join("\n\n")
+            : "(no comments)",
+        ].join("\n");
+        return {
+          content: [{ type: "text", text }],
+          details: { ok: true, ...detail },
         };
       }
 
