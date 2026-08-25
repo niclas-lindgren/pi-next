@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "createdAt": "2026-08-25T12:57:29.539Z",
+  "createdAt": "2026-08-25T12:53:53.684Z",
   "fingerprint": "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
   "classification": {
     "category": "framework",
@@ -37,7 +37,7 @@
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-85-1787662649456-676373",
+    "runId": "bootstrap-85-1787662433605-577007",
     "issueNumber": 85,
     "phase": "terminal",
     "disposition": "finalization-blocked",
