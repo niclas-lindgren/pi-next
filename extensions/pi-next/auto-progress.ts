@@ -1,6 +1,11 @@
 import type { SupervisorStatus } from "./foreground-supervisor.ts";
-import type { LoopState } from "./loop-state.ts";
+import type { LoopState, LoopStatus } from "./loop-state.ts";
 import type { WorkerWorkLogPhase } from "./worker-activity.ts";
+
+/** Every disposition except "running" is a terminal presentation state. */
+function isTerminalStatus(status: LoopStatus): boolean {
+  return status !== "running";
+}
 
 export interface AutoProgressRenderOptions {
   supervisor?: Pick<SupervisorStatus, "workerAlive" | "workerLiveness" | "elapsedMs" | "workerPhase"> | null;
@@ -40,6 +45,7 @@ function phaseLabel(
     case "completed": return "complete";
     case "idle": return "idle";
     case "blocked": return "blocked";
+    case "budget-yield": return "budget yielded";
     case "failed": return "failed";
     case "stopped": return "stopped";
     case "interrupted": return "interrupted";
@@ -136,7 +142,11 @@ export function renderAutoProgress(
   const issue = state.activeIssueNumber ? `#${state.activeIssueNumber}` : undefined;
   const phase = phaseLabel(state, options.supervisor);
   const reason = terminalReason(state);
-  const elapsed = duration(options.supervisor?.elapsedMs);
+  // Once this run's disposition is terminal, the worker that produced it is
+  // no longer live: stop surfacing its (now stale) elapsed-time as if the
+  // run were still in progress, while retaining the bounded terminal
+  // `reason` summary above (issue #166 requirement 4).
+  const elapsed = isTerminalStatus(state.status) ? undefined : duration(options.supervisor?.elapsedMs);
   const recoveryOutcome = state.recovery?.lastOutcome;
   const recovery = recoveryOutcome && recoveryOutcome !== "settled_from_durable_evidence"
     ? `recovery:${recoveryOutcome.replaceAll("_", " ")}`

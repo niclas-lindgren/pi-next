@@ -8,7 +8,7 @@
 - [x] Extended LoopStatus and LoopPresentationState unions with 'budget-yield' and changed production-lifecycle.ts's finalState.status assignment to directly use the scheduler's typed result.disposition instead of collapsing everything but 'blocked' into 'stopped'. — 2026-08-25
   - Files: extensions/pi-next/loop-state.ts, extensions/pi-next/production-lifecycle.ts
   - Approach: Extend the LoopStatus union (loop-state.ts:50) to cover the true set of terminal dispositions if needed, and change production-lifecycle.ts's finalState status assignment (~line 275, currently `result.disposition === "blocked" ? "blocked" : "stopped"`) to map result.disposition to its real typed status (idle/completed/budget-yield/blocked/cancelled/failed) instead of collapsing everything else into "stopped".
-- [ ] Propagate typed disposition through footer/status presentation (issue #166)
+- [x] Added the missing 'budget-yield' case to auto-progress.ts's phaseLabel switch (it already had distinct cases for the other terminal dispositions) and stopped surfacing stale supervisor elapsed-time once a run's disposition is terminal, per issue #166 requirement 4. — 2026-08-25
   - Files: extensions/pi-next/loop-status.ts, extensions/pi-next/auto-progress.ts
   - Approach: Update LoopPresentationState derivation and auto-progress.ts's status switch (line ~44, `case "stopped": return "stopped";`) to render each distinct disposition rather than collapsing to "stopped"; clear active-issue/worker-live fields once an issue reaches terminal state while retaining a bounded latest-result summary, per issue #166 requirement 4.
 - [ ] Harden footer heartbeat to always resolve the live run (issue #166)
@@ -49,4 +49,11 @@ Do not change claim/authority/candidate/verification/finalization semantics owne
 **Findings:** Also had to add 'budget-yield' to LoopPresentationState in loop-status.ts (footer/status projection), which tsc flagged as an unhandled case; typecheck and the relevant test suites (production-lifecycle, loop-status, consumer-smoke, incident-reporting: 22/22) pass.
 LESSONS: The status/footer projection (loop-status.ts LoopPresentationState) mirrors LoopStatus and must be kept in sync whenever the LoopStatus union changes, or tsc will fail with an unassignable-type error at the presentation assignment.
 **Files:** extensions/pi-next/loop-state.ts (+1/-0), extensions/pi-next/loop-status.ts (+1/-0), extensions/pi-next/production-lifecycle.ts (+1/-1)
+**Commit:** 93fc8a3 (pi-next)
+
+### 2026-08-25 — Added the missing 'budget-yield' case to auto-progress.ts's phaseLabel switch (it already had distinct cases for the other terminal dispositions) and stopped surfacing stale supervisor elapsed-time once a run's disposition is terminal, per issue #166 requirement 4.
+**Rationale:** Investigated clearing LoopState.activeIssueNumber on terminal state, but reverted that: an existing consumer-smoke assertion requires activeIssueNumber to reflect the real settled issue (51/52) rather than undefined once terminal, so the 'retain a bounded latest-result summary' requirement is already met by the existing lastReason/terminalReason text; only the stale live-elapsed-time display needed clearing.
+**Findings:** loop-status.ts's classifyLoopState/LoopPresentationState already propagated typed dispositions (including budget-yield) directly from state.status; the only real gaps were auto-progress.ts's missing budget-yield phase case and its unconditional use of supervisor.elapsedMs after terminal. Full suite (529 tests) and typecheck pass.
+LESSONS: Do not clear LoopState.activeIssueNumber on terminal disposition — consumer-smoke.test.ts asserts it reflects the actual settled issue number after a terminal run, not undefined; only presentation-layer fields (e.g. supervisor elapsed time) should be suppressed once state.status is terminal.
+**Files:** extensions/pi-next/auto-progress.ts (+12/-2)
 **Commit:** [pending — fill after commit]
