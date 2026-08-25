@@ -99,4 +99,4 @@ LESSONS: production-lifecycle.ts (the unified scheduler) never imports from loop
 **Findings:** Full build (tsc --noEmit) and full suite (519 tests, 2 new) pass.
 LESSONS: Before assuming a scheduler disposition is reachable and adding a test for it, trace the actual policy flags (e.g. continueAfterIssueLocalFailure) and the continuable-disposition allowlist in the scheduler; a disposition literal existing in a type union does not mean every caller's policy configuration can actually produce it.
 **Files:** test/loop-status.test.ts (+24), test/production-lifecycle.test.ts (+22)
-**Commit:** [pending — fill after commit]
+**Commit:** ecb1b7a (pi-next)
