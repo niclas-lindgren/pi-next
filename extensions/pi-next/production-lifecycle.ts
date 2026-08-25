@@ -21,6 +21,7 @@ import type { IssueWorkerRunner, IssueWorkerRuntime } from "./util-core.ts";
 import { loopNow, loopStateFile, emptyLoopMetrics, MAX_STEPS, type LoopState } from "./loop-state.ts";
 import { writeJsonAtomic } from "./util.ts";
 import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
+import { sessionIdentity } from "./live-ctx.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { createPiWorkerFactory } from "./production-worker-factory.ts";
 
@@ -174,7 +175,7 @@ export async function runProductionLifecycleScheduler(
   const leaseAuthority = deps.leaseAuthority ?? new GitHubIssueLeaseAuthority(options.cwd);
   const requestedIssues = Math.max(0, Math.trunc(options.requestedIssues));
   const runId = options.runId ?? `${loopNow().replace(/[:.]/g, "-")}-${process.pid}`;
-  const state = initialLoopState(options.cwd, runId, options.ctx ? (options.ctx as { sessionId?: string }).sessionId : undefined, requestedIssues);
+  const state = initialLoopState(options.cwd, runId, options.ctx ? sessionIdentity(options.ctx) : undefined, requestedIssues);
   writeJsonAtomic(loopStateFile(options.cwd, runId), state);
   const reporter: LifecycleReporter = (event) => {
     if (event.projection) updateProjectionState(options.cwd, runId, event.projection);

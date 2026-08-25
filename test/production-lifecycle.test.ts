@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 
 import { runProductionLifecycleScheduler, runProductionSingleIssueLifecycle } from "../extensions/pi-next/production-lifecycle.ts";
-import { loopStateFile, emptyLoopMetrics, type LoopState } from "../extensions/pi-next/loop-state.ts";
+import { loopStateFile, readLoopState, emptyLoopMetrics, type LoopState } from "../extensions/pi-next/loop-state.ts";
 import { writeJsonAtomic } from "../extensions/pi-next/util.ts";
 import { renderLoopStatus } from "../extensions/pi-next/loop-status.ts";
 import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordination/work-authority.ts";
@@ -141,6 +141,28 @@ test("production auto is a scheduler over the shared lifecycle and re-queries au
     assert.equal(result.disposition, "budget-yield");
     assert.deepEqual(seen, [201, 202]);
     assert.deepEqual(result.results.map((entry) => entry.disposition), ["pass", "pass"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("production auto persists the caller's session id so the footer heartbeat can find the current run by session (#166)", async () => {
+  const f = await fixture();
+  try {
+    const authority = new InMemoryWorkAuthority([item(301)]);
+    const ctx = { cwd: f.root, sessionManager: { getSessionId: () => "footer-session" } };
+    await runProductionLifecycleScheduler({
+      cwd: f.root,
+      ctx: ctx as never,
+      entry: "auto",
+      requestedIssues: 1,
+      runId: "prod-auto-session",
+    }, { authority, config: f.config, leaseAuthority }, async (options) => {
+      await authority.close(String(options.issueNumber), "done");
+      return report(options.issueNumber);
+    });
+    const state = readLoopState(f.root, "prod-auto-session");
+    assert.equal(state?.sessionId, "footer-session");
   } finally {
     await f.cleanup();
   }
