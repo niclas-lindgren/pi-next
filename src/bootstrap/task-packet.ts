@@ -14,7 +14,7 @@ export async function loadContextFiles(cwd: string, issue: Issue): Promise<Array
   const root = resolve(cwd);
   const agentsPath = resolve(root, "AGENTS.md");
   const agents = await readFile(agentsPath, "utf8");
-  const references = new Set<string>(["docs/EVALUATION_AND_RELIABILITY.md"]);
+  const references = new Set<string>();
   for (const source of [agents, issue.body, ...issue.comments.map((comment) => comment.body ?? "")]) {
     for (const match of source.matchAll(/(?:^|[\s(`])((?:docs|examples)\/[A-Za-z0-9_./-]+\.md)/g)) references.add(match[1]!);
   }
