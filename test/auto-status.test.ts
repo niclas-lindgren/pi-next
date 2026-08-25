@@ -11,7 +11,7 @@ import {
   startAutoStatusHeartbeat,
 } from "../extensions/pi-next/commands-recovery.ts";
 import { type LoopState } from "../extensions/pi-next/loop-state.ts";
-import { currentSupervisorStatus, formatSupervisorStatus } from "../extensions/pi-next/foreground-supervisor.ts";
+import { currentSupervisorStatus, formatSupervisorStatus } from "../extensions/pi-next/supervisor-status.ts";
 import { bindLiveAutoRun, clearLiveCtx } from "../extensions/pi-next/live-ctx.ts";
 
 function state(runId: string, updatedAt: string, overrides: Partial<LoopState> = {}): LoopState {

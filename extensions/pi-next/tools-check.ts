@@ -15,7 +15,7 @@ import {
 import { getLiveIssueFingerprint } from "./issue-freshness.ts";
 import { recordCurrentPiLifecycleJournal } from "./lifecycle-journal.ts";
 import { runCandidateReviewGate } from "./candidate-review.ts";
-import { currentGeneration } from "./foreground-supervisor.ts";
+import { currentGeneration } from "./supervisor-status.ts";
 import { recordTransition } from "./workflow-commit-policy.ts";
 import { acceptanceCriteria, issueNumber } from "./plan.ts";
 import {

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ForegroundSupervisor } from "../extensions/pi-next/foreground-supervisor.ts";
 import {
   __resetLiveCtxForTests,
   bindLiveAutoRun,
@@ -10,14 +9,6 @@ import {
   liveAutoRunBinding,
   setLiveCtx,
 } from "../extensions/pi-next/live-ctx.ts";
-
-test("foreground supervisor does not retain the initial host context", () => {
-  const ctx = { cwd: "/tmp/pi-next-retention-fixture" } as never;
-  const supervisor = new ForegroundSupervisor(ctx);
-
-  assert.equal("ctx" in supervisor, false);
-  assert.equal((supervisor as unknown as { cwd: string }).cwd, "/tmp/pi-next-retention-fixture");
-});
 
 test("host replacement retires the superseded run-context bridge", () => {
   const cwd = "/tmp/pi-next-retention-rebind";

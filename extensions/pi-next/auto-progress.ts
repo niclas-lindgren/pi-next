@@ -1,4 +1,4 @@
-import type { SupervisorStatus } from "./foreground-supervisor.ts";
+import type { SupervisorStatus } from "./supervisor-status.ts";
 import type { LoopState, LoopStatus } from "./loop-state.ts";
 import type { WorkerWorkLogPhase } from "./worker-activity.ts";
 

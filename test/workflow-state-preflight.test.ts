@@ -6,7 +6,6 @@ import { test } from "node:test";
 
 import { runIssueScopedPrompt } from "../extensions/pi-next/commands.ts";
 import { registerPiNextCommands } from "../extensions/pi-next/commands-recovery.ts";
-import { ForegroundSupervisor } from "../extensions/pi-next/foreground-supervisor.ts";
 import { preflightWorkflowStateProvider, WorkflowStateProviderError } from "../extensions/pi-next/workflow-state-provider.ts";
 import { DEFAULT_PI_NEXT_CONFIG, type PiNextConfig } from "../src/coordination/config.ts";
 import type { IssueLeaseAuthority } from "../extensions/pi-next/issue-leases.ts";
@@ -89,23 +88,19 @@ test("/pi-next auto preflights before abandoned-run recovery", async () => {
       handlers.set(name, command);
     },
   };
-  const original = ForegroundSupervisor.recoverOnStart;
-  let recoveryCalls = 0;
-  (ForegroundSupervisor as unknown as {
-    recoverOnStart: (ctx: unknown) => Promise<{ recovered: boolean }>;
-  }).recoverOnStart = async () => {
-    recoveryCalls += 1;
-    return { recovered: false };
-  };
   try {
     await configureHelper(cwd);
     registerPiNextCommands(pi as never);
     const command = handlers.get("pi-next");
     assert.ok(command);
     await command.handler("auto", context(cwd));
-    assert.equal(recoveryCalls, 0);
+    // Preflight failure must return before recovery ever inspects/writes any
+    // durable loop state.
+    await assert.rejects(
+      () => readdir(join(cwd, ".pi", "runtime", "pi-next-loops")),
+      { code: "ENOENT" },
+    );
   } finally {
-    (ForegroundSupervisor as unknown as { recoverOnStart: typeof original }).recoverOnStart = original;
     await rm(cwd, { recursive: true, force: true });
   }
 });

@@ -26,7 +26,7 @@ import {
   currentGeneration,
   currentSupervisorStatus,
   formatSupervisorStatus,
-} from "./foreground-supervisor.ts";
+} from "./supervisor-status.ts";
 import {
   cleanupCompletedIssueWorktree,
 } from "./main-refresh.ts";

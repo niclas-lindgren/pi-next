@@ -19,10 +19,6 @@ import type { WorkerTask } from "../src/coordination/worker-adapter.ts";
 import { classifyFailure } from "../extensions/pi-next/failure-scope.ts";
 import { containIssueLocalFailure } from "../extensions/pi-next/loop.ts";
 import {
-  reconcileMissingLoopResult,
-  runLoopSteps,
-} from "../extensions/pi-next/loop-controller.ts";
-import {
   emptyLoopMetrics,
   type LoopState,
 } from "../extensions/pi-next/loop-state.ts";
@@ -244,43 +240,6 @@ test("scenario 4: nonzero worker failure is bounded and never becomes completion
   });
 });
 
-test("scenario 5: missing terminal loop result deterministically resumes the same owned issue", async () => {
-  await runLifecycleScenario({
-    name: "missing worker result reconciliation",
-    steps: [{
-      name: "prepare owned interrupted state",
-      async run(context) {
-        const worktree = await context.git.addIssueWorktree(105);
-        await context.git.write(worktree.path, "unfinished.txt", "partial candidate\n");
-        context.leaseAuthority.seed(farFutureLease(105, "recovery-run"));
-      },
-    }, {
-      name: "reconcile without deleting work",
-      async run({ git, leaseAuthority, invariant }) {
-        const workspace = join(git.repo, ".worktrees", "issue-105");
-        const lease = await leaseAuthority.read(105);
-        if (!lease) throw new Error("owned lease must exist");
-        const initial = loopState(git.repo, workspace, lease, {
-          status: "interrupted",
-          step: 2,
-          settledStep: 1,
-          workerResultMissing: true,
-          lastReason: "worker returned without loop_result",
-        });
-        const recovery = await reconcileMissingLoopResult(
-          git.repo,
-          initial,
-          leaseAuthority,
-          { maxAttempts: 2 },
-        );
-        invariant(recovery.outcome === "resuming_same_issue", "missing result should resume same issue when authority/workspace are safe");
-        invariant(recovery.state.activeIssueNumber === 105, "recovery must retain issue identity");
-        invariant(await readFile(join(workspace, "unfinished.txt"), "utf8") === "partial candidate\n", "unfinished work must survive reconciliation");
-      },
-    }],
-  });
-});
-
 test("scenario 6: authority changes after verification so integration lands but issue stays open", async () => {
   await runLifecycleScenario({
     name: "authority changes before closure",
@@ -397,33 +356,6 @@ test("scenario 8: candidate-local containment leaves queue runnable for unrelate
           clock.now(),
         );
         invariant(next.issueNumber === 208, "unrelated eligible issue must remain claimable after containment");
-      },
-    }],
-  });
-});
-
-test("scenario 9: static PLAN preflight failure launches zero scripted workers", async () => {
-  await runLifecycleScenario({
-    name: "static preflight failure launches zero workers",
-    workerScripts: [{ behavior: "success" }],
-    steps: [{
-      name: "reject malformed PLAN before controller worker path",
-      async run(context) {
-        const issue = 109;
-        const worktree = await context.git.addIssueWorktree(issue);
-        await mkdir(join(worktree.path, ".pi-next"), { recursive: true });
-        await writeFile(join(worktree.path, ".pi-next", "PLAN.md"), `# Plan: Issue #${issue}\n\n**GitHub-Issue:** #${issue}\n\n## Tasks\n- [ ] invalid task without required metadata\n`);
-        const lease = farFutureLease(issue, "preflight-run");
-        const initial = loopState(context.git.repo, worktree.path, lease);
-        await assert.rejects(
-          runLoopSteps(
-            { cwd: worktree.path } as never,
-            initial,
-            scriptedRunner(context),
-          ),
-          /PLAN\.md|Acceptance Criteria|Log|unsafe|ambiguous|metadata/i,
-        );
-        context.invariant(context.worker.invocations.length === 0, "static preflight failure must launch zero workers");
       },
     }],
   });

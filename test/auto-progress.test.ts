@@ -8,8 +8,6 @@ import {
   settledIssuePercent,
 } from "../extensions/pi-next/auto-progress.ts";
 import { addPromptMetrics, emptyLoopMetrics, initializeIssueBudgetBaseline, markIssueTransition, recordIssueTransitionResult, type LoopState } from "../extensions/pi-next/loop-state.ts";
-import { issueBudgetDecision } from "../extensions/pi-next/loop-controller.ts";
-import { DEFAULT_PI_NEXT_CONFIG } from "../src/coordination/config.ts";
 
 function state(overrides: Partial<LoopState> = {}): LoopState {
   return {
@@ -76,13 +74,6 @@ test("convergence baselines activate without charging historical telemetry", () 
   assert.equal(activated.budgetBaselineTokens, 5_000_000);
   assert.equal(activated.budgetBaselineTransitions, 20);
   assert.equal(activated.budgetBaselineWallClockMs, 90 * 60_000);
-  const before = issueBudgetDecision(activated, DEFAULT_PI_NEXT_CONFIG.convergence);
-  assert.equal(before.hard, false);
-
-  const after = issueBudgetDecision({ ...activated, totalTokens: 5_050_000 }, DEFAULT_PI_NEXT_CONFIG.convergence);
-  assert.equal(after.tokenUsage, 50_000);
-  assert.equal(after.tokenBaseline, 5_000_000);
-  assert.equal(after.hard, false);
 });
 
 test("issue convergence metrics count micro-progress and survive metric updates", () => {

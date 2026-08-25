@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import {
   GitHubIssueLeaseAuthority,
@@ -9,10 +9,7 @@ import {
 } from "./issue-leases.ts";
 import { issueLeaseMatchesOwner } from "./issue-authority.ts";
 import { registerPiNextCommands as registerBasePiNextCommands } from "./commands.ts";
-import {
-  currentSupervisorStatus,
-  ForegroundSupervisor,
-} from "./foreground-supervisor.ts";
+import { currentSupervisorStatus } from "./supervisor-status.ts";
 import {
   bindLiveAutoRun,
   getLiveCtx,
@@ -37,16 +34,10 @@ import {
 import { renderAutoProgress } from "./auto-progress.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
 import {
-  changeFiles,
-  markerFile,
   runtimeDir,
   safeNotify,
   writeJsonAtomic,
 } from "./util.ts";
-import {
-  memoryPressureReason,
-  observeHostMemory,
-} from "./host-memory.ts";
 
 const AUTO_STATUS_KEY = "pi-next-auto";
 const AUTO_STATUS_INTERVAL_MS = 2_500;
@@ -448,168 +439,40 @@ export async function recoverableAbandonedAutoRun(
   return undefined;
 }
 
-export interface AbandonedAutoResumePreparation {
-  ok: boolean;
-  reason?: string;
-  markerCleared?: boolean;
-  dirtyFiles?: string[];
-  reactivated?: boolean;
-  immediatelyRestopped?: boolean;
-}
-
-function isRecoverableRestartRequiredStop(state: LoopState): boolean {
-  return state.status === "stopped" &&
-    state.stopRequested === false &&
-    state.hostMemory?.status === "restart_required" &&
-    state.lastReason?.startsWith("host_memory_pressure: restart_required") === true;
-}
-
-function isExplicitlyRecoverableState(state: LoopState): boolean {
-  // An interrupted state represents an abandoned controller transition. A
-  // stopped state is recoverable only when #69's durable memory fence proves
-  // that restart recovery, rather than an operator stop, owns reactivation.
-  return state.status === "interrupted" || isRecoverableRestartRequiredStop(state);
+export interface RejectedLegacyAutoRun {
+  runId?: string;
+  blockedReason?: string;
 }
 
 /**
- * Retire only the transition that died with the old Pi process before invoking
- * the normal resume path. Transition reconciliation and controller reactivation
- * are deliberately separate: a settled boundary has no old work to replay, but
- * an explicitly recoverable terminal state still must become runnable before
- * ForegroundSupervisor.launch() is called.
- *
- * The authoritative issue worktree is never reset, stashed, or auto-committed.
- * Unfinished edits are preserved for the fresh recovery worker, and the exact
- * authoritative lease/workspace remain in the durable state.
+ * `production-lifecycle.ts` (the unified scheduler) never writes
+ * `state.activeLease`, so `recoverableAbandonedAutoRun`'s candidate filter
+ * (which requires it) can only ever match a legacy `loop-controller.ts`
+ * -produced abandoned run — never a fresh-scheduler-produced one. The
+ * retired ForegroundSupervisor/loop-controller.ts state machine that used to
+ * reactivate such a run no longer exists (issue #165), so a matching
+ * candidate is rejected explicitly with the same actionable migration
+ * guidance `/pi-next-loop resume` gives for legacy state, instead of being
+ * silently misinterpreted or launched through a state machine that has been
+ * retired.
  */
-export async function prepareAbandonedAutoResume(
-  coordinationCwd: string,
-  state: LoopState,
-  ownerSessionId?: string,
-): Promise<AbandonedAutoResumePreparation> {
-  if (ownerSessionId && state.sessionId !== ownerSessionId) {
-    // Recovery has already passed the authoritative lease check. Bind the
-    // recovered run before any early-return path so reloads cannot later
-    // rediscover it as an unowned repository-global status.
-    state = { ...state, sessionId: ownerSessionId };
-    writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), state);
-  }
-
-  // A currently running state is already runnable. Do not mutate it merely
-  // because its previous transition happened to be settled.
-  if (state.status === "running") return { ok: true };
-  if (!isExplicitlyRecoverableState(state)) {
-    // This terminal state can never become explicitly recoverable on a later
-    // pass: its status and lease do not change just by asking again. Mark it
-    // so `recoverableAbandonedAutoRun` stops proposing it as a candidate on
-    // every subsequent `auto` invocation, without altering the durable
-    // status (e.g. a deliberate operator "stopped" stays "stopped").
-    writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), {
-      ...state,
-      autoResumeBlockedAt: new Date().toISOString(),
-    });
-    return {
-      ok: false,
-      reason:
-        `Cannot automatically reactivate abandoned pi-next run ${state.runId}: ` +
-        `terminal state is not an explicitly recoverable restart condition`,
-    };
-  }
-
-  const issueNumber = state.activeIssueNumber;
-  const canonicalWorkspace =
-    typeof issueNumber === "number" && issueNumber > 0
-      ? resolve(coordinationCwd, issueWorkspaceIdentity(issueNumber).worktree)
-      : undefined;
-  if (
-    !Number.isSafeInteger(issueNumber) ||
-    !state.activeWorkspace ||
-    state.activeWorkspace !== canonicalWorkspace
-  ) {
-    return {
-      ok: false,
-      reason: "Cannot recover abandoned pi-next run: persisted issue workspace is not canonical",
-    };
-  }
-  const executionCwd = state.activeWorkspace;
-  if (!existsSync(executionCwd)) {
-    return {
-      ok: false,
-      reason: `Cannot recover abandoned pi-next run ${state.runId}: active workspace is missing (${executionCwd})`,
-    };
-  }
-
-  let dirty: string[];
-  try {
-    dirty = (await changeFiles(executionCwd, "all")).filter(
-      (path) => path !== relative(executionCwd, markerFile(executionCwd)).replace(/\\/g, "/"),
-    );
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `Cannot inspect abandoned pi-next worktree before recovery: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-
-  const marker = markerFile(executionCwd);
-  const markerCleared = dirty.length === 0 && existsSync(marker);
-  if (markerCleared) unlinkSync(marker);
-
-  // A new Pi process must not inherit the previous process's critical streak or
-  // baseline as a permanent gate. Keep the bounded sample history for
-  // diagnostics, but sample and baseline this process before reactivation.
-  const observed = observeHostMemory(
-    runtimeCwdFor(coordinationCwd, state),
-    {
-      boundary: "restart_recovery_baseline",
-      runId: state.runId,
-      issueNumber,
-      step: state.step,
-      workerBatchTransition: state.workerBatchTransition ?? state.sessionTransition,
-    },
-    undefined,
-    undefined,
-    {},
-    { resetBaseline: true },
-  );
-  const currentCritical = observed.sample.pressure === "critical";
-  const hostMemory: NonNullable<LoopState["hostMemory"]> = {
-    status: currentCritical ? "restart_required" : observed.health.pressure,
-    heapUsed: observed.sample.heapUsed,
-    heapLimit: observed.sample.heapLimit,
-    heapUsedDelta: observed.sample.heapUsedDelta,
-    criticalStreak: observed.health.criticalStreak,
-    observedAt: observed.sample.at,
-    boundary: observed.sample.boundary,
-    ...(currentCritical ? { reason: memoryPressureReason(observed.health) } : {}),
-  };
-  const recoveryReason = currentCritical
-    ? `${memoryPressureReason(observed.health)}; current Pi process could not safely resume the preserved issue`
-    : dirty.length
-      ? `Recovered abandoned transition with uncommitted issue-worktree changes preserved for fresh recovery (${dirty.join(", ")})`
-      : markerCleared
-        ? "Recovered abandoned transition from clean durable state; cleared its issue-worktree continuation marker"
-        : "Recovered abandoned transition from clean durable state; fresh host-memory baseline established";
-
-  writeJsonAtomic(loopStateFile(coordinationCwd, state.runId), {
+async function rejectAbandonedLegacyAutoRun(cwd: string): Promise<RejectedLegacyAutoRun> {
+  const state = await recoverableAbandonedAutoRun(cwd);
+  if (!state) return {};
+  // This terminal state can never become explicitly recoverable on a later
+  // pass: its status and lease do not change just by asking again. Mark it
+  // so `recoverableAbandonedAutoRun` stops proposing it as a candidate on
+  // every subsequent `auto` invocation, without altering the durable status
+  // (e.g. a deliberate operator "stopped" stays "stopped").
+  writeJsonAtomic(loopStateFile(cwd, state.runId), {
     ...state,
-    sessionId: ownerSessionId || state.sessionId,
-    // A safe settled boundary may skip old transition replay, but it must still
-    // be runnable before launch. Preserve the exact issue/lease/worktree.
-    status: currentCritical ? "stopped" : "running",
-    hostMemory,
-    workerResultMissing: undefined,
-    stopRequested: false,
-    settledStep: dirty.length > 0 || state.step > state.settledStep ? state.step : state.settledStep,
-    updatedAt: new Date().toISOString(),
-    lastReason: recoveryReason,
+    autoResumeBlockedAt: new Date().toISOString(),
   });
   return {
-    ok: true,
-    markerCleared,
-    dirtyFiles: dirty,
-    reactivated: !currentCritical,
-    immediatelyRestopped: currentCritical,
+    runId: state.runId,
+    blockedReason:
+      `Run ${state.runId} is legacy pre-migration state (status "${state.status}") and can no longer be resumed automatically. ` +
+      `Inspect it with "/pi-next-loop status ${state.runId} verbose", then either finish any in-progress work manually or discard the run and start a fresh "/pi-next auto" (the retired ForegroundSupervisor/loop-controller.ts state machine can no longer resume it).`,
   };
 }
 
@@ -739,42 +602,16 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
               return;
             }
             try {
-              // ForegroundSupervisor.recoverOnStart owns the authority-first
-              // decision (fresh lease -> local run) and, when it finds a
-              // genuine owner, resumes it itself; only the notifications
-              // stay here.
-              const outcome = await ForegroundSupervisor.recoverOnStart(ctx);
+              // No candidate found by `recoverableAbandonedAutoRun` can ever
+              // be a fresh-scheduler-produced run (see
+              // `rejectAbandonedLegacyAutoRun`'s doc comment); reject it
+              // explicitly with actionable guidance instead of attempting to
+              // resume/launch it, then fall through to the normal handler so
+              // a new run can still start.
+              const outcome = await rejectAbandonedLegacyAutoRun(ctx.cwd);
               if (outcome.runId) preferredRunId = outcome.runId;
-              if (outcome.recoveryStatus === "restopped_host_memory") {
-                safeNotify(
-                  ctx,
-                  `Recovered authority for pi-next run ${outcome.runId} for #${outcome.issueNumber}, but the current Pi process is still under host memory pressure; restart recovery remains preserved`,
-                  "warning",
-                );
-                return;
-              }
               if (outcome.blockedReason) {
-                // An abandoned run that cannot be resumed is not a reason to
-                // refuse a fresh `auto` invocation: fall through to the
-                // normal handler so a new run can still start.
                 safeNotify(ctx, outcome.blockedReason, "warning");
-              } else if (outcome.recoveryStatus === "no_runnable_transition") {
-                safeNotify(ctx, "Abandoned pi-next recovery created no runnable issue transition", "warning");
-              }
-              if (outcome.recovered) {
-                safeNotify(
-                  ctx,
-                  `Recovered and resumed abandoned pi-next run ${outcome.runId} for #${outcome.issueNumber}`,
-                  "info",
-                );
-                if (outcome.dirtyFiles?.length) {
-                  safeNotify(
-                    ctx,
-                    `Preserving #${outcome.issueNumber} in-progress changes for recovery: ${outcome.dirtyFiles.join(", ")}`,
-                    "info",
-                  );
-                }
-                return;
               }
             } catch (error) {
               safeNotify(
