@@ -230,7 +230,7 @@ unit/type tests
   -> release
 ```
 
-Real-worker canaries should be small and bounded; protocol correctness should not depend on spending model tokens.
+Real-worker canaries should be small and bounded; protocol correctness should not depend on spending model tokens. The current release boundary is documented in [`RELEASE_QUALIFICATION.md`](RELEASE_QUALIFICATION.md): `npm run qualify:tier1` is the zero-token shared-kernel CI gate, `npm run qualify:tier2` is the disposable consumer smoke, `PI_NEXT_EVAL_ALLOW_LLM=1 npm run qualify:tier3` is the explicit Pi canary through `runSingleIssueLifecycle -> WorkerAdapter`, and `PI_NEXT_EVAL_ALLOW_LLM=1 npm run qualify:all` is the full production-cutover evidence command.
 
 ## Development policy
 
