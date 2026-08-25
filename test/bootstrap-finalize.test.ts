@@ -589,10 +589,12 @@ test("post-integration recovery rechecks the merge commit produced after concurr
     await pushUnrelatedMainCommit(f.root, f.remote, "release-before-finalize.txt", "release\n");
     const rootChecks: string[] = [];
     const candidateChecks: string[] = [];
+    const isolatedChecks: string[] = [];
     const runner: CommandRunner = async (command, args, options) => {
       if (command === "sh" && args[0] === "-c") {
         if (options.cwd === f.root) rootChecks.push(args[1] ?? "");
-        if (options.cwd === worktree) candidateChecks.push(args[1] ?? "");
+        else if (options.cwd === worktree) candidateChecks.push(args[1] ?? "");
+        else if (options.cwd.includes(".pi-next-reverify")) isolatedChecks.push(args[1] ?? "");
       }
       return bootstrapRunCommand(command, args, { cwd: options.cwd });
     };
@@ -601,8 +603,9 @@ test("post-integration recovery rechecks the merge commit produced after concurr
     const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: issue, authority, runCommand: runner });
 
     assert.equal(result.issueClosed, true);
-    assert.deepEqual(candidateChecks, ["npm run typecheck", "npm test"]);
-    assert.deepEqual(rootChecks, ["npm run typecheck", "npm test"]);
+    assert.deepEqual(rootChecks, []);
+    assert.deepEqual(isolatedChecks, ["npm run typecheck", "npm test"]);
+    assert.ok(candidateChecks.length === 0 || candidateChecks.join("\n") === "npm run typecheck\nnpm test");
     assert.equal((await readVerifiedIntegratedMainProof(await gitCommonDir(f.root), issue))?.mainSha, await git(f.root, "rev-parse", "origin/main"));
   } finally { await f.cleanup(); }
 });
@@ -839,16 +842,11 @@ test("finalizer local-main sync is idempotent when main is already current", asy
   } finally { await f.cleanup(); }
 });
 
-// The old PR-based finalizer's "already merged" fast path never touched
-// root's checkout at all, so it could tolerate a dirty/diverged/other-branch
-// coordination root as long as nothing needed merging. finalizeIssue() (the
-// #146 canonical finalizer) enforces root-on-main/clean/not-diverged as a
-// blanket safety invariant for the merge/push mutation it may need to
-// perform, even when this specific candidate turns out to need no new
-// merge. The trade-off is deliberate: one simpler, more conservative
-// finalizer instead of two. These three tests now verify the refusal is
-// safe (no data loss, no destructive git operation) rather than that root's
-// inconvenient state is silently tolerated.
+// Real merge/push still requires a safe coordination root because it mutates
+// main. Once the candidate is already durable on origin/main, post-integration
+// recovery verifies an isolated exact-SHA worktree and may close without
+// cleaning, stashing, resetting, fast-forwarding, or committing user-owned root
+// changes.
 
 test("incident diagnostics in the coordination root are preserved locally without blocking finalization", async () => {
   const f = await fixture();
@@ -872,10 +870,10 @@ test("incident diagnostics in the coordination root are preserved locally withou
   } finally { await f.cleanup(); }
 });
 
-test("dirty root checkout refuses finalize without losing or touching local work", async () => {
+test("dirty root checkout still refuses a not-yet-integrated finalize without touching local work", async () => {
   const f = await fixture();
   try {
-    await directlyIntegratedRemoteOnly(f.root, f.remote, 135);
+    await dirtyCandidate(f.root, 135);
     await writeFile(join(f.root, "README.md"), "local dirty work\n");
     const authority = new InMemoryWorkAuthority([workItem(135)]);
     await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 135, authority }), "ROOT_DIRTY");
@@ -884,7 +882,37 @@ test("dirty root checkout refuses finalize without losing or touching local work
   } finally { await f.cleanup(); }
 });
 
-test("diverged or ahead local main refuses finalize without resetting, rebasing, or merging it", async () => {
+test("already-integrated finalization reverifies away from a dirty root and preserves local work", async () => {
+  const f = await fixture();
+  try {
+    const { sha } = await directlyIntegratedRemoteOnly(f.root, f.remote, 1351);
+    await writeFile(join(f.root, "README.md"), "local dirty work\n");
+    const authority = new InMemoryWorkAuthority([workItem(1351)]);
+    const checkedCwds: string[] = [];
+    const exactTreeContents: string[] = [];
+    const result = await runBootstrapFinalize({
+      cwd: f.root,
+      issueNumber: 1351,
+      authority,
+      runCommand: async (command, args, options) => {
+        if (command === "sh" && args[0] === "-c") {
+          checkedCwds.push(options.cwd);
+          if (options.cwd.includes(".pi-next-reverify")) exactTreeContents.push(readFileSync(join(options.cwd, "feature-1351.txt"), "utf8"));
+        }
+        return bootstrapRunCommand(command, args, { cwd: options.cwd });
+      },
+    });
+    assert.equal(result.issueClosed, true);
+    assert.equal(await git(f.root, "status", "--porcelain"), "M README.md");
+    assert.match(await git(f.root, "diff", "--", "README.md"), /local dirty work/);
+    assert.ok(checkedCwds.every((cwd) => cwd !== f.root && cwd.includes(".pi-next-reverify")));
+    assert.ok(exactTreeContents.length > 0);
+    assert.ok(exactTreeContents.every((content) => content === "candidate\n"));
+    assert.equal(await git(f.remote, "merge-base", "--is-ancestor", sha, "main").then(() => "yes"), "yes");
+  } finally { await f.cleanup(); }
+});
+
+test("ahead local main no longer blocks already-integrated exact-main finalization or gets rewritten", async () => {
   const f = await fixture();
   try {
     await directlyIntegratedRemoteOnly(f.root, f.remote, 136);
@@ -893,7 +921,8 @@ test("diverged or ahead local main refuses finalize without resetting, rebasing,
     await git(f.root, "commit", "-qm", "unique local main");
     const localMain = await git(f.root, "rev-parse", "main");
     const authority = new InMemoryWorkAuthority([workItem(136)]);
-    await rejectsCode(runBootstrapFinalize({ cwd: f.root, issueNumber: 136, authority }), "UNSAFE_ROOT");
+    const result = await runBootstrapFinalize({ cwd: f.root, issueNumber: 136, authority });
+    assert.equal(result.issueClosed, true);
     assert.equal(await git(f.root, "rev-parse", "main"), localMain);
   } finally { await f.cleanup(); }
 });

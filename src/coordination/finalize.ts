@@ -378,60 +378,19 @@ export async function finalizeIssue(
   let mergeSha: string;
   let requiresReverification = false;
   try {
-    const dirty = await git(input.cwd, ["status", "--porcelain"]);
-    if (dirty.trim()) {
-      throw new FinalizeError(
-        "ROOT_BUSY",
-        "Coordination checkout is dirty; leaving it untouched. Retry once it is clean.",
-      );
-    }
-
-    // Establish the candidate's own verified base *before* integrating, so
-    // the post-merge check below can tell a genuine 3-way integration (main
-    // gained commits the candidate was never verified against) apart from a
-    // no-op/fast-forward one. `merge-base` is stable for this purpose only
-    // while the candidate isn't yet reachable from main -- once merged (e.g.
-    // a retry after a prior call already landed it), the candidate itself
-    // becomes its own merge-base with main, which would wrongly look like
-    // "no divergence" for a stale comparison. Skip the check entirely in
-    // that already-integrated case: this call has nothing new to integrate,
-    // so there is nothing new to reverify either.
+    // Establish whether integration is already durable using only committed
+    // refs.  If the candidate is already reachable from origin/main, finalizing
+    // after exact-main reverification does not need to mutate the operator's
+    // checkout; unrelated dirty files in the coordination root are therefore
+    // preserved and must not block closure.  A real merge/push still requires
+    // the historical clean-root guard below.
     await git(input.cwd, ["fetch", "origin", "main"]);
     const remoteMainAtStart = await git(input.cwd, ["rev-parse", "refs/remotes/origin/main"]);
     const candidateAlreadyOnMain =
       (await tryGit(input.cwd, ["merge-base", "--is-ancestor", input.candidateSha, remoteMainAtStart])) !==
       undefined;
-    const verifiedBase = candidateAlreadyOnMain
-      ? undefined
-      : await git(input.cwd, ["merge-base", input.candidateSha, remoteMainAtStart]);
-    let integrationBase: string | undefined;
 
-    let pushed = false;
-    let lastPushError: unknown;
-    for (let attempt = 1; attempt <= MAX_PROMOTION_ATTEMPTS && !pushed; attempt += 1) {
-      await git(input.cwd, ["fetch", "origin", "main"]);
-      const localMain = await git(input.cwd, ["rev-parse", "HEAD"]);
-      const remoteMain = await git(input.cwd, ["rev-parse", "refs/remotes/origin/main"]);
-
-      if (localMain !== remoteMain) {
-        const counts = await git(input.cwd, [
-          "rev-list",
-          "--left-right",
-          "--count",
-          `${localMain}...${remoteMain}`,
-        ]);
-        const [aheadRaw = "0"] = counts.split(/\s+/);
-        if (Number.parseInt(aheadRaw, 10) > 0) {
-          throw new FinalizeError(
-            "UNSAFE_ROOT",
-            "Local main has unpublished commits ahead of origin/main; reconcile explicitly before finalizing",
-          );
-        }
-        await git(input.cwd, ["merge", "--ff-only", "refs/remotes/origin/main"]);
-      }
-
-      // Re-derive the candidate tip on every attempt: the branch could have
-      // advanced (or been rewritten) between the pre-lock check and now.
+    if (candidateAlreadyOnMain) {
       const currentTip = await tryGit(input.cwd, ["rev-parse", branch]);
       if (currentTip !== input.candidateSha) {
         throw new FinalizeError(
@@ -439,58 +398,100 @@ export async function finalizeIssue(
           `${branch} advanced past the verified candidate ${input.candidateSha} during finalize; reconcile and re-verify`,
         );
       }
-
-      // Captured before the merge, from *this* attempt: the base the
-      // candidate is actually being integrated against, whichever attempt
-      // ends up winning the race below.
-      integrationBase = await git(input.cwd, ["rev-parse", "HEAD"]);
-      await git(input.cwd, ["merge", "--no-ff", "--no-edit", input.candidateSha]);
-      try {
-        await git(input.cwd, ["push", "origin", "HEAD:main"]);
-        pushed = true;
-      } catch (error) {
-        lastPushError = error;
-        // Another promotion won the race. Undo only our local unpublished
-        // merge (never touches origin) and retry against fresh main.
-        await git(input.cwd, ["reset", "--hard", localMain]);
+      mergeSha = remoteMainAtStart;
+      requiresReverification = input.verifiedIntegratedMain !== mergeSha;
+      emitLifecycleCheckpoint("reachability_proven", "after");
+    } else {
+      const dirty = await git(input.cwd, ["status", "--porcelain"]);
+      if (dirty.trim()) {
+        throw new FinalizeError(
+          "ROOT_BUSY",
+          "Coordination checkout is dirty; leaving it untouched. Retry once it is clean.",
+        );
       }
-    }
 
-    if (!pushed) {
-      throw new FinalizeError(
-        "PROMOTION_RACE",
-        `Could not push main after ${MAX_PROMOTION_ATTEMPTS} attempts; another promotion kept winning the race`,
-        { cause: lastPushError instanceof Error ? lastPushError.message : String(lastPushError) },
-      );
-    }
+      // Establish the candidate's own verified base *before* integrating, so
+      // the post-merge check below can tell a genuine 3-way integration (main
+      // gained commits the candidate was never verified against) apart from a
+      // no-op/fast-forward one.
+      const verifiedBase = await git(input.cwd, ["merge-base", input.candidateSha, remoteMainAtStart]);
+      let integrationBase: string | undefined;
 
-    mergeSha = await git(input.cwd, ["rev-parse", "HEAD"]);
-    await git(input.cwd, ["fetch", "origin", "main"]);
-    const reachable = await tryGit(input.cwd, [
-      "merge-base",
-      "--is-ancestor",
-      input.candidateSha,
-      "refs/remotes/origin/main",
-    ]);
-    if (reachable === undefined) {
-      throw new FinalizeError(
-        "PROMOTION_RACE",
-        "Pushed main does not contain the verified candidate commit; refusing to close",
-      );
-    }
-    emitLifecycleCheckpoint("reachability_proven", "after");
+      let pushed = false;
+      let lastPushError: unknown;
+      for (let attempt = 1; attempt <= MAX_PROMOTION_ATTEMPTS && !pushed; attempt += 1) {
+        await git(input.cwd, ["fetch", "origin", "main"]);
+        const localMain = await git(input.cwd, ["rev-parse", "HEAD"]);
+        const remoteMain = await git(input.cwd, ["rev-parse", "refs/remotes/origin/main"]);
 
-    // #20: when there was nothing new to integrate this call (the candidate
-    // was already reachable from origin/main before we started), candidate
-    // reachability alone never proves the *current* integrated main tree is
-    // the one the caller actually reverified -- another commit may have
-    // landed since. Require an exact match against the caller's proof
-    // (the `mergeSha` from the `requiresReverification: true` result they
-    // verified) rather than treating "nothing to merge" as "nothing to
-    // reverify".
-    requiresReverification = candidateAlreadyOnMain
-      ? input.verifiedIntegratedMain !== mergeSha
-      : verifiedBase !== undefined && integrationBase !== verifiedBase;
+        if (localMain !== remoteMain) {
+          const counts = await git(input.cwd, [
+            "rev-list",
+            "--left-right",
+            "--count",
+            `${localMain}...${remoteMain}`,
+          ]);
+          const [aheadRaw = "0"] = counts.split(/\s+/);
+          if (Number.parseInt(aheadRaw, 10) > 0) {
+            throw new FinalizeError(
+              "UNSAFE_ROOT",
+              "Local main has unpublished commits ahead of origin/main; reconcile explicitly before finalizing",
+            );
+          }
+          await git(input.cwd, ["merge", "--ff-only", "refs/remotes/origin/main"]);
+        }
+
+        // Re-derive the candidate tip on every attempt: the branch could have
+        // advanced (or been rewritten) between the pre-lock check and now.
+        const currentTip = await tryGit(input.cwd, ["rev-parse", branch]);
+        if (currentTip !== input.candidateSha) {
+          throw new FinalizeError(
+            "CANDIDATE_STALE",
+            `${branch} advanced past the verified candidate ${input.candidateSha} during finalize; reconcile and re-verify`,
+          );
+        }
+
+        // Captured before the merge, from *this* attempt: the base the
+        // candidate is actually being integrated against, whichever attempt
+        // ends up winning the race below.
+        integrationBase = await git(input.cwd, ["rev-parse", "HEAD"]);
+        await git(input.cwd, ["merge", "--no-ff", "--no-edit", input.candidateSha]);
+        try {
+          await git(input.cwd, ["push", "origin", "HEAD:main"]);
+          pushed = true;
+        } catch (error) {
+          lastPushError = error;
+          // Another promotion won the race. Undo only our local unpublished
+          // merge (never touches origin) and retry against fresh main.
+          await git(input.cwd, ["reset", "--hard", localMain]);
+        }
+      }
+
+      if (!pushed) {
+        throw new FinalizeError(
+          "PROMOTION_RACE",
+          `Could not push main after ${MAX_PROMOTION_ATTEMPTS} attempts; another promotion kept winning the race`,
+          { cause: lastPushError instanceof Error ? lastPushError.message : String(lastPushError) },
+        );
+      }
+
+      mergeSha = await git(input.cwd, ["rev-parse", "HEAD"]);
+      await git(input.cwd, ["fetch", "origin", "main"]);
+      const reachable = await tryGit(input.cwd, [
+        "merge-base",
+        "--is-ancestor",
+        input.candidateSha,
+        "refs/remotes/origin/main",
+      ]);
+      if (reachable === undefined) {
+        throw new FinalizeError(
+          "PROMOTION_RACE",
+          "Pushed main does not contain the verified candidate commit; refusing to close",
+        );
+      }
+      emitLifecycleCheckpoint("reachability_proven", "after");
+      requiresReverification = verifiedBase !== undefined && integrationBase !== verifiedBase;
+    }
   } finally {
     release();
   }

@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { prepareDependencies } from "../bootstrap/dependencies.ts";
 import { loadPiNextConfig } from "./config.ts";
 import { finalizeIssue, type FinalizeInput, type FinalizeResult } from "./finalize.ts";
 import { issueLeaseMatchesOwner, isIssueLeaseFresh } from "./issue-authority.ts";
@@ -145,19 +146,76 @@ export async function commitIncidentDiagnosticsBeforeFinalization(input: {
   return { status: "committed", paths, commitSha };
 }
 
-async function cleanMainCheckoutAt(root: string, target: string, runner: ReverificationCommandRunner): Promise<void> {
-  const branch = await git(root, ["branch", "--show-current"], runner);
-  if (branch !== "main") throw new Error(`post-integration reverification requires the coordination root on main; found ${branch || "detached HEAD"}`);
-  const dirty = await git(root, ["status", "--porcelain"], runner);
-  if (dirty.trim()) throw new Error("post-integration reverification requires a clean coordination root");
-  const localMain = await git(root, ["rev-parse", "HEAD"], runner);
-  if (localMain === target) return;
-  const counts = await git(root, ["rev-list", "--left-right", "--count", `${localMain}...${target}`], runner);
-  const [aheadRaw = "0"] = counts.split(/\s+/);
-  if (Number.parseInt(aheadRaw, 10) > 0) throw new Error("local main has unpublished commits ahead of the integrated main revision; reconcile explicitly before reverification");
-  await git(root, ["merge", "--ff-only", target], runner);
-  const head = await git(root, ["rev-parse", "HEAD"], runner);
-  if (head !== target) throw new Error(`failed to place main at exact integrated revision ${target}`);
+function verificationWorkspacePath(root: string, issueNumber: number, mergeSha: string): string {
+  return join(resolve(root), ".worktrees", `.pi-next-reverify-${issueNumber}-${mergeSha}`);
+}
+
+async function prepareExactMainVerificationWorkspace(input: {
+  root: string;
+  issueNumber: number;
+  mergeSha: string;
+  runner: ReverificationCommandRunner;
+}): Promise<string> {
+  const workspace = verificationWorkspacePath(input.root, input.issueNumber, input.mergeSha);
+  await mkdir(join(resolve(input.root), ".worktrees"), { recursive: true });
+  const existingHead = await git(workspace, ["rev-parse", "--verify", "HEAD"], input.runner).catch(() => undefined);
+  if (existingHead !== undefined) {
+    if (existingHead !== input.mergeSha) {
+      throw new Error(`post-integration reverification workspace ${workspace} is at ${existingHead}, expected ${input.mergeSha}`);
+    }
+    return workspace;
+  }
+
+  await git(input.root, ["rev-parse", "--verify", `${input.mergeSha}^{commit}`], input.runner);
+  await git(input.root, ["worktree", "add", "--detach", workspace, input.mergeSha], input.runner);
+  const head = await git(workspace, ["rev-parse", "HEAD"], input.runner);
+  if (head !== input.mergeSha) throw new Error(`verification workspace is at ${head}, expected ${input.mergeSha}`);
+  return workspace;
+}
+
+async function ensureVerificationWorkspaceDependencies(
+  workspace: string,
+  runner: ReverificationCommandRunner,
+  reporter?: (line: string) => void,
+): Promise<void> {
+  const report = await prepareDependencies(workspace, async (command, args, options) => {
+    const started = Date.now();
+    const result = await runner(command, args, { cwd: options.cwd });
+    return {
+      command,
+      args,
+      cwd: options.cwd,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      durationMs: result.durationMs ?? Date.now() - started,
+    };
+  }, 10 * 60_000);
+  if (report.action !== "not-required") reporter?.(`post-integration reverification · dependencies ${report.action}`);
+}
+
+async function cleanupExactMainVerificationWorkspace(input: {
+  root: string;
+  workspace: string;
+  runner: ReverificationCommandRunner;
+  reporter?: (line: string) => void;
+}): Promise<void> {
+  const gitDir = await git(input.workspace, ["rev-parse", "--git-dir"], input.runner).catch(() => undefined);
+  if (!gitDir) return;
+  const status = await git(input.workspace, ["status", "--porcelain", "--untracked-files=all", "--ignored=matching"], input.runner).catch(() => "");
+  const unsafeResidue = status.split("\n").filter((line) => {
+    const path = statusPath(line);
+    if (!path) return false;
+    return !(line.startsWith("!! ") && (path === "node_modules" || path.startsWith("node_modules/")));
+  });
+  if (unsafeResidue.length > 0) {
+    input.reporter?.(`post-integration reverification · preserved dirty verification workspace ${input.workspace}`);
+    return;
+  }
+  const result = await input.runner("git", ["-C", input.root, "worktree", "remove", input.workspace], { cwd: input.root });
+  if (result.exitCode !== 0) {
+    input.reporter?.(`post-integration reverification · workspace cleanup skipped: ${(result.stderr || result.stdout).trim()}`);
+  }
 }
 
 function checksMatch(actual: readonly string[], expected: readonly string[]): boolean {
@@ -184,19 +242,6 @@ export async function reverifyExactIntegratedMain(input: {
   let currentMain = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
   if (currentMain !== input.mergeSha) return { status: "requires-reverification", mergeSha: currentMain, reason: "main-advanced" };
 
-  const residue = await commitIncidentDiagnosticsBeforeFinalization({
-    root: input.root,
-    runCommand: input.runCommand,
-    reporter: input.reporter,
-  });
-  if (residue.status === "committed") {
-    await git(input.root, ["fetch", "origin", "main", "--quiet"], input.runCommand);
-    currentMain = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
-    return { status: "requires-reverification", mergeSha: currentMain, reason: "main-advanced" };
-  }
-
-  await cleanMainCheckoutAt(input.root, input.mergeSha, input.runCommand);
-
   const proof = await readVerifiedIntegratedMainProof(input.gitCommonDir, input.issueNumber);
   if (
     proof?.candidateSha === input.candidateSha &&
@@ -209,35 +254,59 @@ export async function reverifyExactIntegratedMain(input: {
     return { status: "requires-reverification", mergeSha: stillCurrent, reason: "main-advanced" };
   }
 
-  const records: ReverificationCheckRecord[] = [];
-  for (const command of checks) {
-    input.reporter?.(`post-integration reverification · ${command}`);
-    const result = await input.runCommand("sh", ["-c", command], { cwd: input.root });
-    const record: ReverificationCheckRecord = {
-      command,
-      exitCode: result.exitCode,
-      passed: result.exitCode === 0,
-      ...(result.exitCode === 0 ? {} : { stdout: bounded(result.stdout), stderr: bounded(result.stderr) }),
-    };
-    records.push(record);
-    if (result.exitCode !== 0) return { status: "verification-failed", mergeSha: input.mergeSha, failedCheck: record, checks: records };
-  }
-
-  const headAfter = await git(input.root, ["rev-parse", "HEAD"], input.runCommand);
-  await git(input.root, ["fetch", "origin", "main", "--quiet"], input.runCommand);
-  const currentAfter = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
-  if (headAfter !== input.mergeSha || currentAfter !== input.mergeSha) {
-    return { status: "requires-reverification", mergeSha: currentAfter, reason: "main-advanced" };
-  }
-
-  await writeVerifiedIntegratedMainProof({
-    gitCommonDir: input.gitCommonDir,
+  const workspace = await prepareExactMainVerificationWorkspace({
+    root: input.root,
     issueNumber: input.issueNumber,
-    candidateSha: input.candidateSha,
-    mainSha: input.mergeSha,
-    checks,
+    mergeSha: input.mergeSha,
+    runner: input.runCommand,
   });
-  return { status: "verified", mergeSha: input.mergeSha, source: "executed-checks", checks: records };
+
+  const records: ReverificationCheckRecord[] = [];
+  try {
+    try {
+      await ensureVerificationWorkspaceDependencies(workspace, input.runCommand, input.reporter);
+    } catch (error) {
+      const record: ReverificationCheckRecord = {
+        command: "prepare verification workspace dependencies",
+        exitCode: 1,
+        passed: false,
+        stderr: bounded(error instanceof Error ? error.message : String(error)),
+      };
+      records.push(record);
+      return { status: "verification-failed", mergeSha: input.mergeSha, failedCheck: record, checks: records };
+    }
+
+    for (const command of checks) {
+      input.reporter?.(`post-integration reverification · ${command}`);
+      const result = await input.runCommand("sh", ["-c", command], { cwd: workspace });
+      const record: ReverificationCheckRecord = {
+        command,
+        exitCode: result.exitCode,
+        passed: result.exitCode === 0,
+        ...(result.exitCode === 0 ? {} : { stdout: bounded(result.stdout), stderr: bounded(result.stderr) }),
+      };
+      records.push(record);
+      if (result.exitCode !== 0) return { status: "verification-failed", mergeSha: input.mergeSha, failedCheck: record, checks: records };
+    }
+
+    const headAfter = await git(workspace, ["rev-parse", "HEAD"], input.runCommand);
+    await git(input.root, ["fetch", "origin", "main", "--quiet"], input.runCommand);
+    const currentAfter = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
+    if (headAfter !== input.mergeSha || currentAfter !== input.mergeSha) {
+      return { status: "requires-reverification", mergeSha: currentAfter, reason: "main-advanced" };
+    }
+
+    await writeVerifiedIntegratedMainProof({
+      gitCommonDir: input.gitCommonDir,
+      issueNumber: input.issueNumber,
+      candidateSha: input.candidateSha,
+      mainSha: input.mergeSha,
+      checks,
+    });
+    return { status: "verified", mergeSha: input.mergeSha, source: "executed-checks", checks: records };
+  } finally {
+    await cleanupExactMainVerificationWorkspace({ root: input.root, workspace, runner: input.runCommand, reporter: input.reporter });
+  }
 }
 
 export async function finalizeWithPostIntegrationReverification(input: {

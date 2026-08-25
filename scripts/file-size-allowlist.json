@@ -24,6 +24,7 @@
   "src/coordination/issue-leases.ts": "legacy lease authority module predating this check; refactor separately",
   "src/coordination/lifecycle-journal.ts": "legacy journal module predating this check; refactor separately",
   "src/coordination/incident-reporting.ts": "cohesive deterministic incident reporting pipeline; split after schema stabilizes",
+  "src/coordination/post-integration-reverification.ts": "cohesive exact-main finalization recovery module; issue #160 adds isolated verification worktree mechanics before a separate refactor",
   "src/coordination/self-assessment.ts": "legacy self-assessment module predating this check; refactor separately",
   "src/coordination/work-authority.ts": "legacy work authority module predating this check; refactor separately",
   "scripts/bootstrap-finalize.ts": "bootstrap finalizer is a legacy cohesive lifecycle script; issue #114 adds shared lifecycle-lock entry wrapping before a separate refactor",

@@ -299,9 +299,6 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
       runCommand: runner,
       reporter: (line) => say(`bootstrap finalize #${issueNumber} · ${line}`),
     });
-    const coordStatus = await git(root, ["status", "--porcelain"], runner);
-    if (coordStatus) throw new BootstrapFinalizeError("ROOT_DIRTY", "coordination checkout is dirty");
-
     await git(worktree, ["fetch", "origin", "main", "--quiet"], runner);
     await git(worktree, ["diff", "--check"], runner);
     const worktreeHead = await git(worktree, ["rev-parse", "HEAD"], runner);
@@ -325,6 +322,8 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     const liveCandidateTakesPrecedence = !!staleProof && (headAlreadyIntegrated || liveCommittedIdentityDelta.length > 0);
 
     if (dirty.length) {
+      const coordStatus = await git(root, ["status", "--porcelain"], runner);
+      if (coordStatus) throw new BootstrapFinalizeError("ROOT_DIRTY", "coordination checkout is dirty");
       if (issue.state.trim().toLowerCase() === "closed") {
         throw new BootstrapFinalizeError("UNIQUE_WORK_PRESENT", "refusing to reinterpret dirty worktree as a new candidate after the issue is already closed");
       }
@@ -381,6 +380,11 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
   const alreadyIntegrated = alreadyIntegratedFastPathProven
     && candidateSha !== originMainTip
     && (await tryGit(root, ["merge-base", "--is-ancestor", candidateSha, "origin/main"], runner)) !== undefined;
+
+  if (!alreadyIntegrated) {
+    const coordStatus = await git(root, ["status", "--porcelain"], runner);
+    if (coordStatus) throw new BootstrapFinalizeError("ROOT_DIRTY", "coordination checkout is dirty");
+  }
 
   if (alreadyIntegrated) {
     // Durably record this candidate as integrated even when it was verified
