@@ -108,6 +108,51 @@ test("status exposes budget baseline and post-activation consumption", async () 
   }
 });
 
+test("authoritative live run disagreeing with the footer-selected run fires onIdentityMismatch exactly once (#145 Campsty #647/#640 shape)", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-loop-status-identity-mismatch-"));
+  try {
+    const footer = state("run-640", { activeIssueNumber: 640, sessionId: "session-a" });
+    const live = state("run-647", { activeIssueNumber: 647, sessionId: "session-a" });
+    await persist(cwd, footer, "run_id=run-640\npid=101\n");
+    await persist(cwd, live);
+    const mismatches: unknown[] = [];
+    const output = renderLoopStatus(cwd, "session-a", undefined, "summary", {
+      processAlive: (pid) => pid === 101,
+      authoritativeRunId: "run-647",
+      onIdentityMismatch: (details) => mismatches.push(details),
+    });
+    assert.equal(mismatches.length, 1);
+    assert.deepEqual(mismatches[0], {
+      activeIssue: 647,
+      activeRunId: "run-647",
+      footerIssue: 640,
+      footerRunId: "run-640",
+      reason: "authoritative live run run-647 (issue #647) disagrees with footer-selected run run-640 (issue #640)",
+    });
+    assert.match(output, /Current run: run-640/);
+    assert.match(output, /Authoritative recoverable: run-647/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("onIdentityMismatch does not fire when authoritative merely fills in an absent current (ordinary recovery, not a contradiction)", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-loop-status-no-mismatch-"));
+  try {
+    const live = state("run-647", { activeIssueNumber: 647, sessionId: "session-other" });
+    await persist(cwd, live);
+    const mismatches: unknown[] = [];
+    renderLoopStatus(cwd, "session-a", undefined, "summary", {
+      processAlive: () => false,
+      authoritativeRunId: "run-647",
+      onIdentityMismatch: (details) => mismatches.push(details),
+    });
+    assert.equal(mismatches.length, 0);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("default status bounds history while verbose mode exposes every retained run", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-next-loop-status-history-"));
   try {

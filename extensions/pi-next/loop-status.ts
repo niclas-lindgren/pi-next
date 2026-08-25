@@ -35,11 +35,31 @@ export interface LoopStatusSelection {
   ambiguous: boolean;
 }
 
+/**
+ * A mechanically proven contradiction between the run an authority-backed
+ * lease read proves is live/current and the run this render would otherwise
+ * present as "Current run" (the Campsty #647/#640 shape, #146/#145).
+ */
+export interface IdentityMismatchDetails {
+  activeIssue?: number;
+  activeRunId: string;
+  footerIssue?: number;
+  footerRunId: string;
+  reason: string;
+}
+
 export interface LoopStatusOptions {
   processAlive?: (pid: number) => boolean;
   /** Fresh authority result, when the caller performed the bounded lease read. */
   authoritativeRunId?: string;
   authorityUnavailable?: boolean;
+  /**
+   * Called synchronously, at most once per render, when the authoritative
+   * live run and the presented "Current run" both resolve to a concrete but
+   * different run. Rendering stays pure/side-effect-free otherwise; the
+   * caller decides whether/how to persist or report this.
+   */
+  onIdentityMismatch?: (details: IdentityMismatchDetails) => void;
 }
 
 function defaultProcessAlive(pid: number): boolean {
@@ -218,6 +238,19 @@ export function renderLoopStatus(
   }
   if (authoritative && (!current || authoritative.state.runId !== current.state.runId)) {
     lines.push(`Authoritative recoverable: ${recordLine(authoritative)}`);
+    // A missing "current" simply means no local session record was live to
+    // select; that is ordinary recovery. A concrete "current" that actively
+    // disagrees with the authoritative live run is the mechanical
+    // contradiction #145's controller-identity-mismatch incident exists for.
+    if (current) {
+      options.onIdentityMismatch?.({
+        activeIssue: authoritative.state.activeIssueNumber,
+        activeRunId: authoritative.state.runId,
+        footerIssue: current.state.activeIssueNumber,
+        footerRunId: current.state.runId,
+        reason: `authoritative live run ${authoritative.state.runId} (issue ${issueLabel(authoritative.state)}) disagrees with footer-selected run ${current.state.runId} (issue ${issueLabel(current.state)})`,
+      });
+    }
   } else if (options.authorityUnavailable) {
     lines.push("Authoritative recoverable: unknown (lease authority unavailable; no local record was promoted)");
   }

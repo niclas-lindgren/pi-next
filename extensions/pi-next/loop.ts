@@ -78,7 +78,14 @@ import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 import { appendWorkerNarrative, type WorkerWorkLogSink } from "./work-log.ts";
 import { attachWorkerDisplay, type WorkerDisplayController } from "./worker-display.ts";
 import { bindLiveAutoRun, getLiveCtx, getLiveCtxForRun, sessionIdentity } from "./live-ctx.ts";
-import { renderLoopStatus } from "./loop-status.ts";
+import { renderLoopStatus, type IdentityMismatchDetails } from "./loop-status.ts";
+import {
+  createControllerIdentityMismatchIncident,
+  readLastIncidentBundle,
+  reportIncidentBundle,
+} from "../../src/coordination/incident-reporting.ts";
+import { commitIncidentDiagnosticsBeforeFinalization } from "../../src/coordination/post-integration-reverification.ts";
+import { runCommand } from "../../src/bootstrap/command-runner.ts";
 import {
   createSupervisorRuntime,
   type SupervisorRuntime,
@@ -145,6 +152,46 @@ async function authoritativeStatusRun(
     }
   }
   return { authorityUnavailable: unavailable };
+}
+
+/**
+ * Persist/report the Campsty #647/#640-shape controller/footer identity
+ * contradiction as a framework incident (#145). Debounced against the last
+ * persisted local bundle so repeated status polls against an unresolved
+ * contradiction do not spam a fresh incident file/commit on every call;
+ * GitHub-side dedupe (existing open-issue occurrence append) still applies
+ * once persisted.
+ */
+export function reportIdentityMismatch(cwd: string, details: IdentityMismatchDetails): void {
+  try {
+    const last = readLastIncidentBundle(cwd);
+    if (
+      last?.failure.code === "CONTROLLER_IDENTITY_MISMATCH" &&
+      last.identityMismatch?.activeRunId === details.activeRunId &&
+      last.identityMismatch?.footerRunId === details.footerRunId
+    ) {
+      return;
+    }
+    const config = loadPiNextConfig(cwd);
+    const bundle = createControllerIdentityMismatchIncident({
+      cwd,
+      activeIssue: details.activeIssue,
+      activeRunId: details.activeRunId,
+      footerIssue: details.footerIssue,
+      footerRunId: details.footerRunId,
+      reason: details.reason,
+    });
+    void reportIncidentBundle(cwd, bundle, {
+      config,
+      github: config.incidentReporting.autoCreateFrameworkIncidents && bundle.classification.reportability === "upstream",
+    })
+      .then(() => commitIncidentDiagnosticsBeforeFinalization({ root: cwd, runCommand }))
+      .catch(() => {
+        // Incident capture/reporting is observational and must never affect status rendering.
+      });
+  } catch {
+    // Incident capture/reporting is observational and must never affect status rendering.
+  }
 }
 
 function notifyLive(
@@ -1165,7 +1212,10 @@ export async function runPiNextLoop(
     const authority = await authoritativeStatusRun(ctx.cwd);
     notifySafely(
       ctx,
-      renderLoopStatus(ctx.cwd, sessionIdentity(ctx), explicitRunId, mode, authority),
+      renderLoopStatus(ctx.cwd, sessionIdentity(ctx), explicitRunId, mode, {
+        ...authority,
+        onIdentityMismatch: (details) => reportIdentityMismatch(ctx.cwd, details),
+      }),
       "info",
     );
     return;

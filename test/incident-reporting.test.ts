@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,6 +20,39 @@ import {
 } from "../src/coordination/index.ts";
 import type { BootstrapReport } from "../src/bootstrap/types.ts";
 import type { UnifiedLifecycleResult } from "../src/lifecycle/index.ts";
+import { renderLoopStatus } from "../extensions/pi-next/loop-status.ts";
+import { reportIdentityMismatch } from "../extensions/pi-next/loop.ts";
+import { emptyLoopMetrics, type LoopState } from "../extensions/pi-next/loop-state.ts";
+
+function loopState(runId: string, overrides: Partial<LoopState> = {}): LoopState {
+  const now = new Date().toISOString();
+  return {
+    version: 1,
+    runId,
+    sessionId: "session-a",
+    requestedIssues: 1,
+    remainingIssues: 1,
+    step: 1,
+    settledStep: 0,
+    maxSteps: 20,
+    completedIssues: [],
+    deferredIssues: [],
+    issueMetrics: [],
+    status: "running",
+    stopRequested: false,
+    createdAt: now,
+    updatedAt: now,
+    metrics: emptyLoopMetrics(),
+    ...overrides,
+  };
+}
+
+async function persistLoopState(cwd: string, value: LoopState, lock?: string): Promise<void> {
+  const dir = join(cwd, ".pi", "runtime", "pi-next-loops", value.runId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "state.json"), JSON.stringify(value));
+  if (lock !== undefined) await writeFile(join(dir, "controller.lock"), lock);
+}
 
 class FakeIncidentAuthority implements IncidentGithubAuthority {
   comments: { repository: string; issueNumber: number; body: string }[] = [];
@@ -148,6 +181,54 @@ test("controller/footer identity mismatch is captured as reportable framework in
   assert.equal(bundle.classification.reportability, "upstream");
   assert.equal(bundle.failure.code, "CONTROLLER_IDENTITY_MISMATCH");
   assert.equal(bundle.identityMismatch?.footerIssue, 646);
+});
+
+test("a real Campsty #647/#640-shape status contradiction is automatically persisted and retrievable via report --last, without the test constructing the bundle itself (#145)", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-identity-mismatch-report-"));
+  try {
+    // Reproduce the production wiring: renderLoopStatus detects the
+    // contradiction and hands only raw run/issue identities to the reporter
+    // (loop.ts's reportIdentityMismatch) - the same call path a real
+    // `/pi-next-loop status` invocation takes, not a hand-built bundle.
+    await persistLoopState(cwd, loopState("run-640", { activeIssueNumber: 640 }), "run_id=run-640\npid=101\n");
+    await persistLoopState(cwd, loopState("run-647", { activeIssueNumber: 647 }));
+    const mismatches: Parameters<typeof reportIdentityMismatch>[1][] = [];
+    renderLoopStatus(cwd, "session-a", undefined, "summary", {
+      processAlive: (pid) => pid === 101,
+      authoritativeRunId: "run-647",
+      onIdentityMismatch: (details) => mismatches.push(details),
+    });
+    assert.equal(mismatches.length, 1);
+
+    reportIdentityMismatch(cwd, mismatches[0]!);
+
+    const last = readLastIncidentBundle(cwd);
+    assert.ok(last, "report --last must retrieve the automatically persisted bundle");
+    assert.equal(last!.failure.code, "CONTROLLER_IDENTITY_MISMATCH");
+    assert.equal(last!.identityMismatch?.activeIssue, 647);
+    assert.equal(last!.identityMismatch?.activeRunId, "run-647");
+    assert.equal(last!.identityMismatch?.footerIssue, 640);
+    assert.equal(last!.identityMismatch?.footerRunId, "run-640");
+
+    const bySpecificIssue = readLastIncidentBundle(cwd, 647);
+    assert.equal(bySpecificIssue?.failure.code, "CONTROLLER_IDENTITY_MISMATCH");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("repeated identity-mismatch status polls against the same unresolved contradiction do not spam a fresh incident file per call", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-identity-mismatch-debounce-"));
+  try {
+    const details = { activeIssue: 647, activeRunId: "run-647", footerIssue: 640, footerRunId: "run-640", reason: "authoritative live run run-647 disagrees with footer-selected run run-640" };
+    reportIdentityMismatch(cwd, details);
+    const first = readLastIncidentBundle(cwd);
+    reportIdentityMismatch(cwd, details);
+    const second = readLastIncidentBundle(cwd);
+    assert.equal(first?.createdAt, second?.createdAt, "an identical unresolved mismatch must not persist a second bundle");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 function bootstrapReport(): BootstrapReport {

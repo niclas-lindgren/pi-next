@@ -483,6 +483,7 @@ export function createControllerIdentityMismatchIncident(input: {
 }): IncidentDiagnosticBundle {
   return createIncidentBundle({
     cwd: input.cwd,
+    ...(input.activeIssue !== undefined ? { source: { issueNumber: input.activeIssue } } : {}),
     failure: {
       subsystem: "auto-controller",
       phase: input.phase || "controller",
