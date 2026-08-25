@@ -231,6 +231,26 @@
     },
     {
       "version": 1,
+      "name": "historical: post-integration reverification dirty coordination root recovered mechanically",
+      "provenance": "Normalized from the 2026-08-25 bootstrap self-host #83 run: implementation and deterministic verification passed, the candidate was integrated, diagnostics were recorded, and only coordination-root residue blocked post-integration reverification.",
+      "invariant": "A dirty operator checkout after candidate integration is mechanical finalization recovery: preserve the candidate, run exact-main reverification outside the mutable root, and do not launch implementation or repair again.",
+      "runId": "hist-2026-08-25-issue-83-dirty-root-reverify",
+      "issueNumber": 816,
+      "events": [
+        { "event": "lease_claimed", "payload": { "agent": "bootstrap" } },
+        { "event": "workspace_prepared", "payload": { "worktree": ".worktrees/issue-816", "branch": "agent/issue-816" } },
+        { "event": "worker_started", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation" } },
+        { "event": "worker_finished", "payload": { "adapterId": "pi", "adapterVersion": "sanitized", "phase": "implementation", "ok": true } },
+        { "event": "verification_finished", "payload": { "verification": "pass", "candidateSha": "8383838383838383838383838383838383838383" } },
+        { "event": "candidate_committed", "payload": { "candidateSha": "8383838383838383838383838383838383838383" } },
+        { "event": "promotion_succeeded", "payload": { "candidateSha": "8383838383838383838383838383838383838383", "mergeSha": "1601601601601601601601601601601601601601" } },
+        { "event": "failure_recorded", "payload": { "scope": "mechanical-finalization-recovery", "stage": "post-integration-reverification", "reasonCode": "dirty_coordination_root", "summary": "root residue cannot require a model rerun after integration" } }
+      ],
+      "observed": { "leaseOwned": true, "workspaceExists": true, "candidateReachable": true, "authorityOpen": true },
+      "expect": { "nextAction": "reconcile_reachability", "mustNotRepeat": ["start_worker", "run_worker", "verify_candidate", "promote_candidate"] }
+    },
+    {
+      "version": 1,
       "name": "historical: dirty baseline branch was mistaken for integrated candidate",
       "provenance": "Normalized from issue #157: origin/main advanced while the canonical issue worktree held dirty tracked and untracked candidate files on the old baseline HEAD.",
       "invariant": "Dirty canonical candidate state takes precedence over raw HEAD ancestry; closure and cleanup cannot run while the exact dirty candidate is not the integrated SHA/tree.",

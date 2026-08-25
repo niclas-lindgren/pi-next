@@ -374,6 +374,42 @@ test("finalizeRequestedPromotion resumes after a crash between push and close wi
   }
 });
 
+test("production promotion recovery runs required post-integration checks before closing an already integrated candidate with a dirty root", async () => {
+  const fixture = await createDisposableGitFixture({
+    prefix: "pi-next-checkpoint-reverify-dirty-",
+    initialFiles: {
+      "README.md": "fixture\n",
+      ".gitignore": ".worktrees/\n.pi/\n",
+      "package.json": `${JSON.stringify({ scripts: { typecheck: "true", test: "true" } }, null, 2)}\n`,
+    },
+  });
+  try {
+    const issue = 640;
+    const { path: workspace } = await fixture.addIssueWorktree(issue);
+    await writeFile(`${workspace}/already-integrated-dirty-root.txt`, "already integrated\n");
+    await checkpointCommit(workspace, issue, "run-reverify-dirty", ["already-integrated-dirty-root.txt"], "checkpoint: already integrated dirty root");
+    const candidateSha = await git(workspace, "rev-parse", "HEAD");
+    const expectedMainSha = await git(workspace, "rev-parse", "refs/remotes/origin/main");
+    const leaseAuthority = freshLeaseAuthority(issue);
+    const workAuthority = new InMemoryWorkAuthority([workItem(issue, "2026-08-19T00:00:00Z")]);
+    const verificationPath = await writePassingVerification(workspace, workAuthority.fingerprint(await workAuthority.get(String(issue))));
+    await requestPromotion(workspace, issue, "run-reverify-dirty", expectedMainSha, verificationPath);
+
+    await git(fixture.repo, "merge", "--no-ff", "--no-edit", candidateSha);
+    await git(fixture.repo, "push", "-q", "origin", "HEAD:main");
+    await writeFile(`${fixture.repo}/README.md`, "operator dirty root\n");
+
+    const result = await finalizeRequestedPromotion(fixture.repo, issue, leaseAuthority, workAuthority, IDENTITY);
+
+    assert.ok(result);
+    assert.equal(result!.closed, true);
+    assert.equal((await workAuthority.get(String(issue))).state, "closed");
+    assert.equal(await git(fixture.repo, "status", "--porcelain"), "M README.md");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("production promotion recovery runs required post-integration checks before closing an already integrated candidate", async () => {
   const fixture = await createDisposableGitFixture({
     prefix: "pi-next-checkpoint-reverify-",
