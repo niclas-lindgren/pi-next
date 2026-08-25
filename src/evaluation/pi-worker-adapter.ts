@@ -10,23 +10,24 @@ import {
   type WorkerTerminalResult,
   type WorkerUsageTelemetry,
 } from "../coordination/worker-adapter.ts";
+import { createWorkerShellEnvironment, workerShellCommandDecision, type WorkerShellCommandDecision } from "../coordination/worker-shell-policy.ts";
 import { classifyWorkerCompletion, createWorkerTerminalEvidence, observeWorkerEvent } from "../coordination/worker-terminal-result.ts";
 
-async function runShell(cwd: string, command: string, signal?: AbortSignal): Promise<{ exitCode: number; output: string }> {
+async function runShell(cwd: string, decision: WorkerShellCommandDecision, signal?: AbortSignal): Promise<{ exitCode: number; output: string }> {
   const { spawn } = await import("node:child_process");
+  const sandbox = createWorkerShellEnvironment(decision.env ?? {});
   return await new Promise((resolveRun) => {
-    const child = spawn("sh", ["-c", command], { cwd, signal, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(decision.command!, decision.args ?? [], { cwd, env: sandbox.env, signal, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
+    const finish = (exitCode: number, chunk = "") => {
+      sandbox.dispose();
+      resolveRun({ exitCode, output: `${output}${chunk}`.slice(-8_000) });
+    };
     child.stdout.on("data", (chunk) => { output = `${output}${String(chunk)}`.slice(-8_000); });
     child.stderr.on("data", (chunk) => { output = `${output}${String(chunk)}`.slice(-8_000); });
-    child.on("error", (error) => resolveRun({ exitCode: 1, output: error.message }));
-    child.on("close", (code) => resolveRun({ exitCode: code ?? 1, output }));
+    child.on("error", (error) => finish(1, error.message));
+    child.on("close", (code) => finish(code ?? 1));
   });
-}
-
-function forbiddenWorkerCommand(command: string): boolean {
-  return /(^|[;&|\n])\s*(?:sudo\s+)?(?:gh(?:\s|$)|git\s+(?:push|merge|reset|rebase|worktree|checkout|switch|update-ref)|git\s+branch\s+-[dD]|rm\s+-rf\s+\.git)/i.test(command)
-    || /\bgh\s+(?:issue|pr|api)\b/i.test(command);
 }
 
 function usageFromSession(session: any): { usage?: WorkerUsageTelemetry; toolCalls?: number; model?: string } {
@@ -75,8 +76,9 @@ export class PiWorkerAdapter implements WorkerAdapter {
         description: "Run a repository command in the supplied fixture workspace. Authority, main-branch, remote, and destructive worktree operations are refused.",
         parameters: Type.Object({ command: Type.String() }),
         execute: async (_id: string, params: { command: string }, toolSignal: AbortSignal | undefined) => {
-          if (forbiddenWorkerCommand(params.command)) return { content: [{ type: "text", text: "Refused lifecycle/remote/destructive command." }], details: { refused: true } };
-          const result = await runShell(task.cwd, params.command, toolSignal);
+          const decision = workerShellCommandDecision(params.command);
+          if (!decision.allowed || !decision.command) return { content: [{ type: "text", text: `Refused: ${decision.reason ?? "command is outside the worker capability policy"}.` }], details: { refused: true } };
+          const result = await runShell(task.cwd, decision, toolSignal);
           return { content: [{ type: "text", text: `exit ${result.exitCode}\n${result.output}`.slice(-8_000) }], details: { exitCode: result.exitCode } };
         },
       });

@@ -19,7 +19,7 @@ export const runCommand: CommandRunner = async (command, args, options) => {
   const started = Date.now();
   const child = (await import("node:child_process")).spawn(command, args, {
     cwd: options.cwd,
-    env: process.env,
+    env: options.env ?? process.env,
     shell: false,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],

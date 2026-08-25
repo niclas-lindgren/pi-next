@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { runCommand } from "./command-runner.js";
 import { WorkerFactory } from "./types.js";
 import { bounded, redact } from "./utils.js";
-import { forbiddenWorkerCommand } from "../coordination/forbidden-worker-command.js";
+import { createWorkerShellEnvironment, workerShellCommandDecision } from "../coordination/worker-shell-policy.js";
 
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -45,12 +45,18 @@ function makeSafeBashTool(cwd: string, defineToolImpl: (definition: unknown) => 
     promptSnippet: "run a safe repository shell command",
     parameters: Type.Object({ command: Type.String({ description: "The command to run" }) }),
     execute: async (_toolCallId: string, params: { command: string }, signal: AbortSignal | undefined) => {
-      if (forbiddenWorkerCommand(params.command)) {
-        return { content: [{ type: "text", text: "Refused: authority, main-branch, or destructive worktree command." }], details: { refused: true } };
+      const decision = workerShellCommandDecision(params.command);
+      if (!decision.allowed || !decision.command) {
+        return { content: [{ type: "text", text: `Refused: ${decision.reason ?? "command is outside the worker capability policy"}.` }], details: { refused: true } };
       }
-      const result = await runCommand("sh", ["-c", params.command], { cwd, timeoutMs: 30 * 60 * 1_000, signal });
-      const output = redact(`${result.stdout}${result.stderr}`);
-      return { content: [{ type: "text", text: bounded(`exit ${result.exitCode}\n${output}`) }], details: { exitCode: result.exitCode } };
+      const sandbox = createWorkerShellEnvironment(decision.env ?? {});
+      try {
+        const result = await runCommand(decision.command, decision.args ?? [], { cwd, timeoutMs: 30 * 60 * 1_000, signal, env: sandbox.env });
+        const output = redact(`${result.stdout}${result.stderr}`);
+        return { content: [{ type: "text", text: bounded(`exit ${result.exitCode}\n${output}`) }], details: { exitCode: result.exitCode } };
+      } finally {
+        sandbox.dispose();
+      }
     },
   });
 }

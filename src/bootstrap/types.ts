@@ -77,7 +77,7 @@ export interface CommandResult {
 export type CommandRunner = (
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs?: number; signal?: AbortSignal },
+  options: { cwd: string; timeoutMs?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv },
 ) => Promise<CommandResult>;
 
 export interface WorkerModel {
