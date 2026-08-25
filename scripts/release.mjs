@@ -73,7 +73,7 @@ try {
     process.exit(0);
   }
 
-  run("npm", ["run", "typecheck"]);
+  run("npm", ["run", "qualify:release"]);
   run("npm", ["test"]);
   if (preparedReleaseNotes.changed) {
     writeFileSync(changelogPath, preparedReleaseNotes.changelog);

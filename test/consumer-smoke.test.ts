@@ -68,6 +68,7 @@ test("fresh consumer installs a pinned package and completes a disposable transi
   const home = join(root, "home");
   const sshStub = join(root, "ssh-stub.sh");
   const runner = join(root, "runner.mts");
+  const lifecycleRunner = join(root, "lifecycle-runner.mts");
   const activationRunner = join(root, "activation-runner.mts");
   const previousSshCommand = process.env.GIT_SSH_COMMAND;
   const previousRemote = process.env.PI_NEXT_TEST_REMOTE;
@@ -172,6 +173,44 @@ test("fresh consumer installs a pinned package and completes a disposable transi
     assert.equal(await git(consumer, "remote", "get-url", "origin"), consumerRemote);
     assert.doesNotMatch(consumerRemote, /github\.com|gitlab\.com|bitbucket\.org/i);
     assert.equal(await readFile(join(result.workspace, ".pi-next-PLAN.md"), "utf8"), "issue=41\nstate=checkpointed\n");
+
+    await writeFile(lifecycleRunner, `
+      import assert from "node:assert/strict";
+      import { writeJsonAtomic } from ${JSON.stringify(join(installed, "extensions/pi-next/util.ts"))};
+      import { readFile } from "node:fs/promises";
+      import { loopStateFile, emptyLoopMetrics } from ${JSON.stringify(join(installed, "extensions/pi-next/loop-state.ts"))};
+      import { PiNextMonitor } from ${JSON.stringify(join(installed, "extensions/pi-next/monitor.ts"))};
+      import { LocalIssueLeaseAuthority } from ${JSON.stringify(join(installed, "extensions/pi-next/local-lease.ts"))};
+      import { runProductionSingleIssueLifecycle, runProductionLifecycleScheduler } from ${JSON.stringify(join(installed, "extensions/pi-next/production-lifecycle.ts"))};
+      import { InMemoryWorkAuthority, loadPiNextConfig } from ${JSON.stringify(join(installed, "src/coordination/index.ts"))};
+      import { runSingleIssueLifecycle } from ${JSON.stringify(join(installed, "src/lifecycle/index.ts"))};
+      const cwd = process.cwd();
+      const zero = "0".repeat(40);
+      const report = (issueNumber) => ({ issueNumber, attempts: 1, start: new Date(0).toISOString(), end: new Date(1).toISOString(), disposition: "pass", branch: "agent/issue-" + issueNumber, worktree: ".worktrees/issue-" + issueNumber, revision: zero, baselineRevision: zero, candidate: { headRevision: zero, baselineRevision: zero, originMainRevision: zero, mergeBaseRevision: zero, dirty: true, changedFiles: ["README.md"], committedChanges: false, uncommittedChanges: true, committedFiles: [], stagedFiles: [], unstagedFiles: ["README.md"], untrackedFiles: [], commitsAheadOfMergeBase: 0, commitsAheadOfOriginMain: 0, commitsBehindOriginMain: 0, behindOriginMain: false, divergedFromOriginMain: false }, dependencySetup: { action: "not-required" }, workerAttempts: [], checks: ["npm run typecheck", "npm test"].map((command) => ({ command, exitCode: 0, passed: true, durationMs: 1 })), mechanicalPass: true, candidateReadyForReview: true, finalizationReady: false, implementationOutcome: "implemented", candidateHasDelta: true });
+      const item = (number) => ({ id: String(number), number, title: "fixture lifecycle " + number, body: "scripted lifecycle", state: "open", priority: "P1", states: ["open"], comments: [], updatedAt: new Date(number * 1000).toISOString() });
+      const config = loadPiNextConfig(cwd);
+      const authority = new InMemoryWorkAuthority([item(51), item(52)]);
+      const explicit = await runProductionSingleIssueLifecycle({ cwd, issueNumber: 51, entry: "explicit", runId: "consumer-explicit", finalize: false }, { authority, config }, async (options) => report(options.issueNumber));
+      const bootstrap = await runSingleIssueLifecycle({ cwd, workItem: { issueNumber: 51 }, entry: "bootstrap", runId: "consumer-bootstrap", allowRepair: true, review: false, finalize: false }, {}, async (options) => report(options.issueNumber));
+      assert.deepEqual({ d: explicit.disposition, i: explicit.implementation, v: explicit.verification, f: explicit.finalization }, { d: bootstrap.disposition, i: bootstrap.implementation, v: bootstrap.verification, f: bootstrap.finalization });
+      const stale = { version: 1, runId: "historical-640", sessionId: "old", requestedIssues: 1, remainingIssues: 0, step: 1, settledStep: 1, maxSteps: 10, completedIssues: [], deferredIssues: [], issueMetrics: [], status: "stopped", stopRequested: false, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), metrics: emptyLoopMetrics(), coordinationCwd: cwd, activeIssueNumber: 640, lastReason: "budget yielded" };
+      writeJsonAtomic(loopStateFile(cwd, stale.runId), stale);
+      const auto = await runProductionLifecycleScheduler({ cwd, entry: "auto", requestedIssues: 1, runId: "consumer-auto" }, { authority, config, leaseAuthority: new LocalIssueLeaseAuthority(cwd) }, async (options) => report(options.issueNumber));
+      const projected = JSON.parse(await readFile(loopStateFile(cwd, "consumer-auto"), "utf8"));
+      assert.ok(projected.activeIssueNumber === 51 || projected.activeIssueNumber === 52);
+      assert.notEqual(projected.activeIssueNumber, 640);
+      let modelCalls = 0, wakes = 0;
+      const monitorAuthority = new InMemoryWorkAuthority([]);
+      const monitor = new PiNextMonitor({ cwd, config, authority: monitorAuthority, scheduler: async () => { wakes += 1; }, setTimeout: () => 0, clearTimeout: () => undefined });
+      monitor.start();
+      await monitor.checkNow();
+      monitorAuthority.upsert(item(61));
+      await monitor.checkNow();
+      console.log(JSON.stringify({ explicit: explicit.disposition, bootstrap: bootstrap.disposition, auto: auto.disposition, wakes, modelCalls, activeIssue: projected.activeIssueNumber }));
+    `);
+    const lifecycle = JSON.parse((await exec(tsx, [lifecycleRunner], { cwd: consumer, env })).stdout.trim()) as { explicit: string; bootstrap: string; auto: string; wakes: number; modelCalls: number; activeIssue: number };
+    assert.deepEqual({ explicit: lifecycle.explicit, bootstrap: lifecycle.bootstrap, wakes: lifecycle.wakes, modelCalls: lifecycle.modelCalls }, { explicit: "pass", bootstrap: "pass", wakes: 1, modelCalls: 0 });
+    assert.match(lifecycle.auto, /budget-yield|completed/);
   } finally {
     if (previousSshCommand === undefined) delete process.env.GIT_SSH_COMMAND;
     else process.env.GIT_SSH_COMMAND = previousSshCommand;

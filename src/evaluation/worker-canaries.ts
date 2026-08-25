@@ -156,7 +156,7 @@ async function writeFixture(cwd: string, fixture: WorkerCanaryFixture): Promise<
   await execFileAsync("git", ["commit", "--quiet", "-m", "initial canary fixture"], { cwd });
 }
 
-async function grade(cwd: string, fixture: WorkerCanaryFixture): Promise<string[]> {
+export async function gradeWorkerCanaryFixture(cwd: string, fixture: WorkerCanaryFixture): Promise<string[]> {
   const failures: string[] = [];
   for (const assertion of fixture.hiddenAssertions) {
     try {
@@ -191,7 +191,7 @@ export async function runWorkerCanaryFixture(adapter: WorkerAdapter, fixture: Wo
     const context = await buildContextPacket({ cwd, task: fixture.task, strategy: options.contextStrategy ?? "default", role: "implementation" });
     const task: WorkerTask = { cwd, prompt: context.prompt, phase: "implementation", runId: `eval-${fixture.id}`, dispatch: { version: 1, role: "implementation", capabilities: { kind: "mutable-owner" }, contextStrategy: context.strategy, selectedSkills: context.skills.selected, loadedSkills: context.skills.loaded } as any };
     const worker = await adapter.run(task, new AbortController().signal);
-    const graderFailures = await grade(cwd, fixture);
+    const graderFailures = await gradeWorkerCanaryFixture(cwd, fixture);
     const wallTimeMs = Date.now() - started;
     return {
       fixtureId: fixture.id,
