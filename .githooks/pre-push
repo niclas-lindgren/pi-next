@@ -47,5 +47,5 @@ if printf '%s\n' "$changed" | grep -Eq '^(extensions/|src/|skills/|package\.json
   exit 1
 fi
 
-echo "pre-push: validating main before push..."
-make check
+echo "pre-push: validating main before push (build + lint only; tests run at release time)..."
+make lint

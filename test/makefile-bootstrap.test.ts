@@ -60,3 +60,10 @@ test("make check still wraps typecheck and test", async () => {
   assert.match(stdout, /npm run typecheck/);
   assert.match(stdout, /npm test/);
 });
+
+test("make lint wraps build and lint only, without tests", async () => {
+  const stdout = await makeDryRun("lint");
+  assert.match(stdout, /npm run build/);
+  assert.match(stdout, /npm run lint/);
+  assert.doesNotMatch(stdout, /npm test/);
+});

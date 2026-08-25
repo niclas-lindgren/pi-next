@@ -12,11 +12,12 @@ $(foreach goal,$(filter-out release,$(RELEASE_NOTES_FROM_GOALS)),$(eval $(goal):
 endif
 endif
 
-.PHONY: help release release-patch release-minor release-major check bootstrap bootstrap-next
+.PHONY: help release release-patch release-minor release-major check lint bootstrap bootstrap-next
 
 help:
 	@printf '%s\n' \
 	  'make check                         Run typecheck and tests' \
+	  'make lint                          Run build and lint only (no tests; used by the pre-push hook)' \
 	  'make release [notes...]           Test, auto-note, bump, commit, tag, and push a release' \
 	  '                                  (or RELEASE_NOTES="...")' \
 	  'make release-patch                 Prepare the next patch release' \
@@ -29,6 +30,10 @@ help:
 check:
 	npm run typecheck
 	npm test
+
+lint:
+	npm run build
+	npm run lint
 
 bootstrap:
 	npm run bootstrap:self-host
