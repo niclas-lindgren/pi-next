@@ -100,6 +100,7 @@ import {
 } from "./workflow-state-provider.ts";
 import { publishSelfAssessmentFindings, refreshFindingApprovals } from "./self-assessment.ts";
 import { runProductionLifecycleScheduler } from "./production-lifecycle.ts";
+import { abortRun, registerRunAbortController } from "./run-cancellation.ts";
 
 export { MAX_ISSUES, readLoopState, writeLoopResult } from "./loop-state.ts";
 export { ForegroundSupervisor } from "./foreground-supervisor.ts";
@@ -1256,9 +1257,17 @@ export async function runPiNextLoop(
       lastReason: "Stop requested by user",
     };
     writeJsonAtomic(loopStateFile(ctx.cwd, current.runId), next);
+    // `stopRequested` above is the durable, cross-process stop signal a
+    // legacy loop-controller run polls at its next step boundary. A fresh
+    // unified-scheduler run registers an in-process AbortController for its
+    // runId (see below); abort it directly so the scheduler's signal.aborted
+    // checks can exit immediately instead of waiting on file polling.
+    const abortedInProcess = abortRun(current.runId, "Stop requested by user");
     notifySafely(
       ctx,
-      "Pi loop will stop at the next clean step boundary.",
+      abortedInProcess
+        ? "Pi loop is stopping now."
+        : "Pi loop will stop at the next clean step boundary.",
       "info",
     );
     return;
@@ -1325,15 +1334,22 @@ export async function runPiNextLoop(
   // interrupted loop-state records above; fresh `/pi-next auto` does not enter
   // the duplicate worker/repair/finalization state machine.
   bindLiveAutoRun(ctx, runId);
-  await runProductionLifecycleScheduler({
-    cwd: ctx.cwd,
-    ctx,
-    entry: "auto",
-    requestedIssues,
-    runId,
-    onWorkLog,
-    onWorkerState,
-  });
+  const controller = new AbortController();
+  const unregister = registerRunAbortController(runId, controller);
+  try {
+    await runProductionLifecycleScheduler({
+      cwd: ctx.cwd,
+      ctx,
+      entry: "auto",
+      requestedIssues,
+      runId,
+      onWorkLog,
+      onWorkerState,
+      signal: controller.signal,
+    });
+  } finally {
+    unregister();
+  }
 }
 
 export function registerPiNextLoopCommand(
