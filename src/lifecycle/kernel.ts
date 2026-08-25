@@ -15,7 +15,7 @@ import { runCommand } from "../bootstrap/command-runner.js";
 import { redact } from "../bootstrap/utils.js";
 import { acquireBootstrapLifecycleLock } from "../bootstrap/lifecycle-lock.js";
 import { hasExactVerifiedFinalizationCandidate } from "../bootstrap/finalization-proof.js";
-import { runBootstrapFinalize } from "../../scripts/bootstrap-finalize.ts";
+import { runBootstrapFinalize } from "./bootstrap-finalize.ts";
 import { loadPiNextConfig } from "../coordination/config.ts";
 import { incidentBundleFromLifecycleResult, readRunJournalIfAvailable, reportIncidentBundle } from "../coordination/incident-reporting.ts";
 import { commitIncidentDiagnosticsBeforeFinalization } from "../coordination/post-integration-reverification.ts";
