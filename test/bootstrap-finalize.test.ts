@@ -119,6 +119,30 @@ async function fastForwardIntegratedCandidate(root: string, remote: string, issu
 }
 
 /**
+ * Exhausted the retry budget in pushUnrelatedMainCommit - a shape the retry
+ * couldn't absorb (see #163). Attach cheap, already-local state (git version,
+ * local vs. remote-bare ref tips, packed-refs presence) to the failure so a
+ * future CI recurrence carries enough to diagnose without runner shell
+ * access; this never runs on the retry-succeeds path.
+ */
+async function withPushRejectionDiagnostics(error: unknown, scratch: string, remote: string): Promise<Error> {
+  const diagnostics: Record<string, string> = {};
+  const probes: Array<[string, () => Promise<string>]> = [
+    ["gitVersion", async () => (await exec("git", ["--version"])).stdout.trim()],
+    ["scratchHead", () => git(scratch, "rev-parse", "HEAD")],
+    ["scratchOriginMain", () => git(scratch, "rev-parse", "origin/main")],
+    ["bareMain", () => git(remote, "rev-parse", "main")],
+    ["barePackedRefs", async () => { try { readFileSync(join(remote, "packed-refs")); return "present"; } catch { return "absent"; } }],
+  ];
+  for (const [key, probe] of probes) {
+    try { diagnostics[key] = await probe(); } catch (probeError) { diagnostics[key] = `<probe failed: ${String(probeError)}>`; }
+  }
+  const wrapped = new Error(`${String(error)}\npushUnrelatedMainCommit diagnostics: ${JSON.stringify(diagnostics)}`);
+  wrapped.cause = error;
+  return wrapped;
+}
+
+/**
  * Simulates an unrelated commit landing on main concurrently with the
  * caller's own work. Retries the push after re-fetching and rebasing onto
  * the current tip: this scratch clone's view of origin/main can be a moment
@@ -140,7 +164,7 @@ async function pushUnrelatedMainCommit(root: string, remote: string, file: strin
       await git(scratch, "push", "-q", "origin", "HEAD:main");
       break;
     } catch (error) {
-      if (attempt === 4) throw error;
+      if (attempt === 4) throw await withPushRejectionDiagnostics(error, scratch, remote);
       await git(scratch, "fetch", "-q", "origin", "main");
       await git(scratch, "rebase", "-q", "origin/main");
     }
