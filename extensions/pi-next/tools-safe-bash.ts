@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
 
-import { forbiddenWorkerCommand } from "../../src/coordination/forbidden-worker-command.ts";
+import { createWorkerShellEnvironment, workerShellCommandDecision } from "../../src/coordination/worker-shell-policy.ts";
 
 const SAFE_BASH_OUTPUT_LIMIT = 16_000;
 const SAFE_BASH_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -10,9 +10,12 @@ const SAFE_BASH_TIMEOUT_MS = 30 * 60 * 1_000;
 function runSafeBashCommand(
   cwd: string,
   command: string,
+  args: string[],
+  envOverlay: Record<string, string>,
   signal: AbortSignal | undefined,
 ): Promise<{ output: string; code: number | null }> {
-  const child = spawn("sh", ["-c", command], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+  const sandbox = createWorkerShellEnvironment(envOverlay);
+  const child = spawn(command, args, { cwd, env: sandbox.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   const append = (chunk: Buffer) => {
     output = `${output}${String(chunk)}`.slice(-SAFE_BASH_OUTPUT_LIMIT);
@@ -28,10 +31,12 @@ function runSafeBashCommand(
   return new Promise((resolve) => {
     child.on("close", (code) => {
       clearTimeout(timeout);
+      sandbox.dispose();
       resolve({ output, code });
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
+      sandbox.dispose();
       resolve({ output: `${output}${error.message}`, code: 127 });
     });
   });
@@ -39,12 +44,11 @@ function runSafeBashCommand(
 
 /**
  * Replaces Pi's built-in `bash` tool (excluded via `--exclude-tools bash`
- * in `runIssueWorker`) for mutable production workers. Mirrors
- * `src/bootstrap/worker-factory.ts`'s `makeSafeBashTool` so a full Pi CLI
- * subprocess worker gets the same authority/main-branch/destructive-command
- * enforcement as bootstrap's in-process SDK worker, instead of relying only
- * on `pi_next_git`'s narrower action contract while retaining an
- * unrestricted shell (#162).
+ * in `runIssueWorker`) for mutable production workers. The replacement is a
+ * positive command runner, not `sh -c`: wrappers, nested shells, interpreter
+ * eval forms, GitHub CLI authority, and mutating Git subcommands are refused
+ * before process creation, and allowed build/test commands run with Git/GitHub
+ * credentials and Git transports stripped (#162).
  *
  * Only registered when `PI_NEXT_ISSUE_WORKER=1` (set exclusively by
  * `runIssueWorker`) so the trusted controller session, which still needs
@@ -60,13 +64,14 @@ export function registerSafeBashTool(pi: ExtensionAPI) {
     promptSnippet: "run a safe repository shell command",
     parameters: Type.Object({ command: Type.String({ description: "The command to run" }) }),
     async execute(_id, params, signal, _update, ctx) {
-      if (forbiddenWorkerCommand(params.command)) {
+      const decision = workerShellCommandDecision(params.command);
+      if (!decision.allowed || !decision.command) {
         return {
-          content: [{ type: "text", text: "Refused: authority, main-branch, or destructive worktree/GitHub command. Use pi_next_git for commits/checkpoints/promotion requests." }],
+          content: [{ type: "text", text: `Refused: ${decision.reason ?? "command is outside the worker capability policy"}. Use pi_next_git for commits/checkpoints/promotion requests.` }],
           details: { refused: true },
         };
       }
-      const result = await runSafeBashCommand(ctx.cwd, params.command, signal);
+      const result = await runSafeBashCommand(ctx.cwd, decision.command, decision.args ?? [], decision.env ?? {}, signal);
       return {
         content: [{ type: "text", text: `exit ${result.code ?? "signal"}\n${result.output}` }],
         details: { exitCode: result.code },

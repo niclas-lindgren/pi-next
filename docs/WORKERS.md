@@ -4,7 +4,7 @@ Pi-next resolves a versioned **harness-neutral worker contract** before launchin
 
 Pi is the current built-in/default execution adapter, not the architectural identity of pi-next. The kernel must be able to execute the same bounded dispatch through another adapter without moving authority, ownership, verification, recovery, promotion, or completion semantics into that harness. See [`WORKER_ADAPTER.md`](WORKER_ADAPTER.md).
 
-Roles are derived from controller state: planning, implementation, repair, review-spec, review-standards, verification, maintenance, and controller. Review roles use an isolated read-only-reviewer capability profile; owner roles use mutable-owner only after the normal lease and canonical-worktree checks. Harness-supported reviewer restrictions should be used where available; no adapter may claim OS sandboxing merely by prompt convention.
+Roles are derived from controller state: planning, implementation, repair, review-spec, review-standards, verification, maintenance, and controller. Review roles use an isolated read-only-reviewer capability profile; owner roles use mutable-owner only after the normal lease and canonical-worktree checks. Harness-supported reviewer restrictions should be used where available; no adapter may claim OS sandboxing merely by prompt convention. Mutable Pi workers receive `safe_bash`, a positive command runner with read-only Git, no GitHub CLI authority, and credential/transport scrubbing for allowed build/test commands, rather than Pi's raw built-in `bash`.
 
 ## Worker adapter boundary
 

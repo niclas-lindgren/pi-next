@@ -115,6 +115,11 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adopt-pattern** — durable workflow systems separate worker protocol settlement from independently verifiable workflow state. A timed-out implementation turn remains observable as a timeout, but if the canonical candidate contains substantive delta and the required checks pass against that exact state, bootstrap may continue to review/finalization without spending another implementation-model call solely to obtain a cleaner assistant terminal message.
 - **reject** — inferring success from dirty state alone, erasing/restarting a verified dirty candidate because the worker exceeded its conversational budget, or treating operator-requested cancellation as autonomous success during the same run.
 
+### Production worker shell capability boundary (issue #162)
+
+- **adopt-pattern** — sandboxed worker harnesses expose positive capabilities rather than a raw shell plus text blacklist. Bootstrap and production Pi workers now share a single worker shell policy that parses one command, rejects chaining/wrappers/nested shells/interpreter eval forms before process creation, limits Git to read-only inspection subcommands, withholds GitHub CLI authority, and scrubs Git/GitHub credentials/transports for allowed build/test commands.
+- **reject** — treating regex denylisting of model-controlled `sh -c` strings as an enforceable security boundary for controller-owned promotion, main-branch mutation, or issue closure.
+
 ### Evidence-based worker terminal classification (issue #151)
 
 - **adopt-pattern** — Pi's own assistant stream contract separates transport settlement from terminal model outcomes: successful `done`/assistant terminal messages carry a non-error stop reason, while provider/runtime failures are encoded as `error`/`aborted` terminal messages or retry/error events. Pi-next now requires that typed terminal evidence before a worker attempt can be recorded as completed.
