@@ -64,6 +64,30 @@ test("durable running state is only presented as live with valid live controller
   }
 });
 
+test("terminal dispositions restart cleanly from durable evidence alone, with no live controller involved", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-loop-status-terminal-"));
+  try {
+    // No controller.lock is written for any of these: this is exactly what a
+    // fresh process sees after a restart, with only the persisted state.json
+    // on disk and no in-memory scheduler/lease heartbeat surviving.
+    const dispositions = ["idle", "completed", "budget-yield", "blocked", "cancelled"] as const;
+    for (const status of dispositions) {
+      const value = state(`terminal-${status}`, { status });
+      await persist(cwd, value);
+    }
+    const records = classifyLoopStates(
+      cwd,
+      dispositions.map((status) => state(`terminal-${status}`, { status })),
+    );
+    for (const [index, status] of dispositions.entries()) {
+      assert.equal(records[index].presentation, status, `status ${status} must project as its own presentation`);
+      assert.equal(records[index].controller, "not-running");
+    }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("current run selection uses session identity and refuses ambiguous history", () => {
   const now = new Date().toISOString();
   const record = (runId: string, controller: "alive" | "dead", sessionId = "session-a") => ({

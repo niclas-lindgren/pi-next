@@ -146,6 +146,28 @@ test("production auto is a scheduler over the shared lifecycle and re-queries au
   }
 });
 
+test("production auto settles disposition 'completed' when the candidate queue is exhausted before the requested budget", async () => {
+  const f = await fixture();
+  try {
+    const authority = new InMemoryWorkAuthority([item(401)]);
+    const result = await runProductionLifecycleScheduler({
+      cwd: f.root,
+      entry: "auto",
+      requestedIssues: 5,
+      runId: "prod-auto-completed",
+    }, { authority, config: f.config, leaseAuthority }, async (options) => {
+      await authority.close(String(options.issueNumber), "done");
+      return report(options.issueNumber);
+    });
+    assert.equal(result.disposition, "completed");
+    assert.deepEqual(result.results.map((entry) => entry.disposition), ["pass"]);
+    const state = readLoopState(f.root, "prod-auto-completed");
+    assert.equal(state?.status, "completed");
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("production auto persists the caller's session id so the footer heartbeat can find the current run by session (#166)", async () => {
   const f = await fixture();
   try {
