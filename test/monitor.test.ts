@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 
 import { validatePiNextConfig, InMemoryWorkAuthority, type AuthorityWorkItem, type PiNextConfig } from "../src/coordination/index.ts";
 import { createIssueLease } from "../src/coordination/issue-authority.ts";
 import { PiNextMonitor } from "../extensions/pi-next/monitor.ts";
 import type { IssueLeaseAuthority } from "../extensions/pi-next/issue-leases.ts";
+import { abortRun, __resetRunCancellationForTests } from "../extensions/pi-next/run-cancellation.ts";
+
+afterEach(() => {
+  __resetRunCancellationForTests();
+});
 
 const config: PiNextConfig = validatePiNextConfig({
   version: 1,
@@ -48,7 +53,7 @@ async function withTmp<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
   try { return await fn(cwd); } finally { await rm(cwd, { recursive: true, force: true }); }
 }
 
-function monitor(cwd: string, authority: InMemoryWorkAuthority, scheduler: () => Promise<void>, leaseAuthority?: IssueLeaseAuthority) {
+function monitor(cwd: string, authority: InMemoryWorkAuthority, scheduler: ConstructorParameters<typeof PiNextMonitor>[0]["scheduler"], leaseAuthority?: IssueLeaseAuthority) {
   return new PiNextMonitor({ cwd, config, authority, leaseAuthority, pollIntervalMs: 1000, maxBackoffMs: 4000, scheduler, setTimeout: () => 0, clearTimeout: () => undefined });
 }
 
@@ -173,6 +178,61 @@ test("graceful stop during active work lets scheduler finish and schedules no fu
   await m.checkNow();
   assert.equal(workers, 1);
   assert.equal(m.snapshot().phase, "stopped");
+}));
+
+test("stop during active monitor scheduler aborts the canonical run signal and leaves no live run", async () => withTmp(async (cwd) => {
+  const authority = new InMemoryWorkAuthority([item(10)]);
+  let schedulerStarts = 0;
+  let seenRunId = "";
+  let seenSignal: AbortSignal | undefined;
+  const m = monitor(cwd, authority, async ({ runId, signal }) => {
+    schedulerStarts += 1;
+    seenRunId = runId;
+    seenSignal = signal;
+    if (!signal.aborted) {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    }
+  });
+  m.start();
+  const running = m.checkNow();
+  await waitFor(() => schedulerStarts === 1 && !!m.snapshot().activeRun);
+  assert.equal(m.snapshot().activeRun, seenRunId);
+
+  const stopping = m.stop();
+  assert.equal(stopping.phase, "stopping");
+  assert.equal(seenSignal?.aborted, true);
+  await running;
+
+  assert.equal(m.snapshot().phase, "stopped");
+  assert.equal(m.snapshot().activeRun, undefined);
+  assert.equal(abortRun(seenRunId, "after settle"), false);
+  authority.upsert(item(11));
+  await m.checkNow();
+  assert.equal(schedulerStarts, 1);
+}));
+
+test("externally aborted monitor run stops at the current boundary instead of polling again", async () => withTmp(async (cwd) => {
+  const authority = new InMemoryWorkAuthority([item(12)]);
+  let schedulerStarts = 0;
+  let seenRunId = "";
+  const m = monitor(cwd, authority, async ({ runId, signal }) => {
+    schedulerStarts += 1;
+    seenRunId = runId;
+    if (!signal.aborted) {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    }
+  });
+  m.start();
+  const running = m.checkNow();
+  await waitFor(() => schedulerStarts === 1 && !!seenRunId);
+  assert.equal(abortRun(seenRunId, "loop stop requested"), true);
+  await running;
+
+  assert.equal(m.snapshot().phase, "stopped");
+  assert.equal(m.snapshot().running, false);
+  authority.upsert(item(13));
+  await m.checkNow();
+  assert.equal(schedulerStarts, 1);
 }));
 
 test("restart plus monitor start performs fresh discovery instead of using stale cache", async () => withTmp(async (cwd) => {

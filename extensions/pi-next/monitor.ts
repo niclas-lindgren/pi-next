@@ -6,6 +6,7 @@ import { candidateShortlist } from "./issue-candidates.ts";
 import { GitHubIssueLeaseAuthority, type IssueLeaseAuthority } from "./issue-leases.ts";
 import { MAX_ISSUES } from "./loop-state.ts";
 import { sessionIdentity } from "./live-ctx.ts";
+import { abortRun, registerRunAbortController } from "./run-cancellation.ts";
 import { safeNotify } from "./util.ts";
 
 export type MonitorPhase = "stopped" | "monitoring" | "working" | "backoff" | "stopping";
@@ -26,6 +27,11 @@ export interface MonitorStatus {
   authorityChecks: number;
 }
 
+export interface MonitorSchedulerRun {
+  runId: string;
+  signal: AbortSignal;
+}
+
 export interface MonitorDeps {
   cwd: string;
   config?: PiNextConfig;
@@ -33,7 +39,7 @@ export interface MonitorDeps {
   leaseAuthority?: IssueLeaseAuthority;
   pollIntervalMs?: number;
   maxBackoffMs?: number;
-  scheduler?: () => Promise<void>;
+  scheduler?: (run: MonitorSchedulerRun) => Promise<void>;
   onStatus?: (status: MonitorStatus) => void;
   now?: () => Date;
   setTimeout?: (fn: () => void, ms: number) => unknown;
@@ -56,7 +62,7 @@ export class PiNextMonitor {
   private readonly config: PiNextConfig;
   private readonly authority: WorkAuthorityAdapter;
   private readonly leaseAuthority?: IssueLeaseAuthority;
-  private readonly scheduler: () => Promise<void>;
+  private readonly scheduler: (run: MonitorSchedulerRun) => Promise<void>;
   private readonly onStatus?: (status: MonitorStatus) => void;
   private readonly now: () => Date;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -66,6 +72,7 @@ export class PiNextMonitor {
   private running = false;
   private stopRequested = false;
   private backoffMs = 0;
+  private activeRunController?: AbortController;
   private status: MonitorStatus;
 
   readonly pollIntervalMs: number;
@@ -111,6 +118,9 @@ export class PiNextMonitor {
       this.clearTimer(this.timer);
       this.timer = undefined;
     }
+    if (this.status.activeRun) {
+      abortRun(this.status.activeRun, "Monitor stop requested by user");
+    }
     this.status = { ...this.status, running: false, phase: this.checkInFlight ? "stopping" : "stopped", nextCheckAt: undefined };
     this.emit();
     return this.snapshot();
@@ -123,6 +133,7 @@ export class PiNextMonitor {
   async checkNow(): Promise<MonitorStatus> {
     if (!this.running || this.checkInFlight) return this.snapshot();
     this.checkInFlight = true;
+    let schedulerAborted = false;
     try {
       this.status = { ...this.status, phase: "monitoring", authorityChecks: this.status.authorityChecks + 1 };
       this.emit();
@@ -145,28 +156,49 @@ export class PiNextMonitor {
       };
       this.emit();
       if (candidate && !this.stopRequested) {
+        const wake = this.status.wakeUps + 1;
+        const runId = `monitor-${this.status.generation}-wake-${wake}`;
+        const controller = new AbortController();
+        const unregister = registerRunAbortController(runId, controller);
+        this.activeRunController = controller;
         this.status = {
           ...this.status,
           phase: "working",
-          activeRun: `monitor-wake-${this.status.wakeUps + 1}`,
-          wakeUps: this.status.wakeUps + 1,
+          activeRun: runId,
+          wakeUps: wake,
           schedulerLaunches: this.status.schedulerLaunches + 1,
         };
         this.emit();
-        await this.scheduler();
-        this.status = { ...this.status, phase: "monitoring", activeRun: undefined };
+        try {
+          await this.scheduler({ runId, signal: controller.signal });
+        } finally {
+          schedulerAborted = controller.signal.aborted;
+          unregister();
+          if (this.activeRunController === controller) this.activeRunController = undefined;
+        }
+        if (schedulerAborted) {
+          this.stopRequested = true;
+          this.running = false;
+          this.status = { ...this.status, phase: "stopped", running: false, activeRun: undefined, nextCheckAt: undefined };
+        } else {
+          this.status = { ...this.status, phase: "monitoring", activeRun: undefined };
+        }
       }
       if (this.running && !this.stopRequested) this.schedule(this.pollIntervalMs);
       else this.status = { ...this.status, phase: "stopped", running: false, nextCheckAt: undefined };
     } catch (error) {
-      const next = this.backoffMs ? Math.min(this.maxBackoffMs, this.backoffMs * 2) : Math.min(this.maxBackoffMs, Math.max(this.pollIntervalMs, MIN_POLL_INTERVAL_MS));
-      this.backoffMs = next;
-      this.status = {
-        ...this.status,
-        phase: this.running ? "backoff" : "stopped",
-        lastError: { type: error instanceof Error ? error.name : "Error", message: error instanceof Error ? error.message : String(error) },
-      };
-      if (this.running && !this.stopRequested) this.schedule(next);
+      if (schedulerAborted || this.activeRunController?.signal.aborted || this.stopRequested) {
+        this.status = { ...this.status, phase: "stopped", running: false, activeRun: undefined, nextCheckAt: undefined, lastError: undefined };
+      } else {
+        const next = this.backoffMs ? Math.min(this.maxBackoffMs, this.backoffMs * 2) : Math.min(this.maxBackoffMs, Math.max(this.pollIntervalMs, MIN_POLL_INTERVAL_MS));
+        this.backoffMs = next;
+        this.status = {
+          ...this.status,
+          phase: this.running ? "backoff" : "stopped",
+          lastError: { type: error instanceof Error ? error.name : "Error", message: error instanceof Error ? error.message : String(error) },
+        };
+        if (this.running && !this.stopRequested) this.schedule(next);
+      }
     } finally {
       this.checkInFlight = false;
       if (!this.running && this.status.phase === "stopping") this.status = { ...this.status, phase: "stopped" };
@@ -211,9 +243,9 @@ export function startMonitor(ctx: ExtensionCommandContext, onStatus?: (status: M
     config,
     authority: createWorkAuthority(ctx.cwd, config),
     leaseAuthority: new GitHubIssueLeaseAuthority(ctx.cwd),
-    scheduler: async () => {
+    scheduler: async ({ runId, signal }) => {
       const { runProductionLifecycleScheduler } = await import("./production-lifecycle.ts");
-      await runProductionLifecycleScheduler({ cwd: ctx.cwd, ctx, entry: "monitor", requestedIssues: MAX_ISSUES });
+      await runProductionLifecycleScheduler({ cwd: ctx.cwd, ctx, entry: "monitor", requestedIssues: MAX_ISSUES, runId, signal });
     },
     onStatus,
   });
