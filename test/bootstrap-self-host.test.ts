@@ -631,6 +631,39 @@ test("timed-out verified candidate behind origin main remains freshness-blocked 
   }
 });
 
+test("incident diagnostics in coordination root are committed and bootstrap proceeds from preflight", async () => {
+  const fixtureState = await fixture();
+  try {
+    const diagnostics = join(fixtureState.root, ".pi-next", "diagnostics", "incidents");
+    await mkdir(diagnostics, { recursive: true });
+    await writeFile(join(diagnostics, "last.json"), "{\"ok\":1}\n");
+    await git(fixtureState.root, "add", ".pi-next/diagnostics/incidents/last.json");
+    await git(fixtureState.root, "commit", "-qm", "seed tracked incident diagnostic");
+    await git(fixtureState.root, "push", "-q", "origin", "main");
+    await writeFile(join(diagnostics, "last.json"), "{\"ok\":2}\n");
+    await writeFile(join(diagnostics, "2026-08-26T06-49-30.973Z-69982a575fa4.json"), "{\"ok\":3}\n");
+    const sessions: Array<{ role: string; prompt: string; disposed: boolean; aborted: boolean }> = [];
+    const commands: string[] = [];
+    const factory = fakeFactory(sessions, async (_role, cwd) => {
+      await writeFile(join(cwd, "implemented-after-diagnostics.txt"), "implemented\n");
+    });
+
+    const report = await runBootstrap(
+      { issueNumber: 75, cwd: fixtureState.root, allowRepair: false, review: false, timeoutMs: 5_000 },
+      dependenciesFor(fixtureState.root, factory, () => 0, commands),
+    );
+
+    assert.equal(report.disposition, "pass");
+    assert.equal(sessions.length, 1);
+    assert.equal(await git(fixtureState.root, "status", "--porcelain"), "");
+    assert.equal(await git(fixtureState.remote, "show", "main:.pi-next/diagnostics/incidents/last.json"), "{\"ok\":2}");
+    assert.equal(await git(fixtureState.remote, "show", "main:.pi-next/diagnostics/incidents/2026-08-26T06-49-30.973Z-69982a575fa4.json"), "{\"ok\":3}");
+    assert.match(await git(fixtureState.root, "log", "--format=%s", "-1", "main"), /record finalization incident diagnostics/);
+  } finally {
+    await fixtureState.cleanup();
+  }
+});
+
 test("dirty coordination root still blocks fresh bootstrap work without a canonical candidate", async () => {
   const fixtureState = await fixture();
   try {

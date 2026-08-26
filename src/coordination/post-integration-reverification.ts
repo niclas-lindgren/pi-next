@@ -2,23 +2,18 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { prepareDependencies } from "../bootstrap/dependencies.ts";
-import { CANONICAL_STATUS_ARGS, changedFilePathsFromStatus, parseGitStatus } from "../bootstrap/git-status.ts";
+import { parseGitStatus } from "../bootstrap/git-status.ts";
 import { loadPiNextConfig } from "./config.ts";
 import { finalizeIssue, type FinalizeInput, type FinalizeResult } from "./finalize.ts";
 import { issueLeaseMatchesOwner, isIssueLeaseFresh } from "./issue-authority.ts";
 import type { IssueLeaseAuthority } from "./issue-leases.ts";
 import type { WorkAuthorityAdapter } from "./work-authority.ts";
 import { REQUIRED_CHECKS } from "./required-checks.ts";
+import { commitIncidentDiagnostics, type IncidentDiagnosticsCommitResult } from "./incident-diagnostics-commit.ts";
 
 interface MinimalCommandResult { exitCode: number; stdout: string; stderr: string; signal?: string; durationMs?: number; }
 export type ReverificationCommandRunner = (command: string, args: string[], options: { cwd: string }) => Promise<MinimalCommandResult>;
-
-export interface FinalizationResidueCommitResult {
-  status: "clean" | "committed" | "not-incident-only";
-  paths: readonly string[];
-  commitSha?: string;
-  reason?: string;
-}
+export type FinalizationResidueCommitResult = IncidentDiagnosticsCommitResult;
 
 export interface IntegratedMainVerificationProof {
   version: 1;
@@ -118,41 +113,13 @@ async function gitRaw(root: string, args: string[], runner: ReverificationComman
   return result.stdout;
 }
 
-function incidentDiagnosticsPrefix(root: string): string {
-  const diagnostics = loadPiNextConfig(root).workflow.diagnosticsPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
-  return `${diagnostics}/incidents/`;
-}
-
 /** Commit only sanitized incident diagnostics left by prior failed finalizers; all other dirty paths still fail closed. */
 export async function commitIncidentDiagnosticsBeforeFinalization(input: {
   root: string;
   runCommand: ReverificationCommandRunner;
   reporter?: (line: string) => void;
 }): Promise<FinalizationResidueCommitResult> {
-  const raw = await gitRaw(input.root, [...CANONICAL_STATUS_ARGS], input.runCommand);
-  const paths = changedFilePathsFromStatus(raw);
-  if (paths.length === 0) return { status: "clean", paths: [] };
-
-  const prefix = incidentDiagnosticsPrefix(input.root);
-  if (paths.some((path) => !path.startsWith(prefix))) {
-    return { status: "not-incident-only", paths, reason: "coordination checkout has non-incident changes" };
-  }
-
-  const branch = await git(input.root, ["branch", "--show-current"], input.runCommand);
-  if (branch !== "main") return { status: "not-incident-only", paths, reason: `coordination checkout is on ${branch || "detached HEAD"}` };
-  await git(input.root, ["fetch", "origin", "main", "--quiet"], input.runCommand);
-  const localMain = await git(input.root, ["rev-parse", "HEAD"], input.runCommand);
-  const originMain = await git(input.root, ["rev-parse", "refs/remotes/origin/main"], input.runCommand);
-  if (localMain !== originMain) return { status: "not-incident-only", paths, reason: "local main is not exactly origin/main" };
-
-  await git(input.root, ["add", "--", ...paths], input.runCommand);
-  const staged = await git(input.root, ["diff", "--cached", "--name-only"], input.runCommand);
-  if (!staged.trim()) return { status: "clean", paths: [] };
-  await git(input.root, ["commit", "-m", "chore(agent): record finalization incident diagnostics"], input.runCommand);
-  const commitSha = await git(input.root, ["rev-parse", "HEAD"], input.runCommand);
-  await git(input.root, ["push", "origin", "HEAD:main"], input.runCommand);
-  input.reporter?.(`finalization · committed incident diagnostics ${commitSha.slice(0, 12)}`);
-  return { status: "committed", paths, commitSha };
+  return commitIncidentDiagnostics({ ...input, reporter: input.reporter ? (line) => input.reporter?.(line.replace(/^incident diagnostics · committed /, "finalization · committed incident diagnostics ")) : undefined });
 }
 
 function verificationWorkspacePath(root: string, issueNumber: number, mergeSha: string): string {

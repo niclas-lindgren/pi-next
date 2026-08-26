@@ -5,6 +5,8 @@ import { CommandRunner, RepositoryState, WorktreeEntry } from "./types.js";
 import { assertCommand, git, gitOptional, isDirectory } from "./git-utils.js";
 import { readCandidateState } from "./candidate.js";
 import { candidateHasDelta } from "./zero-delta-retry-policy.js";
+import { CANONICAL_STATUS_ARGS } from "./git-status.js";
+import { commitIncidentDiagnostics } from "../coordination/incident-diagnostics-commit.ts";
 
 function parseWorktrees(text: string): WorktreeEntry[] {
   const entries: WorktreeEntry[] = [];
@@ -42,6 +44,12 @@ async function hasExistingCanonicalCandidate(
   return candidateHasDelta(state);
 }
 
+async function statusRaw(root: string, runner: CommandRunner): Promise<string> {
+  const result = await runner("git", ["-C", root, ...CANONICAL_STATUS_ARGS], { cwd: root });
+  assertCommand(result, "git status --porcelain=v1 --untracked-files=all");
+  return result.stdout;
+}
+
 export async function prepareRepository(cwd: string, runner: CommandRunner, options: { issueNumber?: number } = {}): Promise<RepositoryState> {
   const root = await git(cwd, ["rev-parse", "--show-toplevel"], runner);
   const branch = await git(root, ["branch", "--show-current"], runner);
@@ -49,7 +57,13 @@ export async function prepareRepository(cwd: string, runner: CommandRunner, opti
   if (resolve(cwd).includes(`${resolve(root)}/.worktrees/`)) {
     throw new BootstrapError("bootstrap must be started from the coordination checkout, not an issue worktree");
   }
-  const rootStatus = await git(root, ["status", "--porcelain"], runner);
+  let rootStatus = await statusRaw(root, runner);
+  if (rootStatus !== "") {
+    const incidentCommit = await commitIncidentDiagnostics({ root, runCommand: runner });
+    if (incidentCommit.status === "committed" || incidentCommit.status === "clean") {
+      rootStatus = await statusRaw(root, runner);
+    }
+  }
   if (rootStatus !== "") {
     const mayResumeCanonicalCandidate = options.issueNumber !== undefined
       && await hasExistingCanonicalCandidate(root, options.issueNumber, await baselineForDirtyResumeInspection(root, runner), runner);
