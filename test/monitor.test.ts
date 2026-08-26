@@ -65,6 +65,13 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   assert.ok(predicate(), "condition was not reached");
 }
 
+test("monitor construction fails closed without a shared lifecycle scheduler", async () => withTmp(async (cwd) => {
+  assert.throws(
+    () => new PiNextMonitor({ cwd, config, authority: new InMemoryWorkAuthority([]), setTimeout: () => 0, clearTimeout: () => undefined } as never),
+    /requires an explicit shared lifecycle scheduler/,
+  );
+}));
+
 test("idle monitor repeats authority checks with zero worker/model launches", async () => withTmp(async (cwd) => {
   const authority = new InMemoryWorkAuthority([]);
   let workers = 0;

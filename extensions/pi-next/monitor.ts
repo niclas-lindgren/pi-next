@@ -39,7 +39,12 @@ export interface MonitorDeps {
   leaseAuthority?: IssueLeaseAuthority;
   pollIntervalMs?: number;
   maxBackoffMs?: number;
-  scheduler?: (run: MonitorSchedulerRun) => Promise<void>;
+  /**
+   * Canonical scheduler invoked when monitoring observes eligible work.
+   * Required so monitor wake-ups cannot silently degrade into no-op lifecycle
+   * ownership or a duplicate monitor-local execution path.
+   */
+  scheduler: (run: MonitorSchedulerRun) => Promise<void>;
   onStatus?: (status: MonitorStatus) => void;
   now?: () => Date;
   setTimeout?: (fn: () => void, ms: number) => unknown;
@@ -79,12 +84,15 @@ export class PiNextMonitor {
   readonly maxBackoffMs: number;
 
   constructor(deps: MonitorDeps) {
+    if (typeof deps.scheduler !== "function") {
+      throw new Error("PiNextMonitor requires an explicit shared lifecycle scheduler");
+    }
     this.config = deps.config ?? loadPiNextConfig(deps.cwd);
     this.authority = deps.authority ?? createWorkAuthority(deps.cwd, this.config);
     this.leaseAuthority = deps.leaseAuthority;
     this.pollIntervalMs = boundedDelay(deps.pollIntervalMs ?? this.config.monitor.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, MIN_POLL_INTERVAL_MS, 86_400_000);
     this.maxBackoffMs = boundedDelay(deps.maxBackoffMs ?? this.config.monitor.maxBackoffMs, DEFAULT_MAX_BACKOFF_MS, this.pollIntervalMs, 86_400_000);
-    this.scheduler = deps.scheduler ?? (async () => undefined);
+    this.scheduler = deps.scheduler;
     this.onStatus = deps.onStatus;
     this.now = deps.now ?? (() => new Date());
     this.setTimer = deps.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
