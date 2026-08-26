@@ -45,16 +45,15 @@ npm run typecheck
 npm test
 ```
 
-Install the local release/validation hook with `npm run hooks:install`. A
-push to `main` containing package code without a version bump automatically
-runs `make release` (patch by default), creates the release commit and tag, and
-stops the original push safely; rerun `git push --follow-tags`. Set
-`PI_NEXT_RELEASE_LEVEL=minor` or `major` before the push when appropriate.
-Releases can also be prepared explicitly with `make release` or
-`npm run release -- patch|minor|major`; use `--push` and `--publish` explicitly
-when desired. Release preparation requires complete current and next-version
-notes in [`CHANGELOG.md`](CHANGELOG.md); the exact-tag GitHub Actions gate
-then independently repeats typecheck, tests, and package smoke. See
+Install the local release/validation hook with `npm run hooks:install`. It
+validates pushes to `main` with build/lint only and does not run tests or
+prepare releases during `git push`. A push to `main` containing package code
+without a version bump prints a reminder and continues. Prepare releases
+explicitly with `make release` or `npm run release -- patch|minor|major`; use
+`--push` and `--publish` explicitly when desired. Release preparation requires
+complete current and next-version notes in [`CHANGELOG.md`](CHANGELOG.md); the
+exact-tag GitHub Actions gate then independently repeats typecheck, tests, and
+package smoke. See
 [`docs/RELEASES.md`](docs/RELEASES.md) for batching and the consumer pin-bump
 contract. Tests must use temporary repositories and bare remotes for every
 Git mutation.

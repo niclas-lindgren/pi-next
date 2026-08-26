@@ -193,7 +193,7 @@ The local hook:
 npm run hooks:install
 ```
 
-The hook validates pushes to `main`. When a main push contains package code without a version bump, it runs `make release` (a patch release by default), creates the release commit and tag, and safely stops the original push. Rerun the push with `--follow-tags` after choosing a different level with `PI_NEXT_RELEASE_LEVEL=minor|major` if needed:
+The hook validates pushes to `main` with build/lint only; it does not run tests or prepare releases during `git push`. When a main push contains package code without a version bump, it prints a reminder and lets the push continue. Prepare releases explicitly when ready:
 
 ```sh
 make release                         # test, bump, commit, and tag (patch)
@@ -202,7 +202,7 @@ npm run release -- patch --push       # explicitly push main and the tag
 npm run release -- patch --push --publish  # also publish to npm
 ```
 
-Use `--dry-run` to preview the next version. Releases must be prepared from a clean `main` checkout. Ordinary documentation-only pushes remain ordinary commits; package changes on `main` become intentional release boundaries.
+Use `--dry-run` to preview the next version. Releases must be prepared from a clean `main` checkout. Ordinary documentation-only pushes remain ordinary commits; package changes on `main` may be bundled into a later intentional release boundary.
 
 ## Versioning and compatibility
 
