@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "createdAt": "2026-08-26T19:02:55.243Z",
-  "fingerprint": "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
+  "createdAt": "2026-08-26T18:44:30.267Z",
+  "fingerprint": "bootstrap-finalizer/1/command-failed-git-c-users-niclasl-src-pi-next-merge-no-ff-no-edit-sha/v1",
   "classification": {
     "category": "framework",
     "reportability": "upstream",
@@ -9,7 +9,7 @@
   },
   "runtime": {
     "piNextVersion": "0.3.5",
-    "piNextRevision": "f645ffa0c4410908bc582a8cf80f9e5ef6e53dab",
+    "piNextRevision": "330799a6293cef69fcf343a6f801573aa343805b",
     "node": "v22.23.2",
     "platform": "linux/arm64",
     "tools": {
@@ -19,26 +19,26 @@
     }
   },
   "repository": {
-    "root": "/Users/niclasl/src/pi-next/.worktrees/issue-165",
+    "root": "/Users/niclasl/src/pi-next",
     "identity": "https://github.com/niclas-lindgren/pi-next.git"
   },
   "command": {
     "mode": "bootstrap"
   },
   "source": {
-    "issueNumber": 85
+    "issueNumber": 165
   },
   "failure": {
     "subsystem": "bootstrap-finalizer",
     "phase": "finalization",
-    "code": "CI_NOT_PASSING",
-    "reason": "required CI FAIL",
+    "code": "1",
+    "reason": "Command failed: git -C /Users/niclasl/src/pi-next merge --no-ff --no-edit 060d21b82feda3835cd74db471f16f5b4af5334b\n",
     "boundary": "pi-next"
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-85-1787770975173-4003770",
-    "issueNumber": 85,
+    "runId": "bootstrap-165-1787769448243-3683787",
+    "issueNumber": 165,
     "phase": "terminal",
     "disposition": "finalization-blocked",
     "implementation": "PASS",
@@ -48,11 +48,37 @@
     "workerAttempts": []
   },
   "candidate": {
-    "head": "r",
-    "baseline": "b"
+    "head": "a461d3c126b9b71470e047368f2c7dcbdbf8b522",
+    "baseline": "330799a6293cef69fcf343a6f801573aa343805b",
+    "mergeBase": "a461d3c126b9b71470e047368f2c7dcbdbf8b522",
+    "originMain": "330799a6293cef69fcf343a6f801573aa343805b",
+    "aheadOfMergeBase": 0,
+    "aheadOfOriginMain": 0,
+    "behindOriginMain": 8,
+    "divergedFromOriginMain": false,
+    "dirty": true,
+    "unstagedFiles": [
+      ".pi-next/diagnostics/incidents/last.json"
+    ],
+    "untrackedFiles": [
+      ".pi-next/diagnostics/incidents/2026-08-26T13-52-06.001Z-69982a575fa4.json",
+      ".pi-next/diagnostics/incidents/2026-08-26T18-39-08.398Z-69982a575fa4.json"
+    ]
   },
+  "checks": [
+    {
+      "command": "npm run typecheck",
+      "exitCode": 0,
+      "durationMs": 3336
+    },
+    {
+      "command": "npm test",
+      "exitCode": 0,
+      "durationMs": 185614
+    }
+  ],
   "reproductionHints": [
-    "Inspect preserved worktree .worktrees/issue-85",
-    "Re-run deterministic checks: none recorded"
+    "Inspect preserved worktree .worktrees/issue-165",
+    "Re-run deterministic checks: npm run typecheck && npm test"
   ]
 }

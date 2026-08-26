@@ -1681,33 +1681,45 @@ test("--no-finalize preserves verified candidate stop-before-finalization behavi
 });
 
 test("finalization block reports implementation and verification PASS while preserving candidate", async () => {
-  const code = await runBootstrapCli(["--issue", "85"], {
-    runFinalizer: async () => {
-      const error = new Error("required CI FAIL") as Error & { code: string };
-      error.code = "CI_NOT_PASSING";
-      throw error;
-    },
-  }, async (options) => ({
-    issueNumber: options.issueNumber,
-    attempts: 1,
-    start: "2026-01-01T00:00:00.000Z",
-    end: "2026-01-01T00:00:00.000Z",
-    disposition: "pass",
-    branch: "agent/issue-85",
-    worktree: ".worktrees/issue-85",
-    revision: "r",
-    baselineRevision: "b",
-    candidate: { changedFiles: ["candidate.txt"] } as never,
-    dependencySetup: { action: "not-required" },
-    workerAttempts: [],
-    checks: [],
-    mechanicalPass: true,
-    candidateReadyForReview: true,
-    finalizationReady: true,
-    implementationOutcome: "implemented",
-    candidateHasDelta: true,
-  }));
-  assert.equal(code, 2);
+  const fixtureState = await fixture();
+  const sourceStatusBefore = await git(process.cwd(), "status", "--porcelain");
+  try {
+    const code = await runBootstrapCli(["--cwd", fixtureState.root, "--issue", "85"], {
+      runFinalizer: async () => {
+        const error = new Error("required CI FAIL") as Error & { code: string };
+        error.code = "CI_NOT_PASSING";
+        throw error;
+      },
+    }, async (options) => ({
+      issueNumber: options.issueNumber,
+      attempts: 1,
+      start: "2026-01-01T00:00:00.000Z",
+      end: "2026-01-01T00:00:00.000Z",
+      disposition: "pass",
+      branch: "agent/issue-85",
+      worktree: ".worktrees/issue-85",
+      revision: "r",
+      baselineRevision: "b",
+      candidate: { changedFiles: ["candidate.txt"] } as never,
+      dependencySetup: { action: "not-required" },
+      workerAttempts: [],
+      checks: [],
+      mechanicalPass: true,
+      candidateReadyForReview: true,
+      finalizationReady: true,
+      implementationOutcome: "implemented",
+      candidateHasDelta: true,
+    }));
+    assert.equal(code, 2);
+
+    const persisted = JSON.parse(await git(fixtureState.root, "show", "main:.pi-next/diagnostics/incidents/last.json"));
+    assert.equal(persisted.failure.code, "CI_NOT_PASSING");
+    assert.equal(persisted.source.issueNumber, 85);
+    assert.equal(persisted.repository.root, fixtureState.root);
+    assert.equal(await git(process.cwd(), "status", "--porcelain"), sourceStatusBefore);
+  } finally {
+    await fixtureState.cleanup();
+  }
 });
 
 test("rejects implicit multi-issue progression", async () => {
