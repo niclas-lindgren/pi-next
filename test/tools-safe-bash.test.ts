@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -135,6 +135,28 @@ test("production safe_bash refuses wrapper/interpreter authority bypasses before
     if (priorWorkerFlag === undefined) delete process.env.PI_NEXT_ISSUE_WORKER;
     else process.env.PI_NEXT_ISSUE_WORKER = priorWorkerFlag;
     await f.cleanup();
+  }
+});
+
+test("release gate and worker shell bubblewrap smoke expose the x64 dynamic linker alias", async (t) => {
+  const workflow = await readFile(join(process.cwd(), ".github/workflows/release-gate.yml"), "utf8");
+  assert.match(workflow, /--symlink usr\/lib64 \/lib64/);
+
+  if (process.platform !== "linux") return t.skip("bubblewrap OS sandbox is Linux-only");
+  const root = await mkdtemp(join(tmpdir(), "pi-next-safe-bash-loader-"));
+  try {
+    const decision = workerShellCommandDecision("node --version");
+    assert.equal(decision.allowed, true);
+    const execution = createWorkerShellExecution(root, decision, { PATH: process.env.PATH ?? "" });
+    try {
+      if (!execution.args.includes("--unshare-all")) return t.skip("bubblewrap is unavailable");
+      const hasLoaderAlias = execution.args.some((arg, index, args) => arg === "--symlink" && args[index + 1] === "usr/lib64" && args[index + 2] === "/lib64");
+      assert.equal(hasLoaderAlias, true);
+    } finally {
+      execution.dispose();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

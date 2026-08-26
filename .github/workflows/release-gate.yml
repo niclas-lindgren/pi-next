@@ -51,7 +51,7 @@ jobs:
           fi
           # Fail fast with a clear signal if the OS sandbox cannot start, using
           # the same base namespace/mount layout the worker shell uses.
-          bwrap --unshare-all --die-with-parent --new-session --proc /proc --dev /dev --tmpfs /tmp --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib -- /bin/true
+          bwrap --unshare-all --die-with-parent --new-session --proc /proc --dev /dev --tmpfs /tmp --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 -- /bin/true
 
       - name: Verify tag, commit, and release notes
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
