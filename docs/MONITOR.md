@@ -10,7 +10,7 @@ Commands:
 /pi-next monitor stop
 ```
 
-When the selector reports eligible work, monitor mode wakes the existing `/pi-next auto` scheduler path. Claiming, lease CAS, canonical worktree preparation, child `WorkerAdapter` dispatch, verification, finalization, and cleanup remain owned by the normal scheduler. Authority observations are only wake hints; they are never ownership proof.
+When the selector reports eligible work, monitor mode wakes the existing `/pi-next auto` scheduler path. Claiming, lease CAS, canonical worktree preparation, child `WorkerAdapter` dispatch, verification, finalization, and cleanup remain owned by the normal scheduler. Authority observations are only wake hints; they are never ownership proof. The monitor runtime requires an explicit scheduler callback at construction time so an eligible wake-up cannot silently become a no-op or a monitor-local lifecycle implementation.
 
 `stop` is graceful: future polling is cancelled immediately, and any active scheduler/worker is allowed to finish its normal safe boundary.
 
