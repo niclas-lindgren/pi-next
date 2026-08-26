@@ -10,14 +10,14 @@ import {
   type WorkerTerminalResult,
   type WorkerUsageTelemetry,
 } from "../coordination/worker-adapter.ts";
-import { createWorkerShellEnvironment, workerShellCommandDecision, type WorkerShellCommandDecision } from "../coordination/worker-shell-policy.ts";
+import { createWorkerShellExecution, workerShellCommandDecision, type WorkerShellCommandDecision } from "../coordination/worker-shell-policy.ts";
 import { classifyWorkerCompletion, createWorkerTerminalEvidence, observeWorkerEvent } from "../coordination/worker-terminal-result.ts";
 
 async function runShell(cwd: string, decision: WorkerShellCommandDecision, signal?: AbortSignal): Promise<{ exitCode: number; output: string }> {
   const { spawn } = await import("node:child_process");
-  const sandbox = createWorkerShellEnvironment(decision.env ?? {});
+  const sandbox = createWorkerShellExecution(cwd, decision);
   return await new Promise((resolveRun) => {
-    const child = spawn(decision.command!, decision.args ?? [], { cwd, env: sandbox.env, signal, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(sandbox.command, sandbox.args, { cwd: sandbox.cwd, env: sandbox.env, signal, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const finish = (exitCode: number, chunk = "") => {
       sandbox.dispose();
