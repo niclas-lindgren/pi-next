@@ -2,20 +2,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
 
-import { createWorkerShellEnvironment, workerShellCommandDecision } from "../../src/coordination/worker-shell-policy.ts";
+import { createWorkerShellExecution, workerShellCommandDecision, type WorkerShellCommandDecision } from "../../src/coordination/worker-shell-policy.ts";
 
 const SAFE_BASH_OUTPUT_LIMIT = 16_000;
 const SAFE_BASH_TIMEOUT_MS = 30 * 60 * 1_000;
 
 function runSafeBashCommand(
   cwd: string,
-  command: string,
-  args: string[],
-  envOverlay: Record<string, string>,
+  decision: WorkerShellCommandDecision,
   signal: AbortSignal | undefined,
 ): Promise<{ output: string; code: number | null }> {
-  const sandbox = createWorkerShellEnvironment(envOverlay);
-  const child = spawn(command, args, { cwd, env: sandbox.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  const sandbox = createWorkerShellExecution(cwd, decision);
+  const child = spawn(sandbox.command, sandbox.args, { cwd: sandbox.cwd, env: sandbox.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   const append = (chunk: Buffer) => {
     output = `${output}${String(chunk)}`.slice(-SAFE_BASH_OUTPUT_LIMIT);
@@ -47,8 +45,9 @@ function runSafeBashCommand(
  * in `runIssueWorker`) for mutable production workers. The replacement is a
  * positive command runner, not `sh -c`: wrappers, nested shells, interpreter
  * eval forms, GitHub CLI authority, and mutating Git subcommands are refused
- * before process creation, and allowed build/test commands run with Git/GitHub
- * credentials and Git transports stripped (#162).
+ * before process creation. Repository-controlled build/test launchers run in a
+ * detached no-`.git` workspace inside an OS mount/network sandbox with
+ * Git/GitHub credentials and Git transports stripped (#162).
  *
  * Only registered when `PI_NEXT_ISSUE_WORKER=1` (set exclusively by
  * `runIssueWorker`) so the trusted controller session, which still needs
@@ -71,7 +70,7 @@ export function registerSafeBashTool(pi: ExtensionAPI) {
           details: { refused: true },
         };
       }
-      const result = await runSafeBashCommand(ctx.cwd, decision.command, decision.args ?? [], decision.env ?? {}, signal);
+      const result = await runSafeBashCommand(ctx.cwd, decision, signal);
       return {
         content: [{ type: "text", text: `exit ${result.code ?? "signal"}\n${result.output}` }],
         details: { exitCode: result.code },

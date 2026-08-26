@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { runCommand } from "./command-runner.js";
 import { WorkerFactory } from "./types.js";
 import { bounded, redact } from "./utils.js";
-import { createWorkerShellEnvironment, workerShellCommandDecision } from "../coordination/worker-shell-policy.js";
+import { createWorkerShellExecution, workerShellCommandDecision } from "../coordination/worker-shell-policy.js";
 
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -49,9 +49,9 @@ function makeSafeBashTool(cwd: string, defineToolImpl: (definition: unknown) => 
       if (!decision.allowed || !decision.command) {
         return { content: [{ type: "text", text: `Refused: ${decision.reason ?? "command is outside the worker capability policy"}.` }], details: { refused: true } };
       }
-      const sandbox = createWorkerShellEnvironment(decision.env ?? {});
+      const sandbox = createWorkerShellExecution(cwd, decision);
       try {
-        const result = await runCommand(decision.command, decision.args ?? [], { cwd, timeoutMs: 30 * 60 * 1_000, signal, env: sandbox.env });
+        const result = await runCommand(sandbox.command, sandbox.args, { cwd: sandbox.cwd, timeoutMs: 30 * 60 * 1_000, signal, env: sandbox.env });
         const output = redact(`${result.stdout}${result.stderr}`);
         return { content: [{ type: "text", text: bounded(`exit ${result.exitCode}\n${output}`) }], details: { exitCode: result.exitCode } };
       } finally {

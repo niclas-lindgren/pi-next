@@ -1,6 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 
 export interface WorkerShellCommandDecision {
   allowed: boolean;
@@ -8,11 +6,7 @@ export interface WorkerShellCommandDecision {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
-}
-
-export interface WorkerShellEnvironment {
-  env: NodeJS.ProcessEnv;
-  dispose(): void;
+  workspaceMode?: "current" | "detached";
 }
 
 const UNSAFE_LAUNCHERS = new Set([
@@ -84,14 +78,13 @@ const PROTECTED_ENV_NAMES = new Set([
   "XDG_CONFIG_HOME",
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
-  "PATH",
   "NODE_OPTIONS",
   "BASH_ENV",
   "ENV",
   "NPM_TOKEN",
 ]);
 
-function normalizeCommandName(command: string): string {
+export function workerShellNormalizeCommandName(command: string): string {
   return basename(command).replace(/\.(?:exe|cmd|bat)$/i, "").toLowerCase();
 }
 
@@ -99,9 +92,17 @@ function isEnvAssignment(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
 }
 
-function isProtectedEnvName(name: string): boolean {
+export function isWorkerShellProtectedEnvName(name: string): boolean {
   const upper = name.toUpperCase();
   return PROTECTED_ENV_NAMES.has(upper) || PROTECTED_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix));
+}
+
+function isProtectedEnvOverrideName(name: string): boolean {
+  return name.toUpperCase() === "PATH" || isWorkerShellProtectedEnvName(name);
+}
+
+export function isWorkerShellSensitiveCredentialName(name: string): boolean {
+  return /TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(name) && /GITHUB|GH|GIT|SSH|HUB/i.test(name);
 }
 
 function containsShellControlOutsideQuotes(command: string): boolean {
@@ -171,7 +172,7 @@ function splitCommandLine(command: string): string[] | undefined {
 }
 
 function allowsNpmLikeCommand(base: string, args: string[]): boolean {
-  if (base === "corepack") return args.length > 0 && PACKAGE_MANAGERS.has(normalizeCommandName(args[0]!));
+  if (base === "corepack") return args.length > 0 && PACKAGE_MANAGERS.has(workerShellNormalizeCommandName(args[0]!));
   if (base === "yarn") return !["npm", "publish", "login", "logout", "config", "token"].includes(args[0] ?? "");
   if (base === "pnpm") return !["publish", "login", "logout", "config", "token", "dlx"].includes(args[0] ?? "");
   const subcommand = args.find((arg) => !arg.startsWith("-")) ?? "";
@@ -217,12 +218,12 @@ export function workerShellCommandDecision(command: string): WorkerShellCommandD
     const token = tokens.shift()!;
     const separator = token.indexOf("=");
     const name = token.slice(0, separator);
-    if (isProtectedEnvName(name)) return { allowed: false, reason: `protected environment override refused: ${name}` };
+    if (isProtectedEnvOverrideName(name)) return { allowed: false, reason: `protected environment override refused: ${name}` };
     env[name] = token.slice(separator + 1);
   }
   const executable = tokens.shift();
   if (!executable) return { allowed: false, reason: "missing executable" };
-  const base = normalizeCommandName(executable);
+  const base = workerShellNormalizeCommandName(executable);
   const args = tokens;
 
   if (base === "gh") return { allowed: false, reason: "GitHub authority is controller-owned" };
@@ -232,17 +233,20 @@ export function workerShellCommandDecision(command: string): WorkerShellCommandD
     if (!subcommand || !READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) {
       return { allowed: false, reason: "git is limited to read-only inspection subcommands" };
     }
-    return { allowed: true, command: executable, args, env };
+    return { allowed: true, command: executable, args, env, workspaceMode: "current" };
   }
   if (base === "rm") return { allowed: false, reason: "destructive file removal is not available through worker shell" };
   if (base === "find" && !allowsFindCommand(args)) return { allowed: false, reason: "find execution/deletion actions are refused" };
   if (PACKAGE_MANAGERS.has(base)) {
     if (!allowsNpmLikeCommand(base, args)) return { allowed: false, reason: `${base} subcommand is outside the build/test allowlist` };
-    return { allowed: true, command: executable, args, env };
+    return { allowed: true, command: executable, args, env, workspaceMode: "detached" };
   }
   if (base === "node" && !allowsNodeCommand(args)) return { allowed: false, reason: "node eval/print forms can bypass worker authority controls" };
-  if (TEST_AND_BUILD_TOOLS.has(base) || INSPECTION_TOOLS.has(base) || base === "find") {
-    return { allowed: true, command: executable, args, env };
+  if (TEST_AND_BUILD_TOOLS.has(base)) {
+    return { allowed: true, command: executable, args, env, workspaceMode: "detached" };
+  }
+  if (INSPECTION_TOOLS.has(base) || base === "find") {
+    return { allowed: true, command: executable, args, env, workspaceMode: "current" };
   }
   return { allowed: false, reason: `${base} is outside the worker command allowlist` };
 }
@@ -251,31 +255,5 @@ export function forbiddenWorkerCommand(command: string): boolean {
   return !workerShellCommandDecision(command).allowed;
 }
 
-export function createWorkerShellEnvironment(extraEnv: Record<string, string> = {}, baseEnv: NodeJS.ProcessEnv = process.env): WorkerShellEnvironment {
-  const home = mkdtempSync(join(tmpdir(), "pi-next-worker-shell-"));
-  mkdirSync(join(home, "config"), { recursive: true });
-  mkdirSync(join(home, "cache"), { recursive: true });
-  const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(baseEnv)) {
-    if (value === undefined) continue;
-    if (isProtectedEnvName(key)) continue;
-    if (/TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(key) && /GITHUB|GH|GIT|SSH|HUB/i.test(key)) continue;
-    env[key] = value;
-  }
-  Object.assign(env, extraEnv);
-  env.HOME = home;
-  env.USERPROFILE = home;
-  env.XDG_CONFIG_HOME = join(home, "config");
-  env.XDG_CACHE_HOME = join(home, "cache");
-  env.GIT_TERMINAL_PROMPT = "0";
-  env.GIT_ASKPASS = "false";
-  env.SSH_ASKPASS = "false";
-  env.GCM_INTERACTIVE = "never";
-  env.GIT_ALLOW_PROTOCOL = "";
-  return {
-    env,
-    dispose() {
-      rmSync(home, { recursive: true, force: true });
-    },
-  };
-}
+export type { WorkerShellEnvironment, WorkerShellExecution } from "./worker-shell-execution.js";
+export { createWorkerShellEnvironment, createWorkerShellExecution } from "./worker-shell-execution.js";
