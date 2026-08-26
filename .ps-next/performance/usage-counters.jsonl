@@ -1,0 +1,2 @@
+{"timestamp": "2026-08-25T20:49:54Z", "event": "authority_refresh", "detail": "verify"}
+{"timestamp": "2026-08-25T20:51:34Z", "event": "context_packet_built", "detail": "verifier:7596"}
