@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "createdAt": "2026-08-26T07:16:06.822Z",
+  "createdAt": "2026-08-26T06:49:30.973Z",
   "fingerprint": "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
   "classification": {
     "category": "framework",
@@ -8,8 +8,8 @@
     "reason": "typed pi-next framework/controller invariant failure"
   },
   "runtime": {
-    "piNextVersion": "0.3.4",
-    "piNextRevision": "4016ecd648828f96a516bf321742843581f40ec7",
+    "piNextVersion": "0.3.3",
+    "piNextRevision": "5231c252ac95cf920cf65ecc3c8fcc0f79eea3de",
     "node": "v22.23.2",
     "platform": "linux/arm64",
     "tools": {
@@ -37,7 +37,7 @@
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-85-1787728566722-1939338",
+    "runId": "bootstrap-85-1787726970895-1375903",
     "issueNumber": 85,
     "phase": "terminal",
     "disposition": "finalization-blocked",
