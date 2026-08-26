@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -226,6 +226,36 @@ test("repeated identity-mismatch status polls against the same unresolved contra
     reportIdentityMismatch(cwd, details);
     const second = readLastIncidentBundle(cwd);
     assert.equal(first?.createdAt, second?.createdAt, "an identical unresolved mismatch must not persist a second bundle");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("repeated equivalent finalization incidents reuse the existing diagnostic bundle", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-next-finalization-incident-coalesce-"));
+  try {
+    const base = {
+      cwd,
+      source: { issueNumber: 145 },
+      failure: {
+        subsystem: "bootstrap-finalizer",
+        phase: "finalization",
+        code: "CI_NOT_PASSING",
+        reason: "required CI FAIL",
+        boundary: "pi-next" as const,
+      },
+    };
+    const first = createIncidentBundle({ ...base, createdAt: "2026-01-01T00:00:00.000Z" });
+    const second = createIncidentBundle({ ...base, createdAt: "2026-01-01T00:01:00.000Z" });
+
+    const firstPaths = persistIncidentBundle(cwd, first);
+    const secondPaths = persistIncidentBundle(cwd, second);
+
+    assert.equal(secondPaths.path, firstPaths.path);
+    const files = (await readdir(join(cwd, ".pi-next", "diagnostics", "incidents")))
+      .filter((file) => file.endsWith(".json") && file !== "last.json");
+    assert.equal(files.length, 1);
+    assert.equal(readLastIncidentBundle(cwd, 145)?.createdAt, first.createdAt);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

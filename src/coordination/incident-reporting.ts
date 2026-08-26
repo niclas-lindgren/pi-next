@@ -357,13 +357,36 @@ function incidentFileName(bundle: Pick<IncidentDiagnosticBundle, "createdAt" | "
   return `${stamp}-${digest}.json`;
 }
 
+function incidentIssueKey(bundle: Pick<IncidentDiagnosticBundle, "source" | "lifecycle">): number | undefined {
+  return bundle.source?.issueNumber ?? bundle.lifecycle?.issueNumber;
+}
+
+function existingEquivalentIncidentFile(dir: string, bundle: IncidentDiagnosticBundle): string | undefined {
+  if (!existsSync(dir)) return undefined;
+  const issue = incidentIssueKey(bundle);
+  for (const file of readdirSync(dir).filter((entry) => entry.endsWith(".json") && entry !== "last.json").sort()) {
+    try {
+      const existing = readIncidentBundle(join(dir, file));
+      if (existing.fingerprint === bundle.fingerprint && incidentIssueKey(existing) === issue) return join(dir, file);
+    } catch {
+      // Ignore corrupt optional diagnostics; a fresh sanitized bundle can replace them.
+    }
+  }
+  return undefined;
+}
+
 export function persistIncidentBundle(cwd: string, bundle: IncidentDiagnosticBundle, config: Pick<PiNextConfig, "workflow"> = loadPiNextConfig(cwd)): { path: string; lastPath: string } {
   const dir = incidentDiagnosticsDir(cwd, config);
   mkdirSync(dir, { recursive: true });
+  const lastPath = join(dir, "last.json");
+  const existing = existingEquivalentIncidentFile(dir, bundle);
+  if (existing) {
+    if (!existsSync(lastPath)) writeFileSync(lastPath, readFileSync(existing, "utf8"), "utf8");
+    return { path: existing, lastPath };
+  }
   const path = join(dir, incidentFileName(bundle));
   const data = `${JSON.stringify(bundle, null, 2)}\n`;
   writeFileSync(path, data, "utf8");
-  const lastPath = join(dir, "last.json");
   writeFileSync(lastPath, data, "utf8");
   return { path, lastPath };
 }
