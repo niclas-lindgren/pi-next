@@ -297,6 +297,7 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     await commitIncidentDiagnosticsBeforeFinalization({
       root,
       runCommand: runner,
+      issueNumber,
       reporter: (line) => say(`bootstrap finalize #${issueNumber} · ${line}`),
     });
     await git(worktree, ["fetch", "origin", "main", "--quiet"], runner);

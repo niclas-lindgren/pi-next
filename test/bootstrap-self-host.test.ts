@@ -39,7 +39,7 @@ async function fixture(withLockfile = false) {
   const remote = `${root}.origin.git`;
   await mkdir(join(root, "docs"), { recursive: true });
   await writeFile(join(root, "AGENTS.md"), "# Fixture instructions\nDo not merge or close work.\n");
-  await writeFile(join(root, ".gitignore"), "node_modules/\n.worktrees/\n");
+  await writeFile(join(root, ".gitignore"), "node_modules/\n.worktrees/\n.pi/\n");
   await writeFile(join(root, "docs", "EVALUATION_AND_RELIABILITY.md"), "# Evaluation\nUse independent mechanical grading.\n");
   await writeFile(join(root, "package.json"), '{"name":"fixture","version":"1.0.0","scripts":{"test":"true","typecheck":"true"}}\n');
   if (withLockfile) {

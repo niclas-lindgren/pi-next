@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -10,8 +10,10 @@ import { test } from "node:test";
 import { BootstrapFinalizeError, main as bootstrapFinalizeMain, runBootstrapFinalize, type CommandRunner } from "../scripts/bootstrap-finalize.ts";
 import { readCandidateState } from "../src/bootstrap/candidate.ts";
 import { readVerifiedFinalizationCandidateProof, verifiedFinalizationCandidateProofPath, writeVerifiedFinalizationCandidateProof } from "../src/bootstrap/finalization-proof.ts";
+import { commitIncidentDiagnostics } from "../src/coordination/incident-diagnostics-commit.ts";
 import { readVerifiedIntegratedMainProof, writeVerifiedIntegratedMainProof } from "../src/coordination/post-integration-reverification.ts";
 import { runCommand as bootstrapRunCommand } from "../src/bootstrap/command-runner.ts";
+import { readCommitTelemetry, recordCommit } from "../src/coordination/workflow-commit-policy.ts";
 import { LifecycleCheckpointFault, withLifecycleFaultInjection } from "../src/coordination/lifecycle-checkpoints.ts";
 import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordination/work-authority.ts";
 
@@ -25,7 +27,7 @@ async function fixture() {
   await git(root, "config", "user.email", "finalize@example.invalid");
   await git(root, "config", "user.name", "Finalize Test");
   await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { typecheck: "true", test: "true" } }));
-  await writeFile(join(root, ".gitignore"), ".worktrees/\n");
+  await writeFile(join(root, ".gitignore"), ".worktrees/\n.pi/\n");
   await writeFile(join(root, "README.md"), "base\n");
   await git(root, "add", ".");
   await git(root, "commit", "-qm", "base");
@@ -905,7 +907,34 @@ test("incident diagnostics in the coordination root are committed before finaliz
     assert.equal(result.issueClosed, true);
     assert.equal(await git(f.remote, "show", "main:.pi-next/diagnostics/incidents/incident.json"), "{\"ok\":true}");
     assert.match(await git(f.root, "log", "--format=%s", "--grep=record finalization incident diagnostics", "origin/main"), /record finalization incident diagnostics/);
+    assert.equal(readCommitTelemetry(f.root).issues["138"]?.lifecycle, 1);
     assert.ok(lines.some((line) => line.includes("committed incident diagnostics")));
+  } finally { await f.cleanup(); }
+});
+
+test("incident diagnostics obey the shared workflow-only lifecycle budget", async () => {
+  const f = await fixture();
+  try {
+    await mkdir(join(f.root, ".pi-next", "diagnostics", "incidents"), { recursive: true });
+    const bundle = {
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      fingerprint: "bootstrap-finalizer/CI_NOT_PASSING/required-ci-fail/v1",
+      source: { issueNumber: 140 },
+      lifecycle: { issueNumber: 140 },
+      failure: { code: "CI_NOT_PASSING" },
+    };
+    await writeFile(join(f.root, ".pi-next", "diagnostics", "incidents", "last.json"), `${JSON.stringify(bundle)}\n`);
+    recordCommit(f.root, 140, "workflow-only");
+    recordCommit(f.root, 140, "lifecycle");
+
+    const result = await commitIncidentDiagnostics({ root: f.root, runCommand: bootstrapRunCommand, issueNumber: 140 });
+
+    assert.equal(result.status, "budget-exhausted");
+    assert.match(result.reason ?? "", /Workflow-only\/lifecycle commit bound reached/);
+    assert.equal(await git(f.root, "log", "--format=%s", "-1"), "base");
+    assert.equal(await readFile(join(f.root, ".pi-next", "diagnostics", "incidents", "last.json"), "utf8"), `${JSON.stringify(bundle)}\n`);
+    assert.match(await git(f.root, "status", "--porcelain"), /\.pi-next\//);
   } finally { await f.cleanup(); }
 });
 

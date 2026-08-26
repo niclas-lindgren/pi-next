@@ -59,7 +59,7 @@ export async function prepareRepository(cwd: string, runner: CommandRunner, opti
   }
   let rootStatus = await statusRaw(root, runner);
   if (rootStatus !== "") {
-    const incidentCommit = await commitIncidentDiagnostics({ root, runCommand: runner });
+    const incidentCommit = await commitIncidentDiagnostics({ root, runCommand: runner, issueNumber: options.issueNumber });
     if (incidentCommit.status === "committed" || incidentCommit.status === "clean") {
       rootStatus = await statusRaw(root, runner);
     }
