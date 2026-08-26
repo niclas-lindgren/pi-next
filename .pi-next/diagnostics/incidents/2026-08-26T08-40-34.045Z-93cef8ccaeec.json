@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "createdAt": "2026-08-26T18:44:30.267Z",
-  "fingerprint": "bootstrap-finalizer/1/command-failed-git-c-users-niclasl-src-pi-next-merge-no-ff-no-edit-sha/v1",
+  "createdAt": "2026-08-26T08:40:34.045Z",
+  "fingerprint": "bootstrap-finalizer/UNIQUE_WORK_PRESENT/refusing-cleanup-with-dirty-worktree/v1",
   "classification": {
     "category": "framework",
     "reportability": "upstream",
@@ -9,7 +9,7 @@
   },
   "runtime": {
     "piNextVersion": "0.3.5",
-    "piNextRevision": "330799a6293cef69fcf343a6f801573aa343805b",
+    "piNextRevision": "7b625ef9b2dfc19cbec98c1f9a7a0f1e8049311b",
     "node": "v22.23.2",
     "platform": "linux/arm64",
     "tools": {
@@ -31,13 +31,13 @@
   "failure": {
     "subsystem": "bootstrap-finalizer",
     "phase": "finalization",
-    "code": "1",
-    "reason": "Command failed: git -C /Users/niclasl/src/pi-next merge --no-ff --no-edit 060d21b82feda3835cd74db471f16f5b4af5334b\n",
+    "code": "UNIQUE_WORK_PRESENT",
+    "reason": "refusing cleanup with dirty worktree",
     "boundary": "pi-next"
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-165-1787769448243-3683787",
+    "runId": "bootstrap-165-1787733251388-2687934",
     "issueNumber": 165,
     "phase": "terminal",
     "disposition": "finalization-blocked",
@@ -48,33 +48,33 @@
     "workerAttempts": []
   },
   "candidate": {
-    "head": "a461d3c126b9b71470e047368f2c7dcbdbf8b522",
-    "baseline": "330799a6293cef69fcf343a6f801573aa343805b",
-    "mergeBase": "a461d3c126b9b71470e047368f2c7dcbdbf8b522",
-    "originMain": "330799a6293cef69fcf343a6f801573aa343805b",
+    "head": "13c567f1d481f87d42ee7d77bb3280c4a39b0b77",
+    "baseline": "13c567f1d481f87d42ee7d77bb3280c4a39b0b77",
+    "mergeBase": "13c567f1d481f87d42ee7d77bb3280c4a39b0b77",
+    "originMain": "13c567f1d481f87d42ee7d77bb3280c4a39b0b77",
     "aheadOfMergeBase": 0,
     "aheadOfOriginMain": 0,
-    "behindOriginMain": 8,
+    "behindOriginMain": 0,
     "divergedFromOriginMain": false,
     "dirty": true,
     "unstagedFiles": [
       ".pi-next/diagnostics/incidents/last.json"
     ],
     "untrackedFiles": [
-      ".pi-next/diagnostics/incidents/2026-08-26T13-52-06.001Z-69982a575fa4.json",
-      ".pi-next/diagnostics/incidents/2026-08-26T18-39-08.398Z-69982a575fa4.json"
+      ".pi-next/diagnostics/incidents/2026-08-26T08-32-08.074Z-69982a575fa4.json",
+      ".pi-next/diagnostics/incidents/2026-08-26T08-35-45.213Z-69982a575fa4.json"
     ]
   },
   "checks": [
     {
       "command": "npm run typecheck",
       "exitCode": 0,
-      "durationMs": 3336
+      "durationMs": 2780
     },
     {
       "command": "npm test",
       "exitCode": 0,
-      "durationMs": 185614
+      "durationMs": 184865
     }
   ],
   "reproductionHints": [

@@ -180,6 +180,9 @@ function createBubblewrapArgs(root: string, cwd: string, sourceCwd: string, comm
     "--symlink",
     "usr/lib",
     "/lib",
+    "--symlink",
+    "usr/lib64",
+    "/lib64",
   ];
   addReadOnlyBindIfPresent(args, "/opt");
   addReadOnlyBindIfPresent(args, "/nix");

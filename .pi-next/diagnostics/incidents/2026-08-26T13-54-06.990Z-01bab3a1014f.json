@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "createdAt": "2026-08-26T18:44:30.267Z",
+  "createdAt": "2026-08-26T13:54:06.990Z",
   "fingerprint": "bootstrap-finalizer/1/command-failed-git-c-users-niclasl-src-pi-next-merge-no-ff-no-edit-sha/v1",
   "classification": {
     "category": "framework",
@@ -9,7 +9,7 @@
   },
   "runtime": {
     "piNextVersion": "0.3.5",
-    "piNextRevision": "330799a6293cef69fcf343a6f801573aa343805b",
+    "piNextRevision": "4763ce514cae28de6bad948fcac68a9d598d3e6a",
     "node": "v22.23.2",
     "platform": "linux/arm64",
     "tools": {
@@ -32,12 +32,12 @@
     "subsystem": "bootstrap-finalizer",
     "phase": "finalization",
     "code": "1",
-    "reason": "Command failed: git -C /Users/niclasl/src/pi-next merge --no-ff --no-edit 060d21b82feda3835cd74db471f16f5b4af5334b\n",
+    "reason": "Command failed: git -C /Users/niclasl/src/pi-next merge --no-ff --no-edit a461d3c126b9b71470e047368f2c7dcbdbf8b522\n",
     "boundary": "pi-next"
   },
   "lifecycle": {
     "entry": "bootstrap",
-    "runId": "bootstrap-165-1787769448243-3683787",
+    "runId": "bootstrap-165-1787752040246-3332593",
     "issueNumber": 165,
     "phase": "terminal",
     "disposition": "finalization-blocked",
@@ -48,33 +48,33 @@
     "workerAttempts": []
   },
   "candidate": {
-    "head": "a461d3c126b9b71470e047368f2c7dcbdbf8b522",
-    "baseline": "330799a6293cef69fcf343a6f801573aa343805b",
-    "mergeBase": "a461d3c126b9b71470e047368f2c7dcbdbf8b522",
-    "originMain": "330799a6293cef69fcf343a6f801573aa343805b",
+    "head": "1682a7a2dc93d7d40bf1fc8aac2e65738c2a2646",
+    "baseline": "4763ce514cae28de6bad948fcac68a9d598d3e6a",
+    "mergeBase": "1682a7a2dc93d7d40bf1fc8aac2e65738c2a2646",
+    "originMain": "4763ce514cae28de6bad948fcac68a9d598d3e6a",
     "aheadOfMergeBase": 0,
     "aheadOfOriginMain": 0,
-    "behindOriginMain": 8,
+    "behindOriginMain": 6,
     "divergedFromOriginMain": false,
     "dirty": true,
     "unstagedFiles": [
       ".pi-next/diagnostics/incidents/last.json"
     ],
     "untrackedFiles": [
-      ".pi-next/diagnostics/incidents/2026-08-26T13-52-06.001Z-69982a575fa4.json",
-      ".pi-next/diagnostics/incidents/2026-08-26T18-39-08.398Z-69982a575fa4.json"
+      ".pi-next/diagnostics/incidents/2026-08-26T13-38-55.255Z-69982a575fa4.json",
+      ".pi-next/diagnostics/incidents/2026-08-26T13-48-58.379Z-69982a575fa4.json"
     ]
   },
   "checks": [
     {
       "command": "npm run typecheck",
       "exitCode": 0,
-      "durationMs": 3336
+      "durationMs": 4006
     },
     {
       "command": "npm test",
       "exitCode": 0,
-      "durationMs": 185614
+      "durationMs": 183955
     }
   ],
   "reproductionHints": [
