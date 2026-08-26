@@ -118,6 +118,7 @@ export async function commitIncidentDiagnosticsBeforeFinalization(input: {
   root: string;
   runCommand: ReverificationCommandRunner;
   reporter?: (line: string) => void;
+  issueNumber?: number;
 }): Promise<FinalizationResidueCommitResult> {
   return commitIncidentDiagnostics({ ...input, reporter: input.reporter ? (line) => input.reporter?.(line.replace(/^incident diagnostics · committed /, "finalization · committed incident diagnostics ")) : undefined });
 }
@@ -302,6 +303,7 @@ export async function finalizeWithPostIntegrationReverification(input: {
       root: input.finalizeInput.cwd,
       runCommand: input.runCommand,
       reporter: input.reporter,
+      issueNumber: input.finalizeInput.issueNumber,
     });
   }
   let result = await finalizeIssue(input.leaseAuthority, input.workAuthority, input.finalizeInput);

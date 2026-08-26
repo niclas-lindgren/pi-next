@@ -17,5 +17,6 @@ export * from "./finalize.ts";
 export * from "./lifecycle-journal.ts";
 export * from "./lifecycle-checkpoints.ts";
 export * from "./incident-reporting.ts";
+export * from "./workflow-commit-policy.ts";
 export * from "./cli.ts";
 export * from "../lifecycle/index.js";

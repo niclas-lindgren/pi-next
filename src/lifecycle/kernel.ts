@@ -246,7 +246,7 @@ export async function runSingleIssueLifecycle(
           // guarded helper finalize already trusts (main-only, exact
           // origin/main, incident-paths-only), never gitignored, never left
           // to accumulate as unrelated dirty state.
-          await commitIncidentDiagnosticsBeforeFinalization({ root: cwd, runCommand: runner });
+          await commitIncidentDiagnosticsBeforeFinalization({ root: cwd, runCommand: runner, issueNumber });
         }
       } catch {
         // Incident capture/reporting is observational and must never alter the preserved candidate lifecycle result.
