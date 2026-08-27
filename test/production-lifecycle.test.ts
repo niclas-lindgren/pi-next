@@ -250,6 +250,42 @@ test("two fresh production auto schedulers racing the same issue: exactly one cl
   }
 });
 
+test("production auto cancellation after claim releases ownership before any lifecycle worker starts (#73)", async () => {
+  const f = await fixture();
+  try {
+    const authority = new InMemoryWorkAuthority([item(901)]);
+    const sharedLeaseAuthority = new CasLeaseAuthority();
+    const controller = new AbortController();
+    const executed: number[] = [];
+    const originalCreate = sharedLeaseAuthority.create.bind(sharedLeaseAuthority);
+    sharedLeaseAuthority.create = async (issueNumber, lease) => {
+      await originalCreate(issueNumber, lease);
+      controller.abort("stop after scheduler claim");
+    };
+
+    const result = await runProductionLifecycleScheduler({
+      cwd: f.root,
+      entry: "auto",
+      requestedIssues: 1,
+      runId: "prod-auto-abort-after-claim",
+      signal: controller.signal,
+    }, { authority, config: f.config, leaseAuthority: sharedLeaseAuthority }, async (options) => {
+      executed.push(options.issueNumber);
+      return report(options.issueNumber);
+    });
+
+    assert.equal(result.disposition, "cancelled");
+    assert.equal(result.settled, 0);
+    assert.deepEqual(executed, []);
+    assert.equal(await sharedLeaseAuthority.read(901), undefined);
+    const state = readLoopState(f.root, "prod-auto-abort-after-claim");
+    assert.equal(state?.status, "cancelled");
+    assert.equal(state?.activeIssueNumber, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("production footer/status projects the current unified lifecycle run, not stale historical state", async () => {
   const f = await fixture();
   try {
