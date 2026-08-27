@@ -29,7 +29,7 @@ async function fixture() {
 
 test("high-risk verification invokes separate read-only reviewers against the exact candidate", async () => {
   const cwd = await fixture();
-  const seen: Array<{ axis?: string; readOnly?: boolean; prompt: string }> = [];
+  const seen: Array<{ axis?: string; readOnly?: boolean; prompt: string; skills?: string[]; boundInputs?: Record<string, string> }> = [];
   try {
     await runCandidateReviewGate({
       ctx: { cwd } as never,
@@ -38,12 +38,14 @@ test("high-risk verification invokes separate read-only reviewers against the ex
       risk: "high",
       policy: { enabled: true, requiredRisk: "high", maxRounds: 2, axes: ["spec", "standards"] },
       worker: async (_cwd, prompt, options) => {
-        seen.push({ axis: options?.phase, readOnly: options?.readOnly, prompt });
+        seen.push({ axis: options?.phase, readOnly: options?.readOnly, prompt, skills: options?.dispatch?.skills, boundInputs: options?.dispatch?.boundInputs });
         return { ok: true, output: JSON.stringify({ type: "message_end", message: { content: [{ type: "text", text: JSON.stringify({ verdict: "pass", findings: [] }) }] } }), code: 0, signal: null, telemetry: { status: "unavailable" } } as never;
       },
     });
     assert.deepEqual(seen.map((item) => item.axis), ["review-spec", "review-standards"]);
     assert.ok(seen.every((item) => item.readOnly === true));
+    assert.deepEqual(seen.map((item) => item.skills), [["code-review-spec"], ["code-review-standards", "codebase-design"]]);
+    assert.deepEqual(seen.map((item) => item.boundInputs), [{ specEvidence: "authority:authority-1" }, { standardsSources: "AGENTS.md,repository-policy,changed-paths" }]);
     assert.ok(seen.every((item) => item.prompt.includes("candidate.txt") && item.prompt.includes("authority-1")));
     const record = JSON.parse(await readFile(join(cwd, ".pi", "runtime", "pi-next-review.json"), "utf8")) as { status: string; candidateSha: string; blockingFindings: number };
     assert.equal(record.status, "passed");

@@ -5,7 +5,9 @@
  * content (loaded). Installed-but-unselected skills add no worker-context
  * payload. Free of host/filesystem APIs so every adapter sees one contract.
  */
-import type { WorkerRole } from "./worker-dispatch.ts";
+import type { CapabilityProfile, WorkerRole } from "./worker-dispatch.ts";
+import { BUILT_IN_SKILL_REGISTRY_ENTRIES } from "./skill-compatibility.ts";
+export { BUILT_IN_SKILL_REGISTRY_ENTRIES } from "./skill-compatibility.ts";
 
 export const SKILL_ROUTING_POLICY_VERSION = 1 as const;
 
@@ -14,6 +16,53 @@ export type SkillTier = (typeof SKILL_TIERS)[number];
 
 export const RISK_CLASSES = ["low", "normal", "high", "critical"] as const;
 export type RiskClass = (typeof RISK_CLASSES)[number];
+
+const ROLES_FOR_COMPATIBILITY: readonly WorkerRole[] = [
+  "controller", "planning", "implementation", "repair",
+  "review-spec", "review-standards", "verification", "maintenance",
+];
+
+export type SkillMutationScope = "none" | "owned-workspace" | "workflow-artifacts";
+export type SkillProcessBehavior = "discipline" | "orchestrator" | "router" | "human-facing";
+export type MissingBoundInputBehavior = "reject-dispatch" | "typed-blocked-result";
+export type UnattendedCompatibility = "compatible" | "typed-blocked-with-missing-input" | "incompatible";
+
+export interface SkillBoundInputRequirement {
+  /** Dispatch field name, e.g. candidateSha, fixedPointSha, specEvidence, testingSeam. */
+  name: string;
+  roles?: WorkerRole[];
+  missing: MissingBoundInputBehavior;
+  description?: string;
+}
+
+export interface SkillCompatibilityDeclaration {
+  supportedRoles: WorkerRole[];
+  capabilityProfiles: CapabilityProfile[];
+  mayAskUser: boolean;
+  requiresHumanCheckpoint: boolean;
+  maySpawnSubagents: boolean;
+  processBehavior: SkillProcessBehavior;
+  mutationScope: SkillMutationScope;
+  requiredBoundInputs: SkillBoundInputRequirement[];
+  companionSkills?: string[];
+  unattended: UnattendedCompatibility;
+  adaptation: {
+    kind: "upstream-reviewed" | "pi-next-adapter" | "extracted-discipline";
+    provenance: string;
+    decision: string;
+  };
+}
+
+export interface SkillCompatibilityVerdict {
+  status: "compatible" | "typed-blocked";
+  role: WorkerRole;
+  capabilityProfile?: CapabilityProfile;
+  mutationScope: SkillMutationScope;
+  unattended: UnattendedCompatibility;
+  nestedWorkersPermitted: boolean;
+  missingBoundInputs: string[];
+  adaptation: SkillCompatibilityDeclaration["adaptation"];
+}
 
 /** One reviewed, available skill and its routing identity. */
 export interface SkillRegistryEntry {
@@ -31,6 +80,9 @@ export interface SkillRegistryEntry {
   /** Framework/process-owner discipline: present but never routed
    * automatically/mandatory. Fails closed. */
   processOwner?: boolean;
+  /** Reviewed unattended/role compatibility declaration. Required for any
+   * automatic or mandatory routing. */
+  compatibility?: SkillCompatibilityDeclaration;
 }
 
 export interface SkillRegistry {
@@ -70,6 +122,14 @@ export interface SkillResolutionInput {
   task?: string;
   risk?: RiskClass;
   paths?: string[];
+  capabilityProfile?: CapabilityProfile;
+  authorityFingerprint?: string;
+  candidateSha?: string;
+  fixedPointSha?: string;
+  /** Kernel-bound methodology inputs such as spec evidence or a TDD seam. */
+  boundInputs?: Record<string, string | undefined>;
+  /** Kernel-owned budget permitting internal worker/sub-agent spawning. */
+  allowNestedWorkers?: boolean;
   /** Explicit-tier requests from operator/planning decision. */
   requestedSkills?: string[];
 }
@@ -81,6 +141,7 @@ export interface ResolvedSkill {
   provenanceVersion: string;
   tier: SkillTier;
   reason: string;
+  compatibility: SkillCompatibilityVerdict;
 }
 
 export interface SkillResolution {
@@ -118,15 +179,27 @@ function fingerprint(value: unknown): string {
   return hash.toString(16).padStart(8, "0");
 }
 
-/** Package-owned built-in registry; consumers may extend with pinned sources. */
-export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Object.freeze([
-  { id: "code-review", category: "code-review", source: "mattpocock", provenanceVersion: "885e2ca4d842d139e9aef4e48d366c63cb1b8013" },
-  { id: "tdd", category: "tdd", source: "mattpocock", provenanceVersion: "885e2ca4d842d139e9aef4e48d366c63cb1b8013" },
-  { id: "diagnosing-bugs", category: "debugging", source: "mattpocock", provenanceVersion: "885e2ca4d842d139e9aef4e48d366c63cb1b8013" },
-  { id: "codebase-design", category: "design", source: "mattpocock", provenanceVersion: "885e2ca4d842d139e9aef4e48d366c63cb1b8013" },
-  { id: "performance-telemetry", category: "performance", source: "pi-next", provenanceVersion: "pi-next" },
-  { id: "verification-before-completion", category: "verification", source: "pi-next", provenanceVersion: "pi-next", capabilities: ["terminal-verification"] },
-] as unknown as SkillRegistryEntry[]);
+function cloneCompatibility(value: SkillCompatibilityDeclaration): SkillCompatibilityDeclaration {
+  return {
+    ...value,
+    supportedRoles: [...value.supportedRoles],
+    capabilityProfiles: [...value.capabilityProfiles],
+    requiredBoundInputs: value.requiredBoundInputs.map((item) => ({ ...item, ...(item.roles ? { roles: [...item.roles] } : {}) })),
+    ...(value.companionSkills ? { companionSkills: [...value.companionSkills] } : {}),
+    adaptation: { ...value.adaptation },
+  };
+}
+
+function validateCompatibilityDeclaration(id: string, value: SkillCompatibilityDeclaration): void {
+  if (!value.supportedRoles.length && value.unattended !== "incompatible") fail(`skill ${id} must support at least one role or be unattended-incompatible`);
+  if (!value.capabilityProfiles.length && value.unattended !== "incompatible") fail(`skill ${id} must support at least one capability profile or be unattended-incompatible`);
+  if (value.requiresHumanCheckpoint && value.unattended !== "incompatible") fail(`skill ${id} cannot be unattended-compatible while requiring a human checkpoint`);
+  if (value.mayAskUser && value.unattended === "compatible") fail(`skill ${id} cannot ask users during unattended-compatible routing`);
+  if ((value.processBehavior === "orchestrator" || value.processBehavior === "router" || value.processBehavior === "human-facing") && value.unattended !== "incompatible") {
+    fail(`skill ${id} process behavior ${value.processBehavior} requires an explicit adapter before unattended routing`);
+  }
+  if (!value.adaptation.provenance.trim() || !value.adaptation.decision.trim()) fail(`skill ${id} must record adaptation provenance and decision`);
+}
 
 /** Build a registry, rejecting duplicate ids, and compute its fingerprint. */
 export function buildSkillRegistry(entries: readonly SkillRegistryEntry[]): SkillRegistry {
@@ -138,6 +211,7 @@ export function buildSkillRegistry(entries: readonly SkillRegistryEntry[]): Skil
     if (!entry.category.trim()) fail(`skill ${entry.id} must declare a methodology category`);
     if (!entry.source.trim()) fail(`skill ${entry.id} must declare a source`);
     if (!entry.provenanceVersion.trim()) fail(`skill ${entry.id} must declare a provenance version`);
+    if (entry.compatibility) validateCompatibilityDeclaration(entry.id, entry.compatibility);
     return {
       id: entry.id,
       category: entry.category,
@@ -145,6 +219,7 @@ export function buildSkillRegistry(entries: readonly SkillRegistryEntry[]): Skil
       provenanceVersion: entry.provenanceVersion,
       ...(entry.capabilities && entry.capabilities.length ? { capabilities: [...entry.capabilities] } : {}),
       ...(entry.processOwner ? { processOwner: true as const } : {}),
+      ...(entry.compatibility ? { compatibility: cloneCompatibility(entry.compatibility) } : {}),
     };
   });
   const sorted = [...normalized].sort((a, b) => a.id.localeCompare(b.id));
@@ -172,7 +247,19 @@ export function validateSkillRoutingPolicy(policy: SkillRoutingPolicy, registry:
     const entry = index.get(id);
     if (!entry) fail(`${tier} skill "${id}" is not present in the reviewed registry`);
     if (entry.processOwner) fail(`process-owner skill "${id}" cannot be routed as ${tier}; adopt an individual discipline instead`);
+    if ((tier === "automatic" || tier === "mandatory") && !entry.compatibility) fail(`${tier} skill "${id}" lacks reviewed unattended compatibility metadata`);
+    if ((tier === "automatic" || tier === "mandatory") && entry.compatibility?.unattended === "incompatible") fail(`${tier} skill "${id}" is not unattended-compatible`);
+    if ((tier === "automatic" || tier === "mandatory") && entry.compatibility?.maySpawnSubagents) fail(`${tier} skill "${id}" may spawn nested workers; route only through an explicit kernel budget`);
     return entry;
+  };
+
+  const assertRuleRolesCompatible = (rule: { skill: string; roles?: WorkerRole[] }, tier: "mandatory" | "automatic"): void => {
+    const entry = index.get(rule.skill);
+    const declaration = entry?.compatibility;
+    if (!entry || !declaration) return;
+    const roles = rule.roles && rule.roles.length ? rule.roles : ROLES_FOR_COMPATIBILITY;
+    const unsupported = roles.filter((role) => !declaration.supportedRoles.includes(role));
+    if (unsupported.length) fail(`${tier} skill "${rule.skill}" is incompatible with worker role(s): ${unsupported.join(", ")}`);
   };
 
   const assertNoCategoryConflict = (skills: string[], tier: SkillTier): void => {
@@ -191,8 +278,14 @@ export function validateSkillRoutingPolicy(policy: SkillRoutingPolicy, registry:
     }
   };
 
-  for (const rule of policy.mandatory) requireAvailable(rule.skill, "mandatory");
-  for (const rule of policy.automatic) requireAvailable(rule.skill, "automatic");
+  for (const rule of policy.mandatory) {
+    requireAvailable(rule.skill, "mandatory");
+    assertRuleRolesCompatible(rule, "mandatory");
+  }
+  for (const rule of policy.automatic) {
+    requireAvailable(rule.skill, "automatic");
+    assertRuleRolesCompatible(rule, "automatic");
+  }
   for (const id of policy.explicit) {
     const entry = index.get(id);
     if (!entry) fail(`explicit skill "${id}" is not present in the reviewed registry`);
@@ -222,6 +315,50 @@ function matchesPaths(rule: SkillAutomaticRule, paths?: string[]): boolean {
   return rule.paths.some((needle) => paths.some((path) => path.includes(needle)));
 }
 
+function boundInputValue(input: SkillResolutionInput, name: string): string | undefined {
+  if (name === "authorityFingerprint") return input.authorityFingerprint;
+  if (name === "candidateSha") return input.candidateSha;
+  if (name === "fixedPointSha") return input.fixedPointSha;
+  return input.boundInputs?.[name];
+}
+
+function compatibilityVerdict(entry: SkillRegistryEntry, tier: SkillTier, input: SkillResolutionInput): SkillCompatibilityVerdict {
+  const declaration = entry.compatibility;
+  if (!declaration) {
+    if (tier === "automatic" || tier === "mandatory") fail(`${tier} skill "${entry.id}" lacks reviewed unattended compatibility metadata`);
+    return {
+      status: "compatible",
+      role: input.role,
+      capabilityProfile: input.capabilityProfile,
+      mutationScope: "owned-workspace",
+      unattended: "compatible",
+      nestedWorkersPermitted: false,
+      missingBoundInputs: [],
+      adaptation: { kind: "upstream-reviewed", provenance: `${entry.source}:${entry.provenanceVersion}`, decision: "Explicit-only unreviewed skill; no automatic context loaded." },
+    };
+  }
+  if (!declaration.supportedRoles.includes(input.role)) fail(`${tier} skill "${entry.id}" is incompatible with worker role ${input.role}`);
+  if (input.capabilityProfile && !declaration.capabilityProfiles.includes(input.capabilityProfile)) fail(`${tier} skill "${entry.id}" is incompatible with capability profile ${input.capabilityProfile}`);
+  if (declaration.unattended === "incompatible") fail(`${tier} skill "${entry.id}" is not unattended-compatible`);
+  if (declaration.mayAskUser || declaration.requiresHumanCheckpoint) fail(`${tier} skill "${entry.id}" cannot be used in unattended dispatch because it asks for a human checkpoint`);
+  if (declaration.maySpawnSubagents && !input.allowNestedWorkers) fail(`${tier} skill "${entry.id}" may spawn nested workers but dispatch did not permit a kernel-owned nested-worker budget`);
+  const relevantRequirements = declaration.requiredBoundInputs.filter((requirement) => !requirement.roles || requirement.roles.includes(input.role));
+  const missing = relevantRequirements.filter((requirement) => !boundInputValue(input, requirement.name));
+  const hardMissing = missing.filter((requirement) => requirement.missing === "reject-dispatch");
+  if (hardMissing.length) fail(`${tier} skill "${entry.id}" missing required bound input(s): ${hardMissing.map((item) => item.name).join(", ")}`);
+  const typedBlocked = missing.filter((requirement) => requirement.missing === "typed-blocked-result");
+  return {
+    status: typedBlocked.length ? "typed-blocked" : "compatible",
+    role: input.role,
+    capabilityProfile: input.capabilityProfile,
+    mutationScope: declaration.mutationScope,
+    unattended: declaration.unattended,
+    nestedWorkersPermitted: declaration.maySpawnSubagents && input.allowNestedWorkers === true,
+    missingBoundInputs: typedBlocked.map((item) => item.name),
+    adaptation: { ...declaration.adaptation },
+  };
+}
+
 /**
  * Deterministically resolve the selected skill set for one dispatch. Same input
  * always yields the same ordered resolution. Precedence mandatory > automatic >
@@ -240,12 +377,13 @@ export function resolveSkills(
   const consider = (id: string, tier: SkillTier, reason: string): void => {
     const entry = index.get(id);
     if (!entry) return; // available != loaded; unknown/unavailable ids are never loaded
-    if (entry.processOwner && tier !== "explicit") return; // fail closed for process owners
+    if (entry.processOwner && tier !== "explicit") fail(`${tier} process-owner skill "${id}" cannot be routed automatically`);
     if (seenIds.has(entry.id)) return;
     if (seenCategories.has(entry.category)) return; // one canonical skill per category
+    const verdict = compatibilityVerdict(entry, tier, input);
     seenIds.add(entry.id);
     seenCategories.add(entry.category);
-    selected.push({ id: entry.id, source: entry.source, category: entry.category, provenanceVersion: entry.provenanceVersion, tier, reason });
+    selected.push({ id: entry.id, source: entry.source, category: entry.category, provenanceVersion: entry.provenanceVersion, tier, reason, compatibility: verdict });
   };
 
   for (const rule of policy.mandatory) {
@@ -277,7 +415,8 @@ export const DEFAULT_SKILL_ROUTING_POLICY: SkillRoutingPolicy = {
     { skill: "tdd", roles: ["implementation"], taskPattern: "test|behavior|contract|regression", reason: "implementation:tdd" },
     { skill: "diagnosing-bugs", roles: ["repair"], reason: "repair:diagnosis" },
     { skill: "tdd", roles: ["repair"], taskPattern: "test|regression", reason: "repair:regression-seam" },
-    { skill: "code-review", roles: ["review-spec", "review-standards"], reason: "review:code-review" },
+    { skill: "code-review-spec", roles: ["review-spec"], reason: "review-spec:spec-conformance" },
+    { skill: "code-review-standards", roles: ["review-standards"], reason: "review-standards:standards-conformance" },
     { skill: "codebase-design", roles: ["review-standards"], risk: ["normal", "high", "critical"], reason: "review-standards:design" },
     { skill: "performance-telemetry", roles: ["maintenance"], reason: "maintenance:telemetry" },
   ],
@@ -290,7 +429,10 @@ export function renderSkillResolutionTelemetry(resolution: SkillResolution): str
     return `skills registry=${resolution.registryVersion} available=${resolution.availableCount} selected=none`;
   }
   const parts = resolution.selected
-    .map((skill) => `${skill.id}@${skill.source}:${skill.provenanceVersion}(${skill.tier}:${skill.reason})`)
+    .map((skill) => {
+      const missing = skill.compatibility.missingBoundInputs.length ? ` missing=${skill.compatibility.missingBoundInputs.join("+")}` : "";
+      return `${skill.id}@${skill.source}:${skill.provenanceVersion}(${skill.tier}:${skill.reason};compat=${skill.compatibility.status};role=${skill.compatibility.role};adapt=${skill.compatibility.adaptation.kind};nested=${skill.compatibility.nestedWorkersPermitted ? 1 : 0}${missing})`;
+    })
     .join(", ");
   return `skills registry=${resolution.registryVersion} available=${resolution.availableCount} selected=${parts}`;
 }

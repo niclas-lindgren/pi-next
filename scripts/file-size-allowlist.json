@@ -24,6 +24,7 @@
   "src/coordination/incident-reporting.ts": "cohesive deterministic incident reporting pipeline; split after schema stabilizes",
   "src/coordination/post-integration-reverification.ts": "cohesive exact-main finalization recovery module; issue #160 adds isolated verification worktree mechanics before a separate refactor",
   "src/coordination/self-assessment.ts": "legacy self-assessment module predating this check; refactor separately",
+  "src/coordination/skill-registry.ts": "cohesive skill routing resolver with compatibility gates; split compatibility declarations into skill-compatibility.ts in issue #172 and refactor resolver separately if it grows further",
   "src/coordination/work-authority.ts": "legacy work authority module predating this check; refactor separately",
   "src/lifecycle/bootstrap-finalize.ts": "bootstrap finalizer is a legacy cohesive lifecycle module (moved from scripts/ in #162 so the public ./lifecycle export ships its own dependency); issue #114 adds shared lifecycle-lock entry wrapping before a separate refactor",
   "src/evaluation/lifecycle-replay.ts": "legacy replay module predating this check; refactor separately",

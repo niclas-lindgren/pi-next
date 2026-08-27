@@ -20,7 +20,7 @@ npm run eval:worker -- --adapter scripted --context-strategy verification-discip
 PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi --context-strategy minimal --output docs/evaluation/pi-worker-context.minimal.json
 ```
 
-Keep adapter/model/fixtures/grader fixed when comparing strategies. The report schema records verified pass rate, wall time, turn/tool telemetry when exposed, token/cost fields when exposed, estimated prompt tokens, estimated skill tokens, and per-fixture selected/loaded skill provenance.
+Keep adapter/model/fixtures/grader fixed when comparing strategies. The report schema records verified pass rate, wall time, turn/tool telemetry when exposed, token/cost fields when exposed, estimated prompt tokens, estimated skill tokens, per-fixture selected/loaded skill provenance, compatibility/adaptation verdict, and nested-worker count.
 
 ## Prompt/context changes implemented
 
@@ -49,7 +49,7 @@ Each canary result includes:
 - `context.skills.loaded[]` — actual loaded skill contexts and estimated token contribution;
 - `context.skills.totalEstimatedTokens` — attributable skill prompt tokens.
 
-The expanded reviewed registry includes frontend/security examples so the benchmark proves that installed/available but unselected skills add no worker-context payload.
+The expanded reviewed registry includes frontend/security examples so the benchmark proves that installed/available but unselected skills add no worker-context payload. Issue #172 additionally records whether a selected skill is a role-specific adapter and whether it was allowed to spawn nested workers; the normal kernel-owned two-axis review should report two reviewer workers and zero nested skill-owned workers.
 
 ## Zero-LLM scripted sanity snapshot
 
@@ -65,6 +65,10 @@ These runs prove comparability/accounting only; they are not a substitute for cr
 | `resolver` | 6/6 | 914 | 160 | Deterministic Matt Pocock resolver; Superpowers discipline not implicit. |
 | `expanded-skill-registry` | 6/6 | 914 | 160 | Expanded availability does not increase loaded context. |
 | `verification-discipline` | 6/6 | 1275 | 430 | Explicit Superpowers discipline experiment; higher context cost. |
+
+## Issue #172 compatibility evaluation note
+
+The zero-LLM regression suite now compares the adapted routing contract against the prior risky baseline: the full upstream `code-review` orchestrator is rejected for automatic routing, `review-spec` and `review-standards` resolve to separate role-specific packages, unattended TDD with a seam is compatible, unattended TDD without a seam is typed-blocked, and nested-worker declarations fail without an explicit kernel budget. This preserves the existing scripted 6/6 canary baseline while preventing accidental nested/duplicated review context. A refreshed credentialed Pi cost/pass-rate comparison remains gated by `PI_NEXT_EVAL_ALLOW_LLM=1`.
 
 ## Initial decision gate
 

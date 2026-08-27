@@ -48,7 +48,7 @@ test("valid mandatory/automatic/explicit routing policy is accepted", () => {
 });
 
 test("distinct-category and repeated-id automatic rules are accepted", () => {
-  // diagnosing-bugs (debugging) and code-review (code-review) are different
+  // diagnosing-bugs (debugging) and adapted review disciplines are different
   // methodology axes, and repeating the same skill id under different
   // conditions is not a conflict.
   const validated = validatePiNextConfig(baseConfig({
@@ -56,12 +56,28 @@ test("distinct-category and repeated-id automatic rules are accepted", () => {
     mandatory: [],
     automatic: [
       { skill: "diagnosing-bugs", roles: ["repair"] },
-      { skill: "code-review", roles: ["review-spec"] },
-      { skill: "code-review", roles: ["review-standards"] },
+      { skill: "code-review-spec", roles: ["review-spec"] },
+      { skill: "code-review-standards", roles: ["review-standards"] },
+      { skill: "tdd", roles: ["implementation"], taskPattern: "test" },
+      { skill: "tdd", roles: ["repair"], taskPattern: "regression" },
     ],
     explicit: [],
   }));
-  assert.equal(validated.skills.automatic.length, 3);
+  assert.equal(validated.skills.automatic.length, 5);
+});
+
+test("full upstream code-review orchestrator cannot be routed automatically", () => {
+  assert.throws(
+    () => validatePiNextConfig(baseConfig({ version: 1, mandatory: [], automatic: [{ skill: "code-review", roles: ["review-spec"] }], explicit: [] })),
+    (error: unknown) => error instanceof PiNextConfigError && /process-owner skill/.test(error.message),
+  );
+});
+
+test("skill role compatibility fails closed", () => {
+  assert.throws(
+    () => validatePiNextConfig(baseConfig({ version: 1, mandatory: [], automatic: [{ skill: "code-review-spec", roles: ["review-standards"] }], explicit: [] })),
+    (error: unknown) => error instanceof PiNextConfigError && /incompatible with worker role/.test(error.message),
+  );
 });
 
 test("unknown skill reference in config fails closed", () => {

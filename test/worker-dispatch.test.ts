@@ -25,8 +25,8 @@ test("worker role and capability are derived from controller phase", () => {
 test("skill routing is selective and deterministic", () => {
   assert.deepEqual(selectWorkerSkills("controller"), []);
   assert.deepEqual(selectWorkerSkills("repair", { task: "repair regression" }), ["diagnosing-bugs", "tdd"]);
-  assert.deepEqual(selectWorkerSkills("review-spec"), ["code-review"]);
-  assert.deepEqual(selectWorkerSkills("review-standards", { risk: "high" }), ["code-review", "codebase-design"]);
+  assert.deepEqual(selectWorkerSkills("review-spec"), ["code-review-spec"]);
+  assert.deepEqual(selectWorkerSkills("review-standards", { risk: "high" }), ["code-review-standards", "codebase-design"]);
 });
 
 test("every selected built-in skill resolves from the package or managed pack", () => {
@@ -44,10 +44,12 @@ test("dispatch envelope binds identity and exposes bounded metadata", () => {
     authorityFingerprint: "authority-1",
     candidateSha: "candidate-1",
     fixedPointSha: "main-1",
+    boundInputs: { specEvidence: "issue #42 acceptance" },
   });
   assert.equal(policy.capabilityProfile, "read-only-reviewer");
   assert.match(renderWorkerEnvelope(policy), /role=review-spec/);
   assert.match(renderWorkerEnvelope(policy), /no writes/);
+  assert.match(renderWorkerEnvelope(policy), /Bound methodology inputs: specEvidence=issue #42 acceptance/);
   assert.match(renderWorkerEnvelope({
     ...policy,
     workflowPaths: {

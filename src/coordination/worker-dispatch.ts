@@ -19,7 +19,8 @@ export const WORKER_DISPATCH_VERSION = 1 as const;
 
 /** Skill identifiers understood by the package-owned worker resolver. */
 export const BUILT_IN_WORKER_SKILLS = [
-  "code-review",
+  "code-review-spec",
+  "code-review-standards",
   "tdd",
   "diagnosing-bugs",
   "codebase-design",
@@ -71,6 +72,8 @@ export interface WorkerDispatchPolicy {
   authorityFingerprint?: string;
   candidateSha?: string;
   fixedPointSha?: string;
+  /** Bounded kernel-supplied methodology inputs; values are dispatch metadata, not authority by themselves. */
+  boundInputs?: Record<string, string>;
   modelPolicy?: WorkerModelPolicy;
   workflowPaths?: WorkerWorkflowPaths;
   skills: string[];
@@ -93,6 +96,10 @@ export interface WorkerDispatchInput {
   authorityFingerprint?: string;
   candidateSha?: string;
   fixedPointSha?: string;
+  /** Bounded kernel-supplied methodology inputs such as specEvidence, standardsSources, or testingSeam. */
+  boundInputs?: Record<string, string | undefined>;
+  /** Kernel-owned permission/budget for skills that declare internal sub-agent spawning. */
+  allowNestedWorkers?: boolean;
   risk?: "low" | "normal" | "high" | "critical";
   modelPolicy?: WorkerModelPolicy;
   workflowPaths?: WorkerWorkflowPaths;
@@ -149,8 +156,9 @@ export function selectWorkerSkills(
     case "repair":
       return ["diagnosing-bugs", ...(input.task && /test|regression/i.test(input.task) ? ["tdd"] : [])];
     case "review-spec":
+      return ["code-review-spec"];
     case "review-standards":
-      return ["code-review", ...(role === "review-standards" && input.risk && input.risk !== "low" ? ["codebase-design"] : [])];
+      return ["code-review-standards", ...(input.risk && input.risk !== "low" ? ["codebase-design"] : [])];
     case "maintenance":
       return ["performance-telemetry"];
     default:
@@ -190,9 +198,15 @@ export function resolveDispatchSkills(role: WorkerRole, input: WorkerDispatchInp
   const policy = input.skillPolicy ?? DEFAULT_SKILL_ROUTING_POLICY;
   return resolveSkills(registry, policy, {
     role,
+    capabilityProfile: capabilityForRole(role),
     ...(input.task ? { task: input.task } : {}),
     ...(input.risk ? { risk: input.risk as RiskClass } : {}),
     ...(input.paths ? { paths: input.paths } : {}),
+    ...(input.authorityFingerprint ? { authorityFingerprint: input.authorityFingerprint } : {}),
+    ...(input.candidateSha ? { candidateSha: input.candidateSha } : {}),
+    ...(input.fixedPointSha ? { fixedPointSha: input.fixedPointSha } : {}),
+    ...(input.boundInputs ? { boundInputs: input.boundInputs } : {}),
+    ...(input.allowNestedWorkers !== undefined ? { allowNestedWorkers: input.allowNestedWorkers } : {}),
     ...(input.requestedSkills ? { requestedSkills: input.requestedSkills } : {}),
   });
 }
@@ -207,6 +221,7 @@ export function createWorkerDispatch(input: WorkerDispatchInput): WorkerDispatch
     ...(input.authorityFingerprint ? { authorityFingerprint: input.authorityFingerprint } : {}),
     ...(input.candidateSha ? { candidateSha: input.candidateSha } : {}),
     ...(input.fixedPointSha ? { fixedPointSha: input.fixedPointSha } : {}),
+    ...(input.boundInputs ? { boundInputs: Object.fromEntries(Object.entries(input.boundInputs).filter(([, value]) => value !== undefined)) as Record<string, string> } : {}),
     ...(input.modelPolicy ? { modelPolicy: input.modelPolicy } : {}),
     ...(input.workflowPaths ? { workflowPaths: input.workflowPaths } : {}),
     skills: skillSelection.selected.map((skill) => skill.id),
@@ -226,12 +241,19 @@ export function renderWorkerEnvelope(policy: WorkerDispatchPolicy): string {
   ].join(" ");
   const model = policy.modelPolicy?.model ? ` model=${policy.modelPolicy.model}` : "";
   const thinking = policy.modelPolicy?.thinking ? ` thinking=${policy.modelPolicy.thinking}` : "";
+  const boundInputs = policy.boundInputs && Object.keys(policy.boundInputs).length
+    ? `Bound methodology inputs: ${Object.entries(policy.boundInputs).map(([key, value]) => `${key}=${value}`).join(" ")}.`
+    : "Bound methodology inputs: none.";
   return [
     `Kernel dispatch v${policy.version}: role=${policy.role} capability=${policy.capabilityProfile}${model}${thinking}`,
     identity,
+    boundInputs,
     `Selected skills: ${policy.skills.length ? policy.skills.join(", ") : "none"}.`,
     policy.skillSelection
-      ? `Skill provenance (available=${policy.skillSelection.availableCount} registry=${policy.skillSelection.registryVersion}): ${policy.skillSelection.selected.length ? policy.skillSelection.selected.map((skill) => `${skill.id}@${skill.source}:${skill.provenanceVersion}[${skill.tier}]`).join(", ") : "none selected; installed-but-unselected skills add no context"}.`
+      ? `Skill provenance (available=${policy.skillSelection.availableCount} registry=${policy.skillSelection.registryVersion}): ${policy.skillSelection.selected.length ? policy.skillSelection.selected.map((skill) => `${skill.id}@${skill.source}:${skill.provenanceVersion}[${skill.tier};${skill.compatibility.status};${skill.compatibility.adaptation.kind};nested=${skill.compatibility.nestedWorkersPermitted ? 1 : 0}]`).join(", ") : "none selected; installed-but-unselected skills add no context"}.`
+      : "",
+    policy.skillSelection?.selected.some((skill) => skill.compatibility.status === "typed-blocked")
+      ? `Typed skill block required if no authoritative seam/input exists: ${policy.skillSelection.selected.flatMap((skill) => skill.compatibility.missingBoundInputs.map((input) => `${skill.id}:${input}`)).join(", ")}. Return only {"status":"blocked","code":"MISSING_BOUND_SKILL_INPUT","missingInputs":[...],"evidence":"..."} rather than asking the user, waiting, or inventing authority.`
       : "",
     `Permitted lifecycle boundary: ${policy.capabilityProfile === "read-only-reviewer" ? "inspect exact candidate only; no writes, ownership, promotion, or closure" : policy.capabilityProfile}.`,
     `Output contract: ${policy.outputContract}.`,

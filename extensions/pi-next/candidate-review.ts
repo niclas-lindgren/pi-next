@@ -119,6 +119,9 @@ export async function runCandidateReviewGate(input: CandidateReviewGateInput): P
       authorityFingerprint: binding.authorityFingerprint,
       risk: input.risk,
       task: `read-only candidate review round ${round}`,
+      boundInputs: axis === "spec"
+        ? { specEvidence: `authority:${binding.authorityFingerprint}` }
+        : { standardsSources: "AGENTS.md,repository-policy,changed-paths" },
       modelPolicy: config.workerDispatch.models[`review-${axis}` as "review-spec" | "review-standards"],
     }),
     execute: async (request, context) => {
