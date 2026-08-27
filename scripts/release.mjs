@@ -134,6 +134,13 @@ try {
 
   if (flags.has("--push")) {
     run("git", ["push", "origin", "main", "--follow-tags"]);
+    // qualify:release (tier1 + tier2) already passed above, so this release
+    // is the deterministic consumer-qualified gate Campsty's upgrade script
+    // relies on (`SUPPORTED_RELEASE_TAG` in upgrade-pi-next.mjs). Move the
+    // moving "supported" channel tag to it so a no-arg `make pi-next-upgrade`
+    // resolves without requiring an explicit --ref every release.
+    run("git", ["tag", "-f", "supported", tag]);
+    run("git", ["push", "origin", "supported", "--force"]);
   } else {
     console.log(`Created release commit and ${tag}. Push with: git push origin main --follow-tags`);
   }
