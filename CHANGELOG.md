@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.3.8 - prepared release
+
+### Material changes
+
+### Compatibility/configuration/schema
+
+### Breaking/behavior changes
+
+### Security/safety
+
+### Upgrade guidance
+
 ## 0.3.7 - qualified supported release
 
 First post-convergence consumer handoff release. `v0.3.7` is the immutable supported tag for the convergence bundle and `refs/tags/supported` resolves through the annotated tag to commit `2f35fc9f9f117e80dd522bebbb91761a78e2ba7b`. The tag Release gate for that exact SHA passed in run `33053623274`; the corresponding main Release gate passed in run `33053623635`. The tag gate includes exact tag/commit verification, Tier 1 shared-kernel qualification, the full deterministic suite, and Tier 2 disposable-consumer smoke. Earlier failed or incomplete tags, including `v0.2.90` and the pre-gate `v0.3.7` window, are not consumer-supported evidence.
