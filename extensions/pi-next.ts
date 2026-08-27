@@ -8,6 +8,7 @@ import { registerGitTool } from "./pi-next/tools-git.ts";
 import { registerInspectTool } from "./pi-next/tools-inspect.ts";
 import { registerSafeBashTool } from "./pi-next/tools-safe-bash.ts";
 import { registerUpdateTool } from "./pi-next/tools-update.ts";
+import { registerWorkerCapabilityGuards } from "./pi-next/worker-capability-guard.ts";
 import { registerWorkerWorkLogRenderer } from "./pi-next/work-log.ts";
 
 /** Consumer-owned incident adapter hook; core never creates GitHub issues. */
@@ -30,4 +31,5 @@ export default function piNextExtension(pi: ExtensionAPI) {
   registerCheckTool(pi);
   registerGitTool(pi);
   registerSafeBashTool(pi);
+  registerWorkerCapabilityGuards(pi);
 }

@@ -18,9 +18,17 @@ import type { IssueLeaseAuthority } from "../../src/coordination/issue-leases.ts
 import type { WorkAuthorityAdapter } from "../../src/coordination/work-authority.ts";
 
 const execFileAsync = promisify(execFile);
+const DISABLED_GIT_HOOKS_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
+const WORKER_GIT_CONFIG_ARGS = ["-c", `core.hooksPath=${DISABLED_GIT_HOOKS_PATH}`, "-c", "core.fsmonitor=false"];
+
+function guardedGitArgs(args: string[]): string[] {
+  return process.env.PI_NEXT_ISSUE_WORKER === "1"
+    ? [...WORKER_GIT_CONFIG_ARGS, ...args]
+    : args;
+}
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { cwd, encoding: "utf8" });
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...guardedGitArgs(args)], { cwd, encoding: "utf8" });
   return stdout.trim();
 }
 

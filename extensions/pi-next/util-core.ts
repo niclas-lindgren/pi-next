@@ -31,6 +31,27 @@ import {
 const execFileAsync = promisify(execFile);
 export const execAsync = promisify(exec);
 export const FAILURE_LIMIT = 3_500;
+export const MUTABLE_ISSUE_WORKER_TOOLS = [
+  "read",
+  "write",
+  "edit",
+  "grep",
+  "find",
+  "ls",
+  "pi_next_inspect",
+  "pi_next_update",
+  "pi_next_check",
+  "pi_next_git",
+  "safe_bash",
+].join(",");
+const DISABLED_GIT_HOOKS_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
+const WORKER_GIT_MUTATION_CONFIG_ARGS = ["-c", `core.hooksPath=${DISABLED_GIT_HOOKS_PATH}`, "-c", "core.fsmonitor=false"];
+
+function guardedGitMutationArgs(args: string[]): string[] {
+  return process.env.PI_NEXT_ISSUE_WORKER === "1"
+    ? [...WORKER_GIT_MUTATION_CONFIG_ARGS, ...args]
+    : args;
+}
 
 /**
  * Diagnostic-only observer for host-delivery calls that `guardedHostCall`
@@ -259,12 +280,11 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
         "--no-extensions",
         "--extension",
         workerExtensionPath(),
-        // Mutable production workers get the pi-next extension's positive
-        // safe_bash command runner instead of Pi's unrestricted built-in bash,
-        // so authority/main-branch/gh operations can't bypass pi_next_git's
-        // request_promotion contract through raw shell, wrapper, or interpreter
-        // execution (#162). Read-only reviewers already get --no-tools.
-        ...(options.readOnly ? [] : ["--exclude-tools", "bash"]),
+        // Mutable production workers get an explicit positive tool allowlist:
+        // source file/search tools, pi-next lifecycle tools, and the guarded
+        // safe_bash command runner. Raw bash and any future Pi/extension tools
+        // stay unavailable unless the kernel deliberately adds them here.
+        ...(options.readOnly ? [] : ["--tools", MUTABLE_ISSUE_WORKER_TOOLS]),
       ];
   const dispatchArgs = options.dispatch?.modelPolicy?.model
     ? ["--model", options.dispatch.modelPolicy.model]
@@ -298,7 +318,9 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
             PI_NEXT_WORKER_CAPABILITY: options.dispatch.capabilityProfile,
             PI_NEXT_WORKER_SKILLS: options.dispatch.skills.join(","),
           }
-        : {}),
+        : options.phase
+          ? { PI_NEXT_WORKER_ROLE: options.phase }
+          : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
@@ -731,7 +753,8 @@ export async function gitRaw(
   args: string[],
   maxBuffer = 4 * 1024 * 1024,
 ): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+  const effectiveArgs = guardedGitMutationArgs(args);
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...effectiveArgs], {
     cwd,
     maxBuffer,
     encoding: "utf8",
@@ -747,9 +770,10 @@ export async function git(
   return (await gitRaw(cwd, args, maxBuffer)).trim();
 }
 
-/** Run a Git command that may invoke hooks without buffering its full output. */
+/** Run a Git command that may invoke hooks without buffering its full output. Worker-triggered mutations disable hooks. */
 export function gitMutation(cwd: string, args: string[]): Promise<string> {
-  const child = spawn("git", ["-C", cwd, ...args], {
+  const effectiveArgs = guardedGitMutationArgs(args);
+  const child = spawn("git", ["-C", cwd, ...effectiveArgs], {
     cwd,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -782,7 +806,7 @@ export function gitMutation(cwd: string, args: string[]): Promise<string> {
         const evidence = tail.trim();
         reject(
           new Error(
-            `git ${args.join(" ")} failed (${status})${evidence ? `:\n${evidence}` : ""}`,
+            `git ${effectiveArgs.join(" ")} failed (${status})${evidence ? `:\n${evidence}` : ""}`,
           ),
         );
         return;
