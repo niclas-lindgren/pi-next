@@ -20,6 +20,21 @@ import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordinati
 const exec = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> { return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim(); }
 
+async function withGlobalGitDefaultBranch<T>(branch: string, fn: () => Promise<T>): Promise<T> {
+  const configRoot = await mkdtemp(join(tmpdir(), "pi-next-git-config-"));
+  const configPath = join(configRoot, ".gitconfig");
+  await writeFile(configPath, `[init]\n\tdefaultBranch = ${branch}\n`);
+  const previous = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = configPath;
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previous;
+    await rm(configRoot, { recursive: true, force: true });
+  }
+}
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-next-finalize-"));
   const remote = `${root}.git`;
@@ -31,7 +46,7 @@ async function fixture() {
   await writeFile(join(root, "README.md"), "base\n");
   await git(root, "add", ".");
   await git(root, "commit", "-qm", "base");
-  await exec("git", ["init", "--bare", remote]);
+  await exec("git", ["init", "--bare", "--initial-branch=main", remote]);
   await git(root, "remote", "add", "origin", remote);
   await git(root, "push", "-q", "-u", "origin", "main");
   await mkdir(join(root, ".worktrees"));
@@ -154,6 +169,7 @@ async function withPushRejectionDiagnostics(error: unknown, scratch: string, rem
  * test failure.
  */
 async function pushUnrelatedMainCommit(root: string, remote: string, file: string, content = `${file}\n`): Promise<string> {
+  assert.equal(await git(remote, "symbolic-ref", "--short", "HEAD"), "main");
   const scratch = `${root}-scratch-${file.replace(/[^a-z0-9-]/gi, "-")}`;
   await exec("git", ["clone", "-q", remote, scratch]);
   await git(scratch, "config", "user.email", "release@example.invalid");
@@ -176,6 +192,24 @@ async function pushUnrelatedMainCommit(root: string, remote: string, file: strin
   await git(root, "fetch", "origin", "main", "--quiet");
   return sha;
 }
+
+test("#163 fixture bare remote HEAD stays on main when Git's default branch is not main", async () => {
+  await withGlobalGitDefaultBranch("master", async () => {
+    const f = await fixture();
+    try {
+      assert.equal(await git(f.remote, "symbolic-ref", "--short", "HEAD"), "main");
+      const scratch = `${f.root}-head-check`;
+      await exec("git", ["clone", "-q", f.remote, scratch]);
+      try {
+        assert.equal(await git(scratch, "branch", "--show-current"), "main");
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+      const sha = await pushUnrelatedMainCommit(f.root, f.remote, "issue-163-main-head.txt", "head\n");
+      assert.equal(await git(f.remote, "rev-parse", "main"), sha);
+    } finally { await f.cleanup(); }
+  });
+});
 
 /**
  * Simulates the same real --no-ff integration as directlyIntegratedCandidate,
