@@ -9,6 +9,7 @@ import {
 } from "../../src/coordination/adversarial-review.ts";
 import { createWorkerDispatch, type WorkerDispatchPolicy } from "../../src/coordination/worker-dispatch.ts";
 import { configuredPath, loadPiNextConfig } from "../../src/coordination/config.ts";
+import { loadEffectiveSkillRegistry } from "../../src/skills/effective-registry.ts";
 import { sanitizeFeedbackText } from "../../src/coordination/feedback.ts";
 import { writeJsonAtomic, git, runtimeDir } from "./util.ts";
 import { runIssueWorker, type IssueWorkerRunner } from "./util-core.ts";
@@ -123,6 +124,7 @@ export async function runCandidateReviewGate(input: CandidateReviewGateInput): P
         ? { specEvidence: `authority:${binding.authorityFingerprint}` }
         : { standardsSources: "AGENTS.md,repository-policy,changed-paths" },
       modelPolicy: config.workerDispatch.models[`review-${axis}` as "review-spec" | "review-standards"],
+      skillRegistry: loadEffectiveSkillRegistry({ root: input.ctx.cwd }).registry,
     }),
     execute: async (request, context) => {
       const execution = await worker(input.ctx.cwd, reviewPrompt(request.axis, request, diff), {

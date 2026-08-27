@@ -85,6 +85,42 @@ change (update the pinned manifest, sync, inspect the diff/provenance/license,
 run integrity/tests, commit intentionally). A worker/model must never discover an
 arbitrary skill on the network and immediately execute it during normal dispatch.
 
+## Effective runtime registry
+
+The reviewed catalog that config validation and worker dispatch actually see is
+the **effective registry**, built deterministically from the managed
+`skills/manifest.json` plus each source's `PROVENANCE.json`, merged with
+package-owned built-ins. It is not a static list:
+
+- each managed pack becomes an available entry whose `source` and exact
+  `provenanceVersion` come from the reviewed manifest revision, so a second
+  pinned source (for example Superpowers) can be synced, declared in
+  `.pi-next/config.json`, validated, and selected with its exact pinned
+  provenance;
+- package-owned built-ins (`performance-telemetry`,
+  `verification-before-completion`, and the adapted
+  `code-review-spec`/`code-review-standards`/`tdd` disciplines) are always
+  present, and adapted disciplines derive their provenance revision from the
+  managed upstream pack rather than a duplicated constant;
+- a checkout without its own `skills/manifest.json` falls back to the shipped
+  package manifest, so the package-owned catalog still resolves;
+- missing or drifted provenance, duplicate skill ids across sources, and
+  duplicate methodology categories fail closed;
+- `.agents/skills/**` and any other consumer-owned directories are never part
+  of the available registry: `available`, `selected`, and `loaded` stay
+  mechanically distinct, and a worker can never discover or install skills
+  itself.
+
+`loadPiNextConfig` validates the configured `skills` policy against this
+registry, and normal dispatch (`/pi-next auto`, review, worker factory) uses
+the same registry automatically; explicit programmatic registry overrides are
+reserved for tests/adapters.
+
+`skills:check` additionally detects **unmanaged duplicates** of registered
+methodologies in the known consumer root `.agents/skills/<id>/SKILL.md`:
+identical copies are allowed, but independent drift from the managed
+allowlisted content fails the integrity gate instead of silently diverging.
+
 ## Skill-source policy
 
 Prefer small, composable engineering disciplines that fit underneath the

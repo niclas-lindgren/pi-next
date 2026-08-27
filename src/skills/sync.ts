@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -68,7 +69,8 @@ interface ProvenanceFile {
 
 type ProvenancePack = Omit<SkillPackManifest, "files"> & { files: ProvenanceFile[] };
 
-interface SkillProvenance {
+/** Durable per-source integrity record produced by the deterministic sync. */
+export interface SkillProvenance {
   schemaVersion: typeof MANIFEST_VERSION;
   manifest: string;
   upstream: SkillUpstream;
@@ -407,6 +409,38 @@ export async function readSkillManifest(root: string, manifestPath = SKILL_MANIF
   return validateManifest(await readJson(path));
 }
 
+/** Synchronous variant for sync runtime paths (config/prompt/dispatch). */
+export function readSkillManifestSync(root: string, manifestPath = SKILL_MANIFEST_PATH): SkillManifest {
+  const path = rootPath(root, manifestPath);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    fail(`cannot read JSON ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return validateManifest(parsed);
+}
+
+/** Synchronous variant for sync runtime paths (config/prompt/dispatch). */
+export function readSourceProvenanceSync(root: string, source: SkillSourceManifest): SkillProvenance {
+  const markerPath = rootPath(root, join(source.destination, PROVENANCE_FILE));
+  if (!existsSync(markerPath)) {
+    fail(`managed skills are not synced; missing ${source.destination}/${PROVENANCE_FILE}`);
+  }
+  let rawValue: unknown;
+  try {
+    rawValue = JSON.parse(readFileSync(markerPath, "utf8"));
+  } catch (error) {
+    fail(`cannot read JSON ${markerPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const raw = object(rawValue, "provenance");
+  if (raw.schemaVersion !== MANIFEST_VERSION) fail("unsupported skill provenance schema");
+  const provenance = raw as unknown as SkillProvenance;
+  if (provenance.manifest !== source.fingerprint) fail("skill manifest changed; run the deterministic sync command");
+  if (provenance.upstream.revision !== source.upstream.revision) fail("skill provenance revision does not match the manifest");
+  return provenance;
+}
+
 async function buildProvenance(source: SkillSourceManifest, destination: string): Promise<SkillProvenance> {
   const packs: ProvenancePack[] = [];
   for (const pack of source.packs) {
@@ -566,6 +600,11 @@ export async function checkSkillPacks(options: SkillSyncOptions): Promise<SkillC
   const manifest = await readSkillManifest(root, options.manifestPath);
   const results: SkillSourceCheckResult[] = [];
   for (const source of manifest.sources) results.push(await checkOneSource(root, source));
+  // Integrity gate: an unmanaged copy of a registered methodology in a known
+  // consumer skill root must not drift from the managed allowlisted content.
+  // Loaded lazily to keep this module free of a static registry dependency.
+  const { checkUnmanagedSkillDrift } = await import("./effective-registry.ts");
+  await checkUnmanagedSkillDrift({ root, manifest });
   const primary = results[0];
   return {
     revision: primary.revision,

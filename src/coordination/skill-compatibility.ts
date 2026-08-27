@@ -5,7 +5,13 @@
  */
 import type { SkillCompatibilityDeclaration, SkillRegistryEntry } from "./skill-registry.ts";
 
-const MATTPOCOCK_SKILLS_REVISION = "885e2ca4d842d139e9aef4e48d366c63cb1b8013";
+/**
+ * Package fallback revision for matttpocock-derived built-ins. Production loads
+ * the reviewed managed manifest/provenance and derives the revision from it;
+ * this constant is only the manifest-less fallback and must match the shipped
+ * `skills/manifest.json` pin (guarded by a regression test).
+ */
+export const MATTPOCOCK_SKILLS_REVISION = "885e2ca4d842d139e9aef4e48d366c63cb1b8013";
 
 function compatibility(input: SkillCompatibilityDeclaration): SkillCompatibilityDeclaration {
   return input;
@@ -18,6 +24,7 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     category: "code-review-orchestrator",
     source: "mattpocock",
     provenanceVersion: MATTPOCOCK_SKILLS_REVISION,
+    managedPack: "code-review",
     processOwner: true,
     compatibility: compatibility({
       supportedRoles: [],
@@ -41,6 +48,8 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     category: "code-review-spec",
     source: "pi-next-adapted-mattpocock",
     provenanceVersion: `${MATTPOCOCK_SKILLS_REVISION}+pi-next-role-spec`,
+    packageOwned: true,
+    managedPack: "code-review",
     compatibility: compatibility({
       supportedRoles: ["review-spec"],
       capabilityProfiles: ["read-only-reviewer"],
@@ -68,6 +77,8 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     category: "code-review-standards",
     source: "pi-next-adapted-mattpocock",
     provenanceVersion: `${MATTPOCOCK_SKILLS_REVISION}+pi-next-role-standards`,
+    packageOwned: true,
+    managedPack: "code-review",
     compatibility: compatibility({
       supportedRoles: ["review-standards"],
       capabilityProfiles: ["read-only-reviewer"],
@@ -95,6 +106,8 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     category: "tdd",
     source: "pi-next-adapted-mattpocock",
     provenanceVersion: `${MATTPOCOCK_SKILLS_REVISION}+pi-next-unattended-seam`,
+    packageOwned: true,
+    managedPack: "tdd",
     compatibility: compatibility({
       supportedRoles: ["implementation", "repair"],
       capabilityProfiles: ["mutable-owner"],
@@ -119,6 +132,7 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     category: "debugging",
     source: "mattpocock",
     provenanceVersion: MATTPOCOCK_SKILLS_REVISION,
+    managedPack: "diagnosing-bugs",
     compatibility: compatibility({
       supportedRoles: ["repair"],
       capabilityProfiles: ["mutable-owner"],
@@ -141,6 +155,7 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     category: "design",
     source: "mattpocock",
     provenanceVersion: MATTPOCOCK_SKILLS_REVISION,
+    managedPack: "codebase-design",
     compatibility: compatibility({
       supportedRoles: ["planning", "review-standards"],
       capabilityProfiles: ["mutable-owner", "read-only-reviewer"],
@@ -163,6 +178,7 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     category: "performance",
     source: "pi-next",
     provenanceVersion: "pi-next",
+    packageOwned: true,
     compatibility: compatibility({
       supportedRoles: ["maintenance"],
       capabilityProfiles: ["maintenance"],
@@ -186,6 +202,7 @@ export const BUILT_IN_SKILL_REGISTRY_ENTRIES: readonly SkillRegistryEntry[] = Ob
     source: "pi-next",
     provenanceVersion: "pi-next",
     capabilities: ["terminal-verification"],
+    packageOwned: true,
     compatibility: compatibility({
       supportedRoles: ["verification"],
       capabilityProfiles: ["verification"],
