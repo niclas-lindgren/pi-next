@@ -68,7 +68,9 @@ These runs prove comparability/accounting only; they are not a substitute for cr
 
 ## Issue #172 compatibility evaluation note
 
-The zero-LLM regression suite now compares the adapted routing contract against the prior risky baseline: the full upstream `code-review` orchestrator is rejected for automatic routing, `review-spec` and `review-standards` resolve to separate role-specific packages, unattended TDD with a seam is compatible, unattended TDD without a seam is typed-blocked, and nested-worker declarations fail without an explicit kernel budget. This preserves the existing scripted 6/6 canary baseline while preventing accidental nested/duplicated review context. A refreshed credentialed Pi cost/pass-rate comparison remains gated by `PI_NEXT_EVAL_ALLOW_LLM=1`.
+The zero-LLM regression suite now compares the adapted routing contract against the prior risky baseline: the full upstream `code-review` orchestrator is rejected for automatic routing, `review-spec` and `review-standards` resolve to separate role-specific packages, unattended TDD with a seam is compatible, unattended TDD without a seam is typed-blocked, and nested-worker declarations fail without an explicit kernel budget. This preserves the existing scripted 6/6 canary baseline while preventing accidental nested/duplicated review context.
+
+The credentialed real-worker comparison for #172 is recorded in [`skill-compatibility-eval.issue-172.md`](skill-compatibility-eval.issue-172.md) (with raw per-fixture telemetry in `pi-worker-skill-compatibility.issue-172.json`). The first gpt-5.5 run measured 5/6 verified with a pathological single-fixture model loop, so the verified-completions-per-token/cost gate is **not certified** and #172 remains open pending a clean confirming run after the provider usage limit resets.
 
 ## Initial decision gate
 

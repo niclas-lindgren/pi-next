@@ -1,0 +1,323 @@
+{
+  "generatedAt": "2026-08-27T06:29:15.216Z",
+  "adapter": {
+    "id": "pi",
+    "version": "1"
+  },
+  "harness": {
+    "name": "pi-next-worker-eval",
+    "version": "0.3.5",
+    "fixtureFormatVersion": 1
+  },
+  "fixtureCount": 6,
+  "passed": 5,
+  "passRate": 0.8333333333333334,
+  "totalWallTimeMs": 174600,
+  "totalTurns": 6,
+  "totalToolCalls": 67,
+  "totalRetries": 0,
+  "humanInterventionRequired": false,
+  "totalEstimatedPromptTokens": 1031,
+  "totalEstimatedSkillTokens": 160,
+  "totalTokens": 131454,
+  "totalCost": 0.4825030000000001,
+  "tokensPerVerifiedCompletion": 26290.8,
+  "costPerVerifiedCompletion": 0.09650060000000002,
+  "results": [
+    {
+      "fixtureId": "localized-bug-fix",
+      "category": "localized bug fix",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 15421,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.3.5",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 6094,
+        "output": 204,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 6298,
+        "cost": 0.036590000000000004
+      },
+      "context": {
+        "strategy": "default",
+        "estimatedPromptTokens": 174,
+        "skills": {
+          "available": 9,
+          "selected": [
+            {
+              "id": "matt-pocock.tdd",
+              "reason": "deterministic-rule",
+              "provenance": "Matt Pocock skill catalog (managed snapshot)@2026-08-issue-82-reviewed"
+            }
+          ],
+          "loaded": [
+            {
+              "id": "matt-pocock.tdd",
+              "source": "Matt Pocock skill catalog (managed snapshot)",
+              "version": "2026-08-issue-82-reviewed",
+              "estimatedTokens": 40
+            }
+          ],
+          "totalEstimatedTokens": 40
+        }
+      },
+      "turns": 1,
+      "toolCalls": 5,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "behavior-change-with-tests",
+      "category": "behavior change with tests",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 14809,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.3.5",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 6694,
+        "output": 328,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 7022,
+        "cost": 0.04331
+      },
+      "context": {
+        "strategy": "default",
+        "estimatedPromptTokens": 192,
+        "skills": {
+          "available": 9,
+          "selected": [
+            {
+              "id": "matt-pocock.tdd",
+              "reason": "deterministic-rule",
+              "provenance": "Matt Pocock skill catalog (managed snapshot)@2026-08-issue-82-reviewed"
+            }
+          ],
+          "loaded": [
+            {
+              "id": "matt-pocock.tdd",
+              "source": "Matt Pocock skill catalog (managed snapshot)",
+              "version": "2026-08-issue-82-reviewed",
+              "estimatedTokens": 40
+            }
+          ],
+          "totalEstimatedTokens": 40
+        }
+      },
+      "turns": 1,
+      "toolCalls": 7,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "small-multi-file-refactor",
+      "category": "small multi-file refactor",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 26235,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.3.5",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 11066,
+        "output": 529,
+        "cacheRead": 1536,
+        "cacheWrite": 0,
+        "totalTokens": 13131,
+        "cost": 0.071968
+      },
+      "context": {
+        "strategy": "default",
+        "estimatedPromptTokens": 145,
+        "skills": {
+          "available": 9,
+          "selected": [],
+          "loaded": [],
+          "totalEstimatedTokens": 0
+        }
+      },
+      "turns": 1,
+      "toolCalls": 10,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "inspection-targeted-change",
+      "category": "repository inspection + targeted change",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 9007,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.3.5",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 4435,
+        "output": 189,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 4624,
+        "cost": 0.027845
+      },
+      "context": {
+        "strategy": "default",
+        "estimatedPromptTokens": 134,
+        "skills": {
+          "available": 9,
+          "selected": [],
+          "loaded": [],
+          "totalEstimatedTokens": 0
+        }
+      },
+      "turns": 1,
+      "toolCalls": 5,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "failure-diagnosis-repair",
+      "category": "failure diagnosis/repair",
+      "passed": true,
+      "workerOk": true,
+      "wallTimeMs": 22493,
+      "graderFailures": [],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.3.5",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 7653,
+        "output": 561,
+        "cacheRead": 1536,
+        "cacheWrite": 0,
+        "totalTokens": 9750,
+        "cost": 0.055862999999999996
+      },
+      "context": {
+        "strategy": "default",
+        "estimatedPromptTokens": 186,
+        "skills": {
+          "available": 9,
+          "selected": [
+            {
+              "id": "matt-pocock.tdd",
+              "reason": "deterministic-rule",
+              "provenance": "Matt Pocock skill catalog (managed snapshot)@2026-08-issue-82-reviewed"
+            }
+          ],
+          "loaded": [
+            {
+              "id": "matt-pocock.tdd",
+              "source": "Matt Pocock skill catalog (managed snapshot)",
+              "version": "2026-08-issue-82-reviewed",
+              "estimatedTokens": 40
+            }
+          ],
+          "totalEstimatedTokens": 40
+        }
+      },
+      "turns": 1,
+      "toolCalls": 6,
+      "retries": 0,
+      "humanInterventionRequired": false
+    },
+    {
+      "fixtureId": "repository-contract-generated-file",
+      "category": "repository contract adherence",
+      "passed": false,
+      "workerOk": false,
+      "wallTimeMs": 86635,
+      "graderFailures": [
+        "Command failed: npm test\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nAssertionError [ERR_ASSERTION]: generated/schema.txt missing displayName:string\n    at has (file:///tmp/pi-next-canary-repository-contract-generated-file-MkltTv/test/run-tests.mjs:4:26)\n    at file:///tmp/pi-next-canary-repository-contract-generated-file-MkltTv/test/run-tests.mjs:5:36\n    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5) {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v22.23.2\n",
+        "generated/schema.txt is not generated from src/schema.ts"
+      ],
+      "adapter": {
+        "id": "pi",
+        "version": "1",
+        "model": "openai-codex/gpt-5.5"
+      },
+      "harness": {
+        "name": "pi-next-worker-eval",
+        "version": "0.3.5",
+        "fixtureFormatVersion": 1
+      },
+      "usage": {
+        "input": 28191,
+        "output": 2534,
+        "cacheRead": 59904,
+        "cacheWrite": 0,
+        "totalTokens": 90629,
+        "cost": 0.2469270000000001
+      },
+      "context": {
+        "strategy": "default",
+        "estimatedPromptTokens": 200,
+        "skills": {
+          "available": 9,
+          "selected": [
+            {
+              "id": "matt-pocock.tdd",
+              "reason": "deterministic-rule",
+              "provenance": "Matt Pocock skill catalog (managed snapshot)@2026-08-issue-82-reviewed"
+            }
+          ],
+          "loaded": [
+            {
+              "id": "matt-pocock.tdd",
+              "source": "Matt Pocock skill catalog (managed snapshot)",
+              "version": "2026-08-issue-82-reviewed",
+              "estimatedTokens": 40
+            }
+          ],
+          "totalEstimatedTokens": 40
+        }
+      },
+      "turns": 1,
+      "toolCalls": 34,
+      "retries": 0,
+      "humanInterventionRequired": false
+    }
+  ]
+}

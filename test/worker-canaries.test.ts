@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildBoundedRepoMap, buildContextPacket, resolveSkillContext } from "../src/evaluation/context-strategies.ts";
+import { piEvalModelSpecifierFromEnv } from "../src/evaluation/pi-worker-adapter.ts";
 import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter.ts";
 import { runWorkerCanaryCorpus, runWorkerCanaryFixture, workerCanaryFixtures, WORKER_CANARY_FIXTURE_FORMAT_VERSION } from "../src/evaluation/worker-canaries.ts";
 
@@ -55,6 +56,13 @@ test("aggregate report includes tokens and cost per verified completion when ava
   assert.ok(report.totalEstimatedPromptTokens > 0);
   assert.equal(report.tokensPerVerifiedCompletion, 11);
   assert.equal(report.costPerVerifiedCompletion, 0.02);
+});
+
+test("Pi worker eval uses explicit model binding from eval or Pi env", () => {
+  assert.equal(piEvalModelSpecifierFromEnv({ PI_NEXT_EVAL_MODEL: " openai-codex/gpt-5.5 " }), "openai-codex/gpt-5.5");
+  assert.equal(piEvalModelSpecifierFromEnv({ PI_PROVIDER: "openai-codex", PI_MODEL: "gpt-5.5" }), "openai-codex/gpt-5.5");
+  assert.equal(piEvalModelSpecifierFromEnv({ PI_MODEL: "gpt-5.5" }), "gpt-5.5");
+  assert.equal(piEvalModelSpecifierFromEnv({}), undefined);
 });
 
 test("checked-in Pi baseline records a real graded corpus run", () => {
