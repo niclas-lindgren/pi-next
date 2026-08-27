@@ -34,6 +34,14 @@ commit, runs those checks again on GitHub, and runs the fresh-consumer package
 smoke. A tag is not consumer-ready unless that workflow passes. Verification
 is tied to the tag's commit rather than to a moving branch.
 
+`refs/tags/supported` is a moving consumer-discovery channel, not the immutable
+release artifact. `npm run release -- <level> --push` pushes `main` and the new
+immutable tag only; it must not advance `supported` before the hosted tag
+Release gate passes. After the exact tag gate is successful, move
+`refs/tags/supported` to that tag and keep README/release notes consistent with
+the same commit. Never move the channel for failed, prepared-only, or in-flight
+tags.
+
 ## Consumer update contract
 
 Consumers intentionally pin an immutable tag or commit. They should not add

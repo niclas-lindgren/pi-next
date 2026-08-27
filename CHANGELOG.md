@@ -2,19 +2,43 @@
 
 ## Unreleased
 
-## 0.3.7 - prepared release
+## 0.3.7 - qualified supported release
 
-Fix a type error in createWorkerShellEnvironmentRoot: an empty object literal typed as NodeJS.ProcessEnv fails when a consuming project (e.g. Next.js) globally augments ProcessEnv to require NODE_ENV, breaking downstream consumer builds (surfaced via Campsty's Vercel production build on v0.3.6). Build the environment as a plain string record and cast on return instead.
+First post-convergence consumer handoff release. `v0.3.7` is the immutable supported tag for the convergence bundle and `refs/tags/supported` resolves through the annotated tag to commit `2f35fc9f9f117e80dd522bebbb91761a78e2ba7b`. The tag Release gate for that exact SHA passed in run `33053623274`; the corresponding main Release gate passed in run `33053623635`. The tag gate includes exact tag/commit verification, Tier 1 shared-kernel qualification, the full deterministic suite, and Tier 2 disposable-consumer smoke. Earlier failed or incomplete tags, including `v0.2.90` and the pre-gate `v0.3.7` window, are not consumer-supported evidence.
 
 ### Material changes
 
+- Ships the post-#146 lifecycle convergence as the supported consumer version, including the shared single-issue lifecycle kernel, unified scheduler path, recovery/finalization fixes, package export corrections, and deterministic consumer smoke accumulated through `v0.3.7`.
+- Includes #162 production-worker capability enforcement comparable to bootstrap: mutable Pi workers receive the package-owned safe shell instead of unrestricted raw `bash`, with authority/main-branch/GitHub CLI/destructive Git paths refused and repository-controlled launchers isolated in a no-`.git` OS sandbox.
+- Includes #165 shared-scheduler stop/cancellation/resume behavior: `/pi-next-loop stop` reaches live scheduler runs through the AbortSignal contract, scheduler boundaries honor stop intent before starting more work, resume routes unified-scheduler state through the shared scheduler, and unsupported legacy state is rejected explicitly.
+- Includes #166 canonical auto status and typed terminal summary behavior: footer/status rendering comes from the authoritative live run projection, distinguishes idle/completed/budget-yield/blocked/cancelled/failed states, and preserves bounded terminal reasons without stale live-worker elapsed time.
+- Fixes the `createWorkerShellEnvironmentRoot` type error where an empty object literal typed as `NodeJS.ProcessEnv` failed in consuming projects, such as Next.js, that globally augment `ProcessEnv` to require `NODE_ENV` (surfaced by Campsty's `v0.3.6` Vercel production build). The worker environment is built as a plain string record and cast only on return.
+
 ### Compatibility/configuration/schema
+
+- Supported runtime remains Node.js 22.19+ with Pi 0.84.2+; package/config schema version 1 is unchanged.
+- Consumers should pin `git:github.com/niclas-lindgren/pi-next@v0.3.7` (or the exact commit `2f35fc9f9f117e80dd522bebbb91761a78e2ba7b`) rather than floating `main`. The moving `supported` channel is only a producer-published discovery signal and currently resolves to the same commit.
+- Consumer repositories with ambient `NodeJS.ProcessEnv` augmentation no longer need a local patch for pi-next's worker-shell environment builder.
 
 ### Breaking/behavior changes
 
+- Production worker shell behavior is intentionally narrower than older releases: direct raw-shell, authority, main-branch, GitHub CLI, mutating Git, nested shell/eval, and destructive worktree operations are refused from the worker capability boundary.
+- Legacy pre-unified-scheduler resume state is no longer interpreted by the retired foreground supervisor path; users must start a fresh scheduler run or use the explicit migration guidance reported by `/pi-next-loop resume`.
+- Workflow/lifecycle budget exhaustion is reported as the typed budget-yield terminal state in this lineage; no remaining #12 workflow-only commit churn is known for this supported tag.
+
 ### Security/safety
 
+- The release keeps the worker harness below the kernel authority boundary: worker prose, raw shell access, and stale runtime state cannot close issues, mutate protected refs, or replace deterministic verification.
+- Repository-controlled worker verification runs require the OS sandbox; missing sandbox support is a fail-closed launcher failure, not permission to execute unsandboxed.
+- The earlier #163 CI-only fixture/setup blocker is bounded by the successful `v0.3.7` tag gate; no residual deterministic Tier 1/Tier 2 risk is currently known for the exact tagged SHA.
+- Tier 3 Pi canary and product dogfooding remain explicit higher-level evidence, not part of the deterministic tag gate. Until Campsty records its fresh-process smoke under `niclas-lindgren/camping-booking#624`, treat unattended product activation as experimental.
+
 ### Upgrade guidance
+
+- Upgrade target for Campsty and other pinned consumers: `git:github.com/niclas-lindgren/pi-next@v0.3.7` / `2f35fc9f9f117e80dd522bebbb91761a78e2ba7b`. Campsty handoff is tracked at <https://github.com/niclas-lindgren/camping-booking/issues/624>.
+- Release-channel consumers may use their producer integration (for Campsty, bare `make pi-next-upgrade`) only after `refs/tags/supported` resolves to `v0.3.7`; do not infer a newest-SemVer tag.
+- After upgrading, start a fresh Pi process and run `/pi-next-doctor`. It must report `Pi-next version=0.3.7 revision=2f35fc9f9f117e80dd522bebbb91761a78e2ba7b` before any auto behavior is evaluated.
+- Complete a bounded consumer smoke before unattended use: confirm command registration, one explicit issue path, and one auto scheduler path, while avoiding mutation of an unrelated live backlog item.
 
 ## 0.3.6 - prepared release
 

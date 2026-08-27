@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { test } from "node:test";
 
@@ -74,6 +75,14 @@ test("release qualification separates disposable consumer and credentialed canar
   const summary = summarizeQualification("0.2.84", "release", [{ name: "Monitor idle/wake", ok: true, passed: 1, total: 1, note: "(0 idle model calls)" }]);
   assert.match(summary, /pi-next 0\.2\.84 release qualification/);
   assert.match(summary, /Deterministic release gate qualified: YES/);
+});
+
+test("release push does not advance the supported channel before the hosted tag gate", async () => {
+  const script = await readFile("scripts/release.mjs", "utf8");
+
+  assert.doesNotMatch(script, /\["push",\s*"origin",\s*"supported"/);
+  assert.doesNotMatch(script, /\["tag",\s*"-f",\s*"supported"/);
+  assert.match(script, /Do not move refs\/tags\/supported until the hosted tag Release gate passes/);
 });
 
 test("scripted lifecycle canary runs through the shared lifecycle boundary without credentials", async () => {
