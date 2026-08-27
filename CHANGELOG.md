@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.3.7 - prepared release
+
+Fix a type error in createWorkerShellEnvironmentRoot: an empty object literal typed as NodeJS.ProcessEnv fails when a consuming project (e.g. Next.js) globally augments ProcessEnv to require NODE_ENV, breaking downstream consumer builds (surfaced via Campsty's Vercel production build on v0.3.6). Build the environment as a plain string record and cast on return instead.
+
+### Material changes
+
+### Compatibility/configuration/schema
+
+### Breaking/behavior changes
+
+### Security/safety
+
+### Upgrade guidance
+
 ## 0.3.6 - prepared release
 
 ### Material changes
