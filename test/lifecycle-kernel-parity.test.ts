@@ -7,10 +7,17 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 
 import { runBootstrapLifecycle, type BootstrapReport } from "../src/bootstrap/index.ts";
+import { prepareRepository } from "../src/bootstrap/repository.ts";
+import { runCommand as bootstrapRunCommand } from "../src/bootstrap/command-runner.ts";
+import { recordCommit, readCommitTelemetry } from "../src/coordination/workflow-commit-policy.ts";
 import { runSingleIssueLifecycle, runLifecycleScheduler, LifecycleSchedulerClaimConflict, type UnifiedLifecycleResult } from "../src/lifecycle/index.ts";
 
 const exec = promisify(execFile);
 const zero = "0".repeat(40);
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  return (await exec("git", ["-C", cwd, ...args], { encoding: "utf8" })).stdout.trim();
+}
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-next-kernel-parity-"));
@@ -327,5 +334,65 @@ test("scheduler reports cancelled between issue iterations instead of discoverin
     assert.equal(scheduler.settled, 1);
     assert.equal(scheduler.latest?.issueNumber, 902);
     assert.equal(discovered.length, 1, "an abort observed after the first issue settles must not discover a second candidate");
+  } finally { await f.cleanup(); }
+});
+
+test("workflow/lifecycle budget exhaustion surfaces as the canonical typed budget-yield lifecycle result (#12)", async () => {
+  const f = await fixture();
+  try {
+    // commitIncidentDiagnostics requires an origin remote whose main matches
+    // local main, and the commit-telemetry store must stay gitignored so the
+    // only dirty paths are the incident diagnostics.
+    const remote = `${f.root}.git`;
+    await exec("git", ["init", "--bare", "--initial-branch=main", remote]);
+    await git(f.root, "remote", "add", "origin", remote);
+    await writeFile(join(f.root, ".gitignore"), ".pi/\n.worktrees/\n");
+    await git(f.root, "add", ".gitignore");
+    await git(f.root, "commit", "-qm", "gitignore");
+    await git(f.root, "push", "-q", "-u", "origin", "main");
+    // Pre-consume the shared workflow/lifecycle commit budget for issue 900.
+    recordCommit(f.root, 900, "workflow-only");
+    recordCommit(f.root, 900, "lifecycle");
+    const execute = async () => report(900);
+    const runFinalizer = async () => {
+      const error = new Error("simulated finalization failure");
+      (error as Error & { code: string }).code = "SIMULATED_FINALIZE_FAILURE";
+      throw error;
+    };
+    const before = await git(f.root, "rev-parse", "HEAD");
+    const result = await runSingleIssueLifecycle({
+      cwd: f.root,
+      workItem: { issueNumber: 900 },
+      allowRepair: true,
+      review: false,
+      finalize: true,
+      entry: "auto",
+      runId: "auto-900",
+    }, { runFinalizer }, execute);
+
+    // The terminal scheduler/status result is the single canonical typed
+    // workflow-budget outcome, not finalization-blocked and not ROOT_DIRTY.
+    assert.equal(result.disposition, "budget-yield");
+    assert.equal(result.workflowBudget?.status, "exhausted");
+    assert.match(result.workflowBudget?.reason ?? "", /Workflow-only\/lifecycle commit bound reached/);
+    assert.ok((result.workflowBudget?.residuePaths ?? []).some((path) => path.startsWith(".pi-next/diagnostics/incidents/")));
+    assert.equal(result.projection.terminalDisposition, "budget-yield");
+    assert.equal(result.finalization, "BLOCKED");
+    assert.equal(result.candidatePreserved, true);
+
+    // Incident residue is preserved; no duplicate commit and no push.
+    assert.match(await git(f.root, "status", "--porcelain", "--untracked-files=all"), /\.pi-next\/diagnostics\/incidents\//);
+    assert.equal(await git(f.root, "rev-parse", "HEAD"), before);
+    assert.equal(await git(f.root, "rev-parse", "origin/main"), before);
+    const telemetry = readCommitTelemetry(f.root).issues["900"];
+    assert.equal(telemetry?.workflowOnly, 1);
+    assert.equal(telemetry?.lifecycle, 1);
+
+    // A later preflight classifies the preserved residue as generated
+    // workflow state instead of reinterpreting it as generic ROOT_DIRTY.
+    const prepared = await prepareRepository(f.root, bootstrapRunCommand, { issueNumber: 900 });
+    assert.equal(prepared.workflowBudget?.status, "exhausted");
+    assert.deepEqual(prepared.workflowBudget?.residuePaths, result.workflowBudget?.residuePaths);
+    assert.match(await git(f.root, "status", "--porcelain", "--untracked-files=all"), /\.pi-next\/diagnostics\/incidents\//);
   } finally { await f.cleanup(); }
 });

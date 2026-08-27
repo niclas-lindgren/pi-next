@@ -8,6 +8,18 @@ export const MAX_CHANGED_FILES = 200;
 export const CHECKS = REQUIRED_CHECKS;
 
 export type Disposition = "pass" | "already-satisfied" | "no-change" | "repairable-failure" | "blocked";
+
+/**
+ * The canonical typed workflow/lifecycle commit boundary (#12). Produced by
+ * the shared lifecycle when the workflow-only/lifecycle commit budget refuses
+ * an incident-diagnostics commit: the residue is preserved as generated
+ * workflow state, never reinterpreted as generic ROOT_DIRTY/ROOT_BUSY later.
+ */
+export interface WorkflowBudgetExhausted {
+  status: "exhausted";
+  reason: string;
+  residuePaths: readonly string[];
+}
 export type WorkerRole = "implementation" | "implementation-retry" | "repair" | "review";
 export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "finalization" | "terminal";
 export type BootstrapProgressState = "start" | "ready" | "activity" | "heartbeat" | "pass" | "fail" | "blocked" | "skipped" | "completed";
@@ -273,11 +285,13 @@ export interface BootstrapReport {
   candidateHasDelta: boolean;
   noChangeReason?: string;
   failureReason?: string;
+  /** Set when the bootstrap preflight yielded the workflow/lifecycle commit boundary (#12). */
+  workflowBudget?: WorkflowBudgetExhausted;
 }
 
 export interface BootstrapLifecycleReport {
   issueNumber: number;
-  disposition: Disposition | "finalization-blocked";
+  disposition: Disposition | "finalization-blocked" | "budget-yield";
   implementation: "PASS" | "FAIL" | "BLOCKED";
   verification: "PASS" | "FAIL";
   finalization: "PASS" | "BLOCKED" | "SKIPPED";
@@ -286,11 +300,14 @@ export interface BootstrapLifecycleReport {
   implementationReport: BootstrapReport;
   finalizationReport?: BootstrapFinalizerReport;
   finalizationFailure?: { code: string; reason: string };
+  workflowBudget?: WorkflowBudgetExhausted;
 }
 
 export interface RepositoryState {
   root: string;
   baselineRevision: string;
+  /** Set when incident residue was preserved at this boundary because the workflow/lifecycle commit budget is exhausted (#12). */
+  workflowBudget?: WorkflowBudgetExhausted;
 }
 
 export interface WorktreeEntry {

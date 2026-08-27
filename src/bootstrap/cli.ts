@@ -40,7 +40,7 @@ function parseArgs(args: string[]): BootstrapCliOptions {
   return { issueNumber, cwd, allowRepair, review, verifyOnly, timeoutMs, nextOnly, finalize };
 }
 
-export function exitCodeForDisposition(disposition: Disposition | "finalization-blocked"): number {
+export function exitCodeForDisposition(disposition: Disposition | "finalization-blocked" | "budget-yield"): number {
   return disposition === "pass" || disposition === "already-satisfied" ? 0 : disposition === "repairable-failure" ? 1 : 2;
 }
 
@@ -65,6 +65,7 @@ export async function runBootstrapLifecycle(
     implementationReport: result.implementationReport,
     finalizationReport: result.finalizationReport,
     finalizationFailure: result.finalizationFailure,
+    workflowBudget: result.workflowBudget,
   };
 }
 

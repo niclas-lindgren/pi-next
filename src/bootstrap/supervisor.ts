@@ -33,6 +33,17 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
     throw error;
   }
 
+  if (repository.workflowBudget?.status === "exhausted") {
+    // The shared workflow/lifecycle commit budget refused the incident
+    // residue at the preflight boundary. Yield the single canonical typed
+    // budget result now instead of launching a worker that could only
+    // generate more un-committable residue or surface the boundary later as
+    // an unrelated ROOT_DIRTY/finalization failure (#12). The residue stays
+    // preserved as generated workflow state.
+    emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: "fail", detail: `workflow/lifecycle commit budget exhausted; incident residue preserved as generated workflow state (${repository.workflowBudget.reason})` });
+    return budgetExhaustedBootstrapReport(options.issueNumber, repository, started, now);
+  }
+
   emitProgress(reporter, { issueNumber: options.issueNumber, phase: "worktree", state: "start" });
   let worktree: { path: string; branch: string };
   try {
@@ -202,4 +213,58 @@ export async function runBootstrap(options: BootstrapOptions, dependencies: Boot
   };
   emitProgress(reporter, { issueNumber: options.issueNumber, phase: "terminal", state: disposition === "pass" || disposition === "already-satisfied" ? "pass" : "fail", detail: noChangeReason ?? disposition });
   return report;
+}
+
+/**
+ * Minimal typed report for a preflight workflow/lifecycle budget yield (#12):
+ * no worker ran, nothing was written or destroyed, and the boundary is carried
+ * on the report so the shared lifecycle maps it to the canonical
+ * `budget-yield` result instead of a generic blocked/dirty interpretation.
+ */
+function budgetExhaustedBootstrapReport(
+  issueNumber: number,
+  repository: RepositoryState,
+  started: Date,
+  now: () => Date,
+): BootstrapReport {
+  const zero = "0".repeat(40);
+  return {
+    issueNumber,
+    attempts: 0,
+    start: started.toISOString(),
+    end: now().toISOString(),
+    disposition: "blocked",
+    branch: `agent/issue-${issueNumber}`,
+    worktree: `.worktrees/issue-${issueNumber}`,
+    revision: zero,
+    baselineRevision: repository.baselineRevision,
+    candidate: {
+      headRevision: zero,
+      baselineRevision: repository.baselineRevision,
+      originMainRevision: zero,
+      mergeBaseRevision: zero,
+      dirty: false,
+      changedFiles: [],
+      committedChanges: false,
+      uncommittedChanges: false,
+      committedFiles: [],
+      stagedFiles: [],
+      unstagedFiles: [],
+      untrackedFiles: [],
+      commitsAheadOfMergeBase: 0,
+      commitsAheadOfOriginMain: 0,
+      commitsBehindOriginMain: 0,
+      behindOriginMain: false,
+      divergedFromOriginMain: false,
+    },
+    dependencySetup: { action: "not-required" },
+    workerAttempts: [],
+    checks: [],
+    mechanicalPass: false,
+    candidateReadyForReview: false,
+    finalizationReady: false,
+    implementationOutcome: "unproven-no-change",
+    candidateHasDelta: false,
+    workflowBudget: repository.workflowBudget,
+  };
 }
