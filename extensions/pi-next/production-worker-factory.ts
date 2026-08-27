@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 
 import type { WorkerFactory, WorkerRole, WorkerSession, WorkerStats } from "../../src/bootstrap/types.ts";
 import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
+import { loadEffectiveSkillRegistry } from "../../src/skills/effective-registry.ts";
 import type { IssueWorkerRunner, IssueWorkerRuntime } from "./util-core.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 
@@ -52,6 +53,7 @@ class PiWorkerSession implements WorkerSession {
       phase,
       hasPlan: existsSync(`${this.input.cwd}/.pi-next/PLAN.md`),
       issueNumber: this.input.issueNumber,
+      skillRegistry: loadEffectiveSkillRegistry({ root: this.input.cwd }).registry,
     });
     const result = await this.input.runner(this.input.cwd, text, {
       signal: this.input.signal,

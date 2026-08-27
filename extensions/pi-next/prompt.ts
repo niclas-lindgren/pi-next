@@ -10,6 +10,7 @@ import {
   type WorkerDispatchPolicy,
   type WorkerWorkflowPaths,
 } from "../../src/coordination/worker-dispatch.ts";
+import { loadEffectiveSkillRegistry } from "../../src/skills/effective-registry.ts";
 
 function stripFrontmatter(markdown: string): string {
   return markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
@@ -55,7 +56,7 @@ function loopTuningOverlay(cwd?: string): string {
   return `Runtime loop tuning overlay (bounded; subordinate to AGENTS.md/canonical policy):\n${text.slice(0, 2_000)}`;
 }
 
-const PACKAGE_SKILL_ROOT = fileURLToPath(new URL("../../skills", import.meta.url));
+const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 export interface ResolvedWorkerSkill {
   name: string;
@@ -63,18 +64,15 @@ export interface ResolvedWorkerSkill {
   source: "package" | "consumer" | "optional-unavailable";
 }
 
-/** Resolve a dispatched skill without inferring a consumer-specific layout. */
+/** Resolve a dispatched skill from the reviewed effective registry content paths. */
 export function resolveWorkerSkill(cwd: string, name: string): ResolvedWorkerSkill {
-  const packagePaths = [
-    join(PACKAGE_SKILL_ROOT, "pi-next", name, "SKILL.md"),
-    join(PACKAGE_SKILL_ROOT, "vendor", "mattpocock", name, "SKILL.md"),
-  ];
-  const packagePath = packagePaths.find((candidate) => existsSync(candidate));
-  if (packagePath) return { name, path: packagePath, source: "package" };
-
-  const consumerPath = join(cwd, "skills", "vendor", "mattpocock", name, "SKILL.md");
+  const effective = loadEffectiveSkillRegistry({ root: cwd });
+  const found = effective.entries.find((item) => item.entry.id === name);
+  if (!found) return { name, source: "optional-unavailable" };
+  const packagePath = join(PACKAGE_ROOT, found.contentPath, "SKILL.md");
+  if (existsSync(packagePath)) return { name, path: packagePath, source: "package" };
+  const consumerPath = join(cwd, found.contentPath, "SKILL.md");
   if (existsSync(consumerPath)) return { name, path: consumerPath, source: "consumer" };
-
   return { name, source: "optional-unavailable" };
 }
 
@@ -99,12 +97,16 @@ export function buildPiNextPrompt(
 ): string {
   const config = loadPiNextConfig(cwd);
   const role = dispatchInput.phase || "planning";
+  // Normal dispatch uses the checkout's effective registry (managed
+  // manifest/provenance + package built-ins); programmatic overrides are tests/adapters only.
+  const registry = loadEffectiveSkillRegistry({ root: cwd }).registry;
   const policy = createWorkerDispatch({
     ...dispatchInput,
     phase: role,
     modelPolicy: dispatchInput.modelPolicy ?? config.workerDispatch.models[role as keyof typeof config.workerDispatch.models],
     workflowPaths: dispatchInput.workflowPaths ?? workflowPaths(config.workflow),
     skillPolicy: dispatchInput.skillPolicy ?? config.skills,
+    skillRegistry: dispatchInput.skillRegistry ?? registry,
   });
   const userArgs = args.trim() || "(no arguments)";
   const kernel = `${repositoryPolicyText(config)}\n${renderWorkerEnvelope(policy)}\n${WORK_LOG_INSTRUCTIONS}`;

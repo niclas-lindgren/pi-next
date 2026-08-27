@@ -22,7 +22,15 @@ Role selection and capability enforcement belong to the Pi-next worker contract.
 Pi-next also ships an adapted `verification-before-completion` discipline under
 `skills/pi-next/`. Deterministic routing (registry + resolver) lives in the
 kernel; see [`../docs/SKILLS.md`](../docs/SKILLS.md) for the available/selected/
-loaded model, routing tiers, and conflict detection.
+loaded model, routing tiers, conflict detection, and the effective runtime
+registry.
+
+The runtime registry is built from `manifest.json` + each source's
+`PROVENANCE.json` (plus package-owned built-ins under `skills/pi-next/`), so a
+synced skill from any pinned source becomes selectable in `.pi-next/config.json`
+with its exact pinned provenance. `skills:check` also fails when an unmanaged
+copy of a registered methodology under `.agents/skills/` drifts from the managed
+allowlisted content.
 
 Run the deterministic commands from the repository root:
 

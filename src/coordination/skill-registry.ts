@@ -77,6 +77,12 @@ export interface SkillRegistryEntry {
   provenanceVersion: string;
   /** Optional routing capabilities/metadata. */
   capabilities?: string[];
+  /** Content ships as a package-owned built-in under `skills/pi-next/<id>`
+   * rather than a managed pack destination. */
+  packageOwned?: boolean;
+  /** Manifest pack id this built-in is derived from; its provenance revision
+   * is derived from the managed manifest when the pack is present. */
+  managedPack?: string;
   /** Framework/process-owner discipline: present but never routed
    * automatically/mandatory. Fails closed. */
   processOwner?: boolean;
@@ -218,6 +224,8 @@ export function buildSkillRegistry(entries: readonly SkillRegistryEntry[]): Skil
       source: entry.source,
       provenanceVersion: entry.provenanceVersion,
       ...(entry.capabilities && entry.capabilities.length ? { capabilities: [...entry.capabilities] } : {}),
+      ...(entry.packageOwned ? { packageOwned: true as const } : {}),
+      ...(entry.managedPack ? { managedPack: entry.managedPack } : {}),
       ...(entry.processOwner ? { processOwner: true as const } : {}),
       ...(entry.compatibility ? { compatibility: cloneCompatibility(entry.compatibility) } : {}),
     };

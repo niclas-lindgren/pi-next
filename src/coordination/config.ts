@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type { WorkerModelPolicy, WorkerRole } from "./worker-dispatch.ts";
 import type { AdversarialReviewPolicy, ReviewAxis } from "./adversarial-review.ts";
+import { loadEffectiveSkillRegistry } from "../skills/effective-registry.ts";
 import {
   DEFAULT_SKILL_ROUTING_POLICY,
   RISK_CLASSES,
@@ -20,6 +21,7 @@ import {
   type RiskClass,
   type SkillAutomaticRule,
   type SkillMandatoryRule,
+  type SkillRegistry,
   type SkillRoutingPolicy,
 } from "./skill-registry.ts";
 
@@ -246,7 +248,7 @@ function roleArray(value: unknown, name: string): WorkerRole[] {
   return list as WorkerRole[];
 }
 
-function parseSkillsPolicy(value: unknown): SkillRoutingPolicy {
+function parseSkillsPolicy(value: unknown, registry: SkillRegistry): SkillRoutingPolicy {
   if (value === undefined) return JSON.parse(JSON.stringify(DEFAULT_SKILL_ROUTING_POLICY)) as SkillRoutingPolicy;
   const root = object(value, "config.skills");
   rejectUnknown(root, ["version", "mandatory", "automatic", "explicit"], "config.skills");
@@ -293,7 +295,7 @@ function parseSkillsPolicy(value: unknown): SkillRoutingPolicy {
   const explicit = root.explicit === undefined ? [] : strings(root.explicit, "config.skills.explicit", 64);
   const policy: SkillRoutingPolicy = { version: SKILL_ROUTING_POLICY_VERSION, mandatory, automatic, explicit };
   try {
-    validateSkillRoutingPolicy(policy, builtInSkillRegistry());
+    validateSkillRoutingPolicy(policy, registry);
   } catch (error) {
     if (error instanceof SkillRegistryError) throw new PiNextConfigError(error.message);
     throw error;
@@ -301,7 +303,13 @@ function parseSkillsPolicy(value: unknown): SkillRoutingPolicy {
   return policy;
 }
 
-export function validatePiNextConfig(value: unknown): PiNextConfig {
+/**
+ * Validate project configuration. Skill routing is checked against the passed
+ * effective registry (managed manifest/provenance + package built-ins); when
+ * no registry is supplied the pure built-in registry is used (tests/adapters).
+ */
+export function validatePiNextConfig(value: unknown, options: { registry?: SkillRegistry } = {}): PiNextConfig {
+  const registry = options.registry ?? builtInSkillRegistry();
   const root = object(value, "config");
   rejectUnknown(root, ["version", "authority", "selection", "repositoryPolicy", "workflow", "workerDispatch", "skills", "adversarialReview", "convergence", "workerWatchdog", "monitor", "incidentReporting", "assessment"], "config");
   if (root.version !== PI_NEXT_CONFIG_VERSION) {
@@ -391,7 +399,7 @@ export function validatePiNextConfig(value: unknown): PiNextConfig {
   if (typeof maxEscalationsRaw !== "number" || !Number.isInteger(maxEscalationsRaw) || maxEscalationsRaw < 0 || maxEscalationsRaw > 3) throw new PiNextConfigError("config.workerDispatch.maxEscalations must be between 0 and 3");
   const maxEscalations = maxEscalationsRaw;
 
-  const skills = parseSkillsPolicy(root.skills);
+  const skills = parseSkillsPolicy(root.skills, registry);
 
   const reviewValue: Record<string, unknown> = root.adversarialReview === undefined
     ? { ...DEFAULT_PI_NEXT_CONFIG.adversarialReview }
@@ -551,7 +559,15 @@ export function loadPiNextConfig(cwd: string): PiNextConfig {
   } catch (error) {
     throw new PiNextConfigError(`cannot parse ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return validatePiNextConfig(parsed);
+  // Skill routing is validated against the checkout's effective registry
+  // (reviewed managed manifest/provenance + package-owned built-ins).
+  let registry: SkillRegistry;
+  try {
+    registry = loadEffectiveSkillRegistry({ root: cwd }).registry;
+  } catch (error) {
+    throw new PiNextConfigError(`cannot load effective skill registry: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return validatePiNextConfig(parsed, { registry });
 }
 
 export function configuredPath(cwd: string, path: string): string {
