@@ -15,6 +15,7 @@ function argValue(name: string): string | undefined {
 const adapterName = argValue("--adapter") ?? "pi";
 const smoke = process.argv.includes("--smoke");
 const output = argValue("--output");
+const model = argValue("--model");
 const contextStrategy = (argValue("--context-strategy") ?? "default") as ContextStrategyId;
 const knownContextStrategies = new Set<string>(["default", "minimal", "no-controller-context", "repo-map", "selective-skills", "resolver", "expanded-skill-registry", "verification-discipline"]);
 const allowLlm = process.env.PI_NEXT_EVAL_ALLOW_LLM === "1" || process.env.PI_NEXT_WORKER_EVAL_ALLOW_LLM === "1";
@@ -46,7 +47,7 @@ const scriptedSolutions = new Map<string, any>([
   ] }],
 ]);
 const adapter = adapterName === "pi"
-  ? new PiWorkerAdapter()
+  ? new PiWorkerAdapter({ model })
   : adapterName === "scripted"
     ? new ScriptedWorkerAdapter(fixtures.map((fixture) => ({ name: fixture.id, behavior: "success" as const, ...(scriptedSolutions.get(fixture.id) ?? {}) })))
     : undefined;

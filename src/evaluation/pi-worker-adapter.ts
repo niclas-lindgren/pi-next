@@ -45,10 +45,24 @@ function usageFromSession(session: any): { usage?: WorkerUsageTelemetry; toolCal
   return { usage, toolCalls: stats?.toolCalls, model };
 }
 
+export interface PiWorkerAdapterOptions {
+  /** Optional explicit model pattern (for example `openai-codex/gpt-5.5`). */
+  model?: string;
+}
+
+export function piEvalModelSpecifierFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env.PI_NEXT_EVAL_MODEL?.trim()) return env.PI_NEXT_EVAL_MODEL.trim();
+  if (env.PI_PROVIDER?.trim() && env.PI_MODEL?.trim()) return `${env.PI_PROVIDER.trim()}/${env.PI_MODEL.trim()}`;
+  if (env.PI_MODEL?.trim()) return env.PI_MODEL.trim();
+  return undefined;
+}
+
 /** Real Pi WorkerAdapter used only by the explicit, credential-gated evaluation command. */
 export class PiWorkerAdapter implements WorkerAdapter {
   readonly id = "pi";
   readonly version = WORKER_ADAPTER_VERSION;
+
+  constructor(private readonly options: PiWorkerAdapterOptions = {}) {}
 
   async run(task: WorkerTask, signal: AbortSignal, emit?: WorkerEventSink): Promise<WorkerTerminalResult> {
     const startedAt = new Date().toISOString();
@@ -57,6 +71,11 @@ export class PiWorkerAdapter implements WorkerAdapter {
     try {
       const sdk = await import("@earendil-works/pi-coding-agent") as any;
       const modelRuntime = await sdk.ModelRuntime.create();
+      const modelSpecifier = this.options.model?.trim() || piEvalModelSpecifierFromEnv();
+      const resolvedModel = modelSpecifier
+        ? sdk.resolveCliModel({ cliModel: modelSpecifier, modelRuntime })
+        : undefined;
+      if (resolvedModel?.error) throw new Error(`Unable to resolve Pi eval model ${modelSpecifier}: ${resolvedModel.error}`);
       const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
       const loader = new sdk.DefaultResourceLoader({
         cwd: task.cwd,
@@ -84,6 +103,8 @@ export class PiWorkerAdapter implements WorkerAdapter {
       });
       const result = await sdk.createAgentSession({
         cwd: task.cwd,
+        model: resolvedModel?.model,
+        thinkingLevel: resolvedModel?.thinkingLevel,
         modelRuntime,
         resourceLoader: loader,
         settingsManager,
