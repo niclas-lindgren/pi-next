@@ -134,15 +134,11 @@ try {
 
   if (flags.has("--push")) {
     run("git", ["push", "origin", "main", "--follow-tags"]);
-    // qualify:release (tier1 + tier2) already passed above, so this release
-    // is the deterministic consumer-qualified gate Campsty's upgrade script
-    // relies on (`SUPPORTED_RELEASE_TAG` in upgrade-pi-next.mjs). Move the
-    // moving "supported" channel tag to it so a no-arg `make pi-next-upgrade`
-    // resolves without requiring an explicit --ref every release.
-    run("git", ["tag", "-f", "supported", tag]);
-    run("git", ["push", "origin", "supported", "--force"]);
+    console.log(`Pushed ${tag}. Do not move refs/tags/supported until the hosted tag Release gate passes for this exact tag and commit.`);
+    console.log(`After that gate passes, publish the consumer channel explicitly: git tag -f supported ${tag} && git push origin refs/tags/supported --force`);
   } else {
     console.log(`Created release commit and ${tag}. Push with: git push origin main --follow-tags`);
+    console.log(`After the hosted tag Release gate passes, move refs/tags/supported to ${tag} before declaring it consumer-supported.`);
   }
   if (flags.has("--publish")) {
     run("npm", ["publish", "--access", "public"]);

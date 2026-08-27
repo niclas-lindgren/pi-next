@@ -19,6 +19,7 @@ help:
 	  'make check                         Run typecheck and tests' \
 	  'make lint                          Run build and lint only (no tests; used by the pre-push hook)' \
 	  'make release [notes...]           Test, auto-note, bump, commit, tag, and push a release' \
+	  '                                  (does not move supported until the tag gate passes)' \
 	  '                                  (or RELEASE_NOTES="...")' \
 	  'make release-patch                 Prepare the next patch release' \
 	  'make release-minor                 Prepare the next minor release' \

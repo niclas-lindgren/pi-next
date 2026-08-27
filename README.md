@@ -2,7 +2,7 @@
 
 Pi-next is an experimental autonomous work-item lifecycle kernel currently packaged as an extension for the [pi-coding-agent](https://github.com/niclas-lindgren/pi-coding-agent) host. Pi is the current/default coding worker, but it is not the architectural identity of the kernel: authority, leasing, recovery, verification, and guarded completion belong to pi-next while coding harnesses execute bounded worker roles behind an adapter contract.
 
-> **Experimental / pre-1.0:** v0.2.71 is the latest consumer-facing public release. Review the release notes and use a disposable repository before enabling autonomous runs on valuable work.
+> **Experimental / pre-1.0:** v0.3.7 is the supported consumer-facing public release. The `supported` channel tag resolves through `v0.3.7` to commit `2f35fc9f9f117e80dd522bebbb91761a78e2ba7b`; review the release notes and use a disposable repository before enabling autonomous runs on valuable work.
 
 ## Design principle
 
@@ -21,10 +21,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for extension precedence and 
 
 ## Install as a native Pi package
 
-Use an immutable release tag or commit, rather than floating `main`, for reproducible or autonomous use. The supported release is:
+Use an immutable release tag or commit, rather than floating `main`, for reproducible or autonomous use. The supported release is `v0.3.7`:
 
 ```sh
-pi install -l git:github.com/niclas-lindgren/pi-next@v0.2.71
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.3.7
 ```
 
 The `-l` form records the exact package ref in the consuming repository's `.pi/settings.json`; commit that settings entry if other checkouts should install the same package automatically. Use `pi install` without `-l` for a user-global installation. Pi's native lifecycle commands manage the package. Run `/pi-next-doctor` after installation to observe the loaded version and revision before enabling automation:
@@ -39,10 +39,13 @@ pi remove git:github.com/niclas-lindgren/pi-next
 To move a project to another pinned release, install the new exact tag or commit; subsequent `pi update --extensions` runs reconcile that pinned ref rather than floating to `main`:
 
 ```sh
-pi install -l git:github.com/niclas-lindgren/pi-next@v0.2.71
+pi install -l git:github.com/niclas-lindgren/pi-next@v0.3.7
 ```
 
-A commit SHA may be used while developing. v0.2.71 uses package/config schema version 1 and supports Pi 0.84.2+ with Node 22.19+. It is pre-1.0: minor releases may change behavior, and consumers should review release notes before upgrading. Updating or removing pi-next does not own or delete the consumer's workflow state, recovery data, or policy.
+A commit SHA may be used while developing. v0.3.7 uses package/config schema version 1 and supports Pi 0.84.2+ with Node 22.19+. It is pre-1.0: minor releases may change behavior, and consumers should review release notes before upgrading. Updating or removing pi-next does not own or delete the consumer's workflow state, recovery data, or policy.
+
+For release-channel driven consumers, `refs/tags/supported` currently resolves to `v0.3.7` at `2f35fc9f9f117e80dd522bebbb91761a78e2ba7b`. After any upgrade, start a fresh Pi process and run `/pi-next-doctor`; the expected identity for this release is `Pi-next version=0.3.7 revision=2f35fc9f9f117e80dd522bebbb91761a78e2ba7b`.
+
 For local development, Pi also accepts a package directory directly:
 
 ```sh
@@ -136,7 +139,7 @@ consumer config + authority adapter
 
 The kernel owns generic work-item identity, leases, canonical workspaces, durable transitions, worker dispatch semantics, verification sequencing, recovery, guarded completion, and bounded telemetry. An authority adapter owns discovery, freshness, labels/statuses, and completion semantics. Repository instructions, model selection, deployment policy, and credentials remain consumer-owned. A PLAN is recovery state, not ownership authority: resume requires a fresh authoritative lease and the canonical worktree for the exact item.
 
-Workers currently run through the Pi adapter in child Pi processes with the canonical worktree as their process working directory. This prevents the parent coordination checkout from being used as an issue workspace, but it is not an OS sandbox: workers can still use any shell/file/Git capability granted by the host. The generic worker contract does not require Pi-specific child-session mechanics; another adapter may provide isolation differently while preserving the same authority/workspace/result boundaries.
+Workers currently run through the Pi adapter in child Pi processes with the canonical worktree as their process working directory. This prevents the parent coordination checkout from being used as an issue workspace. Mutable production workers receive the package-owned `safe_bash` tool instead of Pi's unrestricted raw shell: authority, main-branch, GitHub CLI, nested shell/eval, mutating Git, and destructive worktree commands are refused before process creation. Repository-controlled build/test launchers run in a detached no-`.git` execution copy inside the configured OS mount/network sandbox and fail closed if the sandbox is unavailable. The generic worker contract does not require Pi-specific child-session mechanics; another adapter may provide isolation differently while preserving the same authority/workspace/result boundaries.
 
 Pi remains the production/default worker until the independent evaluation corpus demonstrates that another adapter has a materially better verified-completion profile. mini-SWE-agent is the first planned independent challenger because its deliberately small execution model tests the adapter boundary without introducing another orchestration platform.
 
@@ -183,9 +186,9 @@ npm run bootstrap:self-host -- --issue 75 --verify-only
 
 ### Release automation
 
-Install the repository's local pre-push hook once for fast feedback. It does not replace the hosted exact-tag gate: `.github/workflows/release-gate.yml` rechecks the pushed immutable tag on GitHub.
+Install the repository's local pre-push hook once for fast feedback. It does not replace the hosted exact-tag gate: `.github/workflows/release-gate.yml` rechecks the pushed immutable tag on GitHub. The moving `supported` channel is advanced only after that hosted tag gate passes for the exact tag and commit.
 
-Read the batching policy and consumer pin-bump contract in [`docs/RELEASES.md`](docs/RELEASES.md).
+Read the batching policy, supported-channel rule, and consumer pin-bump contract in [`docs/RELEASES.md`](docs/RELEASES.md).
 
 The local hook:
 
