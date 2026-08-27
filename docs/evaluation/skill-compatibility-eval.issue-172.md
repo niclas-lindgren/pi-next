@@ -79,10 +79,29 @@ provider: `Codex error: The usage limit has been reached` (OpenAI Codex spend ca
 this account at the time). No other model satisfies the issue's same-model comparison
 requirement, so a clean run must wait until the limit resets.
 
+## Provider usage-limit reset (observed 2026-08-27T07:5xZ)
+
+Probed the Codex endpoint directly (`POST https://chatgpt.com/backend-api/codex/responses`,
+OAuth bearer + `chatgpt-account-id`):
+
+- HTTP 429, `{"error":{"type":"usage_limit_reached","plan_type":"plus",...}}`
+- `x-codex-plan-type`: `plus`
+- Primary rolling window: 300 min, `x-codex-primary-used-percent: 100`
+  - `resets_at` (epoch): **1787825394** = **2026-08-27T10:09:54Z**
+  - `resets_in_seconds`: ~8070 (~2h15m from the probe)
+- Secondary weekly window: 10080 min, 58% used
+  - `resets_at` (epoch): 1788274216 = 2026-09-01T14:50:16Z
+
+The eval re-run gate is the **primary** window: it resets at the timestamp above, after
+which the 5-hour Codex budget is available again. Re-probe anytime with the same request
+if the timestamps go stale; the same headers are returned.
+
 ## What a follow-up worker must do to close
 
-1. Re-run the exact command above on `openai-codex/gpt-5.5` after the usage limit
-   resets (the harness `--model` binding from this branch makes that deterministic).
+1. Wait for the primary Codex usage window to reset (observed reset 2026-08-27T10:09:54Z;
+   re-probe for a fresher timestamp), then re-run the exact command above on
+   `openai-codex/gpt-5.5` (the harness `--model` binding from this branch makes that
+   deterministic).
 2. Record the independently graded pass rate, token/cost, wall time, retries, and
    nested-worker count.
 3. Close only if verified completions per token/cost **preserve or improve** the
