@@ -120,6 +120,11 @@ export async function runLifecycleScheduler(
     }
     let result: UnifiedLifecycleResult;
     try {
+      // After claim: cancellation may arrive while an asynchronous CAS claim
+      // is in flight. In that case the scheduler owns a fresh lease, but the
+      // stopped run must release it and exit before launching a worker or
+      // entering the single-issue lifecycle.
+      if (options.signal?.aborted) return cancelled(options, entry, results);
       result = await runSingleIssueLifecycle({
         ...options,
         entry,
