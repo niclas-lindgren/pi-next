@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
 import { loopNow, loopStateFile, markIssueDisposition, type LoopState } from "./loop-state.ts";
+import { recordLifecycleEvent } from "./lifecycle-telemetry.ts";
 import { writeJsonAtomic } from "./util.ts";
 
 export function recordSchedulerSkipState(
@@ -27,4 +28,14 @@ export function recordSchedulerSkipState(
     lastReason: reason,
     updatedAt: skippedAt,
   });
+}
+
+export function recordFreshOwnerSchedulerSkip(
+  cwd: string,
+  runId: string,
+  issueNumber: number,
+  skips: NonNullable<LoopState["schedulerSkips"]>,
+): void {
+  recordSchedulerSkipState(cwd, runId, issueNumber, skips);
+  recordLifecycleEvent(cwd, { event: "scheduler_skip", issueNumber, runId, outcome: "skip", reasonCode: "fresh_owner" });
 }
