@@ -57,6 +57,14 @@ This is not a feature-parity exercise. Pi-next should harvest proven mechanisms 
 - **adapter** — Codex/Claude SDK event metrics are reserved for later adapters behind the same result schema; their native token/cost/turn streams should be mapped to the common aggregate fields without moving lifecycle authority into those SDKs.
 - **reject** — running real-worker canaries as part of ordinary `npm test`. The command is explicit and credential-gated (`PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi`), with conservative smoke mode available via `--smoke`.
 
+### Alternative worker adapter comparison decisions (issue #84)
+
+- **adapter + keep available** — Codex CLI is the first non-Pi challenger behind `WorkerAdapter`. It is selected before mini-SWE/Claude for this comparison because its headless `codex exec` shape has lower repository install friction for pi-next than embedding a Python harness and can expose JSONL events/results for bounded telemetry. The adapter invokes exactly one already-authorized `cwd`, forces unattended approval (`never`), refuses `danger-full-access`, uses `read-only` or `workspace-write` sandbox modes only, scrubs GitHub/Git transport authority from the child environment, and maps JSONL usage/activity into the existing canary result schema. It does not claim/lease/promote/close work and remains an explicit eval adapter (`PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter codex-cli ...`).
+- **reject for now** — promoting Codex CLI to the default worker. The checked-in Pi baseline remains 6/6 verified on the fixture-format-v1 corpus with 48,062 total tokens, $0.274461 total cost, and 96,176 ms total wall time (`docs/evaluation/pi-worker-baseline.initial.json`). No default-worker change is made without a committed credentialed Codex report showing materially better verified-completion-per-cost/reliability on the identical corpus.
+- **defer pending maturity/install/API improvement** — mini-SWE-agent remains conceptually attractive for its small Agent/Environment/Model seam, but issue #84 does not force Python/package installation merely to fill a matrix. Revisit if installation and embedding can be made as frictionless as the CLI adapter.
+- **defer pending explicit evaluation** — Claude Agent SDK/Claude Code has useful structured headless execution/cancellation patterns, but adding a second SDK dependency and credential path is deferred until Codex CLI evidence either fails to challenge Pi or exposes gaps Claude can test.
+- **adopt-pattern** — useful Codex mechanisms harvested independently of the default decision: JSONL event normalization, explicit CLI sandbox/approval flags, model/harness version recording in eval reports, and environment scrubbing that removes lifecycle/GitHub authority while preserving model-provider credentials.
+
 The table is intentionally revisitable. New useful features discovered in mature frameworks should be added here before implementation so they are consciously adopted or rejected rather than rediscovered ad hoc.
 
 ### Worker context minimization decisions (issue #82)
@@ -218,8 +226,8 @@ A fixture contains a known repository starting state plus an authoritative task 
 Initial worker matrix:
 
 - Pi: production/default baseline;
-- mini-SWE-agent: first independent experimental adapter;
-- Codex: later challenger if a small SDK adapter preserves the kernel contract;
+- Codex CLI: first issue-#84 independent experimental adapter, available as an explicit credential-gated challenger;
+- mini-SWE-agent: deferred until installation/embedding friction is acceptable;
 - Claude: later challenger under the same condition.
 
 The initial canary corpus lives in the worker-evaluation fixture format (`WORKER_CANARY_FIXTURE_FORMAT_VERSION = 1`) and currently covers localized bug fix, behavior change with tests, small multi-file refactor, repository inspection with targeted change, failure diagnosis/repair, and repository-contract adherence for generated files. Run it only when credentials/quota are explicitly available:
@@ -227,6 +235,7 @@ The initial canary corpus lives in the worker-evaluation fixture format (`WORKER
 ```sh
 PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi
 PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter pi --smoke
+PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter codex-cli --model <model> --codex-version <codex --version>
 ```
 
 Primary metrics are verified acceptance pass rate, tokens/cost per verified completion, wall time per verified completion, retries/escalations, turn/command count, regressions introduced, context growth/cache efficiency, and pi-next intervention/recovery required.

@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { PiWorkerAdapter } from "../src/evaluation/pi-worker-adapter.ts";
+import { CodexCliWorkerAdapter } from "../src/evaluation/codex-cli-worker-adapter.ts";
 import { type ContextStrategyId } from "../src/evaluation/context-strategies.ts";
 import { runWorkerCanaryCorpus, workerCanaryFixtures } from "../src/evaluation/worker-canaries.ts";
 import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter.ts";
@@ -17,6 +18,8 @@ const adapterName = argValue("--adapter") ?? "pi";
 const smoke = process.argv.includes("--smoke");
 const output = argValue("--output");
 const model = argValue("--model");
+const codexCommand = argValue("--codex-command");
+const codexVersion = argValue("--codex-version") ?? process.env.PI_NEXT_CODEX_CLI_VERSION;
 const contextStrategy = (argValue("--context-strategy") ?? "default") as ContextStrategyId;
 const knownContextStrategies = new Set<string>(["default", "minimal", "no-controller-context", "repo-map", "selective-skills", "resolver", "expanded-skill-registry", "verification-discipline"]);
 const allowLlm = process.env.PI_NEXT_EVAL_ALLOW_LLM === "1" || process.env.PI_NEXT_WORKER_EVAL_ALLOW_LLM === "1";
@@ -26,8 +29,8 @@ if (!knownContextStrategies.has(contextStrategy)) {
   process.exit(2);
 }
 
-if (adapterName === "pi" && !allowLlm) {
-  console.error("Refusing to run real Pi worker eval without PI_NEXT_EVAL_ALLOW_LLM=1. Normal npm test remains zero-LLM.");
+if ((adapterName === "pi" || adapterName === "codex" || adapterName === "codex-cli") && !allowLlm) {
+  console.error(`Refusing to run real ${adapterName} worker eval without PI_NEXT_EVAL_ALLOW_LLM=1. Normal npm test remains zero-LLM.`);
   process.exit(2);
 }
 
@@ -49,9 +52,11 @@ const scriptedSolutions = new Map<string, any>([
 ]);
 const adapter = adapterName === "pi"
   ? new PiWorkerAdapter({ model })
-  : adapterName === "scripted"
-    ? new ScriptedWorkerAdapter(fixtures.map((fixture) => ({ name: fixture.id, behavior: "success" as const, ...(scriptedSolutions.get(fixture.id) ?? {}) })))
-    : undefined;
+  : adapterName === "codex" || adapterName === "codex-cli"
+    ? new CodexCliWorkerAdapter({ command: codexCommand, model, harnessVersion: codexVersion })
+    : adapterName === "scripted"
+      ? new ScriptedWorkerAdapter(fixtures.map((fixture) => ({ name: fixture.id, behavior: "success" as const, ...(scriptedSolutions.get(fixture.id) ?? {}) })))
+      : undefined;
 
 if (!adapter) {
   console.error(`Unknown worker eval adapter: ${adapterName}`);

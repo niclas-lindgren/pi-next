@@ -17,8 +17,8 @@ The adapter does **not** discover/claim work, select another workspace, close au
 Initial adapter policy:
 
 1. Pi remains the production/default adapter.
-2. mini-SWE-agent is the first experimental implementation adapter because it provides an independent, deliberately small harness comparison.
-3. Codex and Claude adapters are later evaluation candidates when a small adapter can preserve the same contract.
+2. Codex CLI is available as the first issue-#84 non-Pi eval challenger because its headless CLI can be wrapped without giving it lifecycle authority.
+3. mini-SWE-agent and Claude remain deferred evaluation candidates when their installation/API friction justifies another comparison.
 4. No adaptive routing is introduced until independent evaluation data exists.
 5. A default-worker change requires measured improvement in verified completion/cost/latency without weakening kernel control.
 

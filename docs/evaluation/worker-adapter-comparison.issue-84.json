@@ -1,0 +1,64 @@
+{
+  "issue": 84,
+  "fixtureFormatVersion": 1,
+  "commonHarness": "pi-next-worker-eval",
+  "identicalFixtures": true,
+  "baselineReport": "docs/evaluation/pi-worker-baseline.initial.json",
+  "baselineSummary": {
+    "adapter": { "id": "pi", "version": "1", "model": "openai-codex/gpt-5.5" },
+    "fixtureCount": 6,
+    "verifiedCompletions": 6,
+    "passRate": 1,
+    "totalWallTimeMs": 96176,
+    "totalTokens": 48062,
+    "totalCost": 0.274461,
+    "tokensPerVerifiedCompletion": 8010.333333333333,
+    "costPerVerifiedCompletion": 0.0457435,
+    "totalRetries": 0,
+    "humanInterventionRequired": false
+  },
+  "challengers": [
+    {
+      "adapter": { "id": "codex-cli", "version": "1" },
+      "harness": {
+        "name": "Codex CLI",
+        "mode": "codex exec --json",
+        "versionRecording": "operator supplies --codex-version or PI_NEXT_CODEX_CLI_VERSION in credentialed reports"
+      },
+      "decision": "adapter + keep available",
+      "defaultWorkerChange": false,
+      "integrationRuntimeComplexity": {
+        "runtimeDependency": "external Codex CLI on PATH or --codex-command; no npm dependency added",
+        "credentialPath": "Codex CLI/provider credentials managed outside pi-next; GitHub/Git authority is scrubbed from worker environment",
+        "operationalFriction": "lower than embedding mini-SWE Python harness; higher than built-in Pi because operators must install and version-record the CLI"
+      },
+      "benchmarkCommand": "PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter codex-cli --model <model> --codex-version <codex --version> --output docs/evaluation/codex-cli-worker-baseline.issue-84.json",
+      "deterministicEvidence": {
+        "test": "test/codex-cli-worker-adapter.test.ts",
+        "coverage": [
+          "WorkerAdapter invocation on the same independently graded canary seam",
+          "unattended approval and sandbox flags",
+          "GitHub/Git transport authority scrubbing",
+          "JSONL token/cost/model/activity normalization",
+          "no lifecycle authority APIs in the adapter"
+        ]
+      },
+      "credentialedCorpusReport": null,
+      "credentialedCorpusStatus": "not checked in by this change; do not promote without a real report on the identical six-fixture corpus",
+      "metricsRequiredForPromotion": [
+        "verified completion rate",
+        "tokens and cost per verified completion",
+        "wall time",
+        "retries/repair requirement",
+        "human intervention",
+        "tool/turn churn",
+        "integration/runtime complexity",
+        "context transparency/control",
+        "provider/model portability",
+        "failure diagnosability"
+      ]
+    }
+  ],
+  "selectedDefault": "pi",
+  "selectionRationale": "Pi remains selectable and default because the only committed full-corpus credentialed evidence is the Pi baseline. Codex CLI is available for apples-to-apples credentialed comparison but is not promoted without material verified-completion-per-cost/reliability evidence."
+}

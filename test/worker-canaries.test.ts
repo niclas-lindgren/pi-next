@@ -89,6 +89,18 @@ test("checked-in Pi baseline records a real graded corpus run", () => {
   }
 });
 
+test("issue 84 worker comparison keeps Pi default until challenger evidence is material", () => {
+  const comparison = JSON.parse(readFileSync("docs/evaluation/worker-adapter-comparison.issue-84.json", "utf8"));
+  assert.equal(comparison.issue, 84);
+  assert.equal(comparison.fixtureFormatVersion, WORKER_CANARY_FIXTURE_FORMAT_VERSION);
+  assert.equal(comparison.baselineSummary?.adapter?.id, "pi");
+  assert.equal(comparison.baselineSummary?.fixtureCount, workerCanaryFixtures.length);
+  assert.equal(comparison.challengers?.[0]?.adapter?.id, "codex-cli");
+  assert.equal(comparison.challengers?.[0]?.decision, "adapter + keep available");
+  assert.equal(comparison.challengers?.[0]?.defaultWorkerChange, false);
+  assert.equal(comparison.selectedDefault, "pi");
+});
+
 test("context strategies keep unavailable payload out of worker prompt and telemetry", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-next-context-test-"));
   try {
