@@ -20,6 +20,7 @@ import { PiWorkerAdapter, issueWorkerRunnerFromAdapter, type PiWorkerCompatibleA
 import type { IssueWorkerRunner, IssueWorkerRuntime } from "./util-core.ts";
 import { loopNow, loopStateFile, emptyLoopMetrics, MAX_STEPS, type LoopState } from "./loop-state.ts";
 import { writeJsonAtomic } from "./util.ts";
+import { recordSchedulerSkipState } from "./production-scheduler-state.ts";
 import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
 import { sessionIdentity } from "./live-ctx.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
@@ -184,7 +185,7 @@ export async function runProductionLifecycleScheduler(
   // Fresh-owner races lost after selection are excluded for the rest of this
   // scheduler run, mirroring the legacy loop's scheduler-skip bookkeeping
   // (#146): a race is a local candidate skip, never a global stop.
-  const raceExcluded: number[] = [];
+  const raceSkips: NonNullable<LoopState["schedulerSkips"]> = [];
   const result = await runLifecycleScheduler({
     cwd: options.cwd,
     entry: options.entry,
@@ -202,7 +203,7 @@ export async function runProductionLifecycleScheduler(
         leaseAuthority,
         completedIssues: completed.filter((item) => item.disposition === "pass" || item.disposition === "already-satisfied").map((item) => item.issueNumber),
         deferredIssues: completed.filter((item) => item.disposition !== "pass" && item.disposition !== "already-satisfied").map((item) => item.issueNumber),
-        schedulerExcludedIssues: raceExcluded,
+        schedulerExcludedIssues: raceSkips.map((skip) => skip.issueNumber),
       });
       return shortlist.candidateIssueNumber ? { issueNumber: shortlist.candidateIssueNumber } : undefined;
     },
@@ -240,7 +241,7 @@ export async function runProductionLifecycleScheduler(
       return { release };
     },
     onClaimConflict: (selection) => {
-      raceExcluded.push(selection.issueNumber);
+      recordSchedulerSkipState(options.cwd, runId, selection.issueNumber, raceSkips);
       recordLifecycleEvent(options.cwd, {
         event: "scheduler_skip",
         issueNumber: selection.issueNumber,
