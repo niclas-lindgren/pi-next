@@ -16,8 +16,8 @@ worker adapter
   executes one bounded role in one already-authorized workspace
         |
         +-- Pi (default/current)
-        +-- mini-SWE-agent (evaluation candidate)
-        +-- Codex (evaluation candidate)
+        +-- Codex CLI (explicit evaluation candidate)
+        +-- mini-SWE-agent / Claude (deferred evaluation candidates)
         +-- other explicit adapters
 ```
 
@@ -90,9 +90,9 @@ Pi-specific parent-session behavior is an implementation detail of the Pi adapte
 
 Alternative adapters are opt-in and must be added behind the same contract. They must first pass deterministic protocol/integration tests and then the independent agent-evaluation corpus.
 
-The first experimental alternative should be mini-SWE-agent because its small Agent/Environment/Model separation, simple subprocess environment, and low prompt/tool overhead make it a useful independent comparison without importing a second orchestration platform.
+Codex CLI is the first issue-#84 challenger adapter. It wraps one `codex exec` invocation in an already-authorized workspace, forces unattended operation, refuses authority-expanding sandbox/approval options, and normalizes JSONL usage/activity into the same worker result schema. It is selected explicitly with `PI_NEXT_EVAL_ALLOW_LLM=1 npm run eval:worker -- --adapter codex-cli`; it is not a production default.
 
-Codex and Claude adapters may follow if their SDKs can preserve the same bounded kernel contract. Native harness/model optimization is a legitimate reason to outperform Pi, but not a reason to move lifecycle authority into the harness.
+mini-SWE-agent and Claude may follow if their installation/API surfaces can preserve the same bounded kernel contract with acceptable operational friction. Native harness/model optimization is a legitimate reason to outperform Pi, but not a reason to move lifecycle authority into the harness.
 
 ## Selection policy
 
