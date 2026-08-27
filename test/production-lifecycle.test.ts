@@ -11,6 +11,7 @@ import { loopStateFile, readLoopState, emptyLoopMetrics, type LoopState } from "
 import { writeJsonAtomic } from "../extensions/pi-next/util.ts";
 import { renderLoopStatus } from "../extensions/pi-next/loop-status.ts";
 import { InMemoryWorkAuthority, type AuthorityWorkItem } from "../src/coordination/work-authority.ts";
+import { createIssueLease } from "../src/coordination/issue-authority.ts";
 import { DEFAULT_PI_NEXT_CONFIG, type PiNextConfig } from "../src/coordination/config.ts";
 import type { BootstrapReport } from "../src/bootstrap/types.ts";
 import type { IssueLease, IssueLeaseAuthority } from "../src/coordination/issue-leases.ts";
@@ -81,7 +82,7 @@ const leaseAuthority = {
  * genuine claim race between two concurrent schedulers has exactly one
  * winner. */
 class CasLeaseAuthority implements IssueLeaseAuthority {
-  private readonly leases = new Map<number, IssueLease>();
+  protected readonly leases = new Map<number, IssueLease>();
 
   async read(issueNumber: number): Promise<IssueLease | undefined> {
     return this.leases.get(issueNumber);
@@ -100,6 +101,31 @@ class CasLeaseAuthority implements IssueLeaseAuthority {
   async remove(issueNumber: number, expected: IssueLease): Promise<void> {
     if (this.leases.get(issueNumber) !== expected) throw new Error("compare-and-swap failed");
     this.leases.delete(issueNumber);
+  }
+}
+
+class CreateRaceLeaseAuthority extends CasLeaseAuthority {
+  private raced = false;
+
+  constructor(private readonly raceIssue: number) {
+    super();
+  }
+
+  async create(issueNumber: number, lease: IssueLease): Promise<void> {
+    if (issueNumber === this.raceIssue && !this.raced) {
+      this.raced = true;
+      const now = Date.now();
+      this.leases.set(issueNumber, createIssueLease({
+        issueNumber,
+        agent: "another-agent",
+        runId: "foreign-run",
+        sessionId: "foreign-session",
+        acquiredAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + 60_000).toISOString(),
+      }));
+      throw new Error("compare-and-swap failed");
+    }
+    await super.create(issueNumber, lease);
   }
 }
 
@@ -245,6 +271,37 @@ test("two fresh production auto schedulers racing the same issue: exactly one cl
     assert.equal(second.disposition, "idle");
     // The lease is fully released after the winner's issue settles.
     assert.equal(await sharedLeaseAuthority.read(900), undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("production auto records fresh-owner claim races in canonical loop state before continuing (#73)", async () => {
+  const f = await fixture();
+  try {
+    const authority = new InMemoryWorkAuthority([item(701), item(702)]);
+    const sharedLeaseAuthority = new CreateRaceLeaseAuthority(701);
+    const executed: number[] = [];
+
+    const result = await runProductionLifecycleScheduler({
+      cwd: f.root,
+      entry: "auto",
+      requestedIssues: 1,
+      runId: "prod-auto-race-skip-state",
+    }, { authority, config: f.config, leaseAuthority: sharedLeaseAuthority }, async (options) => {
+      executed.push(options.issueNumber);
+      await authority.close(String(options.issueNumber), "done");
+      return report(options.issueNumber);
+    });
+
+    assert.equal(result.disposition, "budget-yield");
+    assert.deepEqual(executed, [702]);
+    const state = readLoopState(f.root, "prod-auto-race-skip-state");
+    assert.deepEqual(state?.schedulerSkips?.map((skip) => skip.issueNumber), [701]);
+    assert.equal(state?.schedulerSkips?.[0]?.reasonCode, "fresh_owner");
+    assert.equal(state?.issueMetrics.find((metric) => metric.issueNumber === 701)?.disposition, "leased_elsewhere");
+    assert.deepEqual(state?.completedIssues, [702]);
+    assert.equal(state?.remainingIssues, 0);
   } finally {
     await f.cleanup();
   }
