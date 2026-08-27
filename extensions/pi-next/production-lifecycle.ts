@@ -20,7 +20,7 @@ import { PiWorkerAdapter, issueWorkerRunnerFromAdapter, type PiWorkerCompatibleA
 import type { IssueWorkerRunner, IssueWorkerRuntime } from "./util-core.ts";
 import { loopNow, loopStateFile, emptyLoopMetrics, MAX_STEPS, type LoopState } from "./loop-state.ts";
 import { writeJsonAtomic } from "./util.ts";
-import { recordSchedulerSkipState } from "./production-scheduler-state.ts";
+import { recordFreshOwnerSchedulerSkip } from "./production-scheduler-state.ts";
 import { recordPiLifecycleJournal } from "./lifecycle-journal.ts";
 import { sessionIdentity } from "./live-ctx.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
@@ -205,6 +205,9 @@ export async function runProductionLifecycleScheduler(
         deferredIssues: completed.filter((item) => item.disposition !== "pass" && item.disposition !== "already-satisfied").map((item) => item.issueNumber),
         schedulerExcludedIssues: raceSkips.map((skip) => skip.issueNumber),
       });
+      for (const issueNumber of shortlist.leasedElsewhereIssues ?? []) {
+        recordFreshOwnerSchedulerSkip(options.cwd, runId, issueNumber, raceSkips);
+      }
       return shortlist.candidateIssueNumber ? { issueNumber: shortlist.candidateIssueNumber } : undefined;
     },
     // Selection above only reads leases as an optimization; absence there is
@@ -241,14 +244,7 @@ export async function runProductionLifecycleScheduler(
       return { release };
     },
     onClaimConflict: (selection) => {
-      recordSchedulerSkipState(options.cwd, runId, selection.issueNumber, raceSkips);
-      recordLifecycleEvent(options.cwd, {
-        event: "scheduler_skip",
-        issueNumber: selection.issueNumber,
-        runId,
-        outcome: "skip",
-        reasonCode: "fresh_owner",
-      });
+      recordFreshOwnerSchedulerSkip(options.cwd, runId, selection.issueNumber, raceSkips);
     },
     requeryAuthority: async (lifecycleResult) => { await authority.get(String(lifecycleResult.issueNumber)); },
   }, {

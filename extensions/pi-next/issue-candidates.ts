@@ -55,6 +55,8 @@ export interface CandidateShortlist {
   outcome: CandidateShortlistOutcome;
   /** The first candidate in configured priority order, when one exists. */
   candidateIssueNumber?: number;
+  /** Eligible issues skipped by a bounded lease-read preflight because a fresh owner already holds them. */
+  leasedElsewhereIssues?: number[];
   reason?: string;
 }
 
@@ -327,6 +329,7 @@ export async function candidateShortlist(
   const pendingVerificationOpen: number[] = [];
   const deferredOpen: number[] = [];
   const currentRunDeferredOpen: number[] = [];
+  const leasedElsewhere = new Set<number>();
   try {
     report(`Querying ${authority.name} work items`);
     const queriedItems = await bounded(`${authority.name} candidate discovery`, () => authority.listCandidates(config));
@@ -373,7 +376,6 @@ export async function candidateShortlist(
     // Inspect only a small progressive window. A foreign lease is a candidate
     // local skip, but a failed read is an authority failure: absence cannot be
     // inferred from a timeout and no issue may be mutated before the CAS claim.
-    const leasedElsewhere = new Set<number>();
     const readWindow = Math.max(1, Math.trunc(options.leaseReadWindow ?? DEFAULT_LEASE_READ_WINDOW));
     const concurrency = Math.max(1, Math.trunc(options.leaseReadConcurrency ?? DEFAULT_LEASE_READ_CONCURRENCY));
     if (options.leaseAuthority) {
@@ -461,15 +463,24 @@ export async function candidateShortlist(
         .join(", ")}. They remain outstanding requested capacity and are not product failures.`,
     );
   }
+  const leasedElsewhereIssues = [...leasedElsewhere].sort((left, right) => left - right);
+  if (leasedElsewhereIssues.length) {
+    notes.push(
+      `Eligible issues currently leased by another fresh owner omitted from this shortlist: ${leasedElsewhereIssues
+        .map((issue) => `#${issue}`)
+        .join(", ")}. They remain outstanding requested capacity and are not product failures.`,
+    );
+  }
   const note = notes.join("\n");
 
   if (!groups.length) {
-    return { text: note || undefined, exhausted: true, outcome: "exhausted" };
+    return { text: note || undefined, exhausted: true, outcome: "exhausted", leasedElsewhereIssues };
   }
   return {
     text: [groups.join("\n\n"), note].filter(Boolean).join("\n\n"),
     exhausted: false,
     outcome: "candidate",
     candidateIssueNumber: firstCandidateIssueNumber,
+    leasedElsewhereIssues,
   };
 }

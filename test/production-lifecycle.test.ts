@@ -276,6 +276,46 @@ test("two fresh production auto schedulers racing the same issue: exactly one cl
   }
 });
 
+test("production auto records fresh leases found during discovery in canonical loop state before continuing (#73)", async () => {
+  const f = await fixture();
+  try {
+    const authority = new InMemoryWorkAuthority([item(711), item(712)]);
+    const sharedLeaseAuthority = new CasLeaseAuthority();
+    const now = Date.now();
+    await sharedLeaseAuthority.create(711, createIssueLease({
+      issueNumber: 711,
+      agent: "another-agent",
+      runId: "foreign-run",
+      sessionId: "foreign-session",
+      acquiredAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 60_000).toISOString(),
+    }));
+    const executed: number[] = [];
+
+    const result = await runProductionLifecycleScheduler({
+      cwd: f.root,
+      entry: "auto",
+      requestedIssues: 1,
+      runId: "prod-auto-discovery-skip-state",
+    }, { authority, config: f.config, leaseAuthority: sharedLeaseAuthority }, async (options) => {
+      executed.push(options.issueNumber);
+      await authority.close(String(options.issueNumber), "done");
+      return report(options.issueNumber);
+    });
+
+    assert.equal(result.disposition, "budget-yield");
+    assert.deepEqual(executed, [712]);
+    const state = readLoopState(f.root, "prod-auto-discovery-skip-state");
+    assert.deepEqual(state?.schedulerSkips?.map((skip) => skip.issueNumber), [711]);
+    assert.equal(state?.schedulerSkips?.[0]?.reasonCode, "fresh_owner");
+    assert.equal(state?.issueMetrics.find((metric) => metric.issueNumber === 711)?.disposition, "leased_elsewhere");
+    assert.deepEqual(state?.completedIssues, [712]);
+    assert.equal(state?.remainingIssues, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("production auto records fresh-owner claim races in canonical loop state before continuing (#73)", async () => {
   const f = await fixture();
   try {
