@@ -6,6 +6,7 @@ import { PiWorkerAdapter } from "../src/evaluation/pi-worker-adapter.ts";
 import { type ContextStrategyId } from "../src/evaluation/context-strategies.ts";
 import { runWorkerCanaryCorpus, workerCanaryFixtures } from "../src/evaluation/worker-canaries.ts";
 import { ScriptedWorkerAdapter } from "../src/evaluation/scripted-worker-adapter.ts";
+import { formatCodexProbe, probeCodexUsageLimit } from "./codex-limit.ts";
 
 function argValue(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -58,6 +59,14 @@ if (!adapter) {
 }
 
 const report = await runWorkerCanaryCorpus(adapter, fixtures, { contextStrategy });
+// When the provider answered with a usage-limit error, probe the Codex
+// endpoint deterministically and print the exact reset windows so the run's
+// operator knows when the credentialed comparison can be retried (#172).
+const usageLimited = report.results.some((result) => /usage limit|usage_limit/i.test(result.failureSummary ?? ""));
+if (usageLimited) {
+  const probe = await probeCodexUsageLimit();
+  console.error(formatCodexProbe(probe));
+}
 const json = `${JSON.stringify(report, null, 2)}\n`;
 if (output) {
   const path = resolve(output);

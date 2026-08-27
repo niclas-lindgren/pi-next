@@ -40,6 +40,8 @@ export interface CanaryRunResult {
   toolCalls?: number;
   retries: number;
   humanInterventionRequired: boolean;
+  /** Adapter failure summary when the worker did not complete (e.g. provider usage limit). */
+  failureSummary?: string;
 }
 
 export interface CanaryAggregateReport {
@@ -208,6 +210,7 @@ export async function runWorkerCanaryFixture(adapter: WorkerAdapter, fixture: Wo
       toolCalls: worker.telemetry.activity?.toolCalls,
       retries: 0,
       humanInterventionRequired: false,
+      ...(worker.failure?.summary ? { failureSummary: worker.failure.summary } : {}),
     };
   } finally {
     await rm(cwd, { recursive: true, force: true });
