@@ -91,7 +91,7 @@ function createWorkerShellEnvironmentRoot(extraEnv: Record<string, string>, base
   mkdirSync(join(root, "home"), { recursive: true });
   mkdirSync(join(root, "home", "config"), { recursive: true });
   mkdirSync(join(root, "home", "cache"), { recursive: true });
-  const env: NodeJS.ProcessEnv = {};
+  const env: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value === undefined) continue;
     if (isWorkerShellProtectedEnvName(key)) continue;
@@ -119,7 +119,7 @@ function createWorkerShellEnvironmentRoot(extraEnv: Record<string, string>, base
   env.SSH_ASKPASS = "false";
   env.GCM_INTERACTIVE = "never";
   env.GIT_ALLOW_PROTOCOL = "";
-  return env;
+  return env as NodeJS.ProcessEnv;
 }
 
 export function createWorkerShellEnvironment(extraEnv: Record<string, string> = {}, baseEnv: NodeJS.ProcessEnv = process.env, options: WorkerShellEnvironmentOptions = {}): WorkerShellEnvironment {
