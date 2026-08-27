@@ -93,8 +93,12 @@ OAuth bearer + `chatgpt-account-id`):
   - `resets_at` (epoch): 1788274216 = 2026-09-01T14:50:16Z
 
 The eval re-run gate is the **primary** window: it resets at the timestamp above, after
-which the 5-hour Codex budget is available again. Re-probe anytime with the same request
-if the timestamps go stale; the same headers are returned.
+which the 5-hour Codex budget is available again. This is now deterministic: run
+`npm run codex:limit` any time the provider answers with a usage-limit error — it
+re-issues one minimal authenticated request and prints the exact primary/secondary
+reset windows (exit code 2 while limited, 0 when usable; `--json` for machine
+consumption). The eval harness (`scripts/eval-worker.ts`) also probes and prints this
+automatically whenever a run's worker failure summary reports a usage limit.
 
 ## What a follow-up worker must do to close
 

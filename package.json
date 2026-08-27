@@ -58,6 +58,7 @@
     "eval:replay": "tsx scripts/eval-replay.ts",
     "eval:worker": "tsx scripts/eval-worker.ts",
     "eval:lifecycle-canary": "tsx scripts/eval-lifecycle-canary.ts",
+    "codex:limit": "tsx scripts/codex-limit.ts",
     "qualify:tier1": "node scripts/release-qualification.mjs --tier=1",
     "qualify:tier2": "node scripts/release-qualification.mjs --tier=2",
     "qualify:tier3": "node scripts/release-qualification.mjs --tier=3",
