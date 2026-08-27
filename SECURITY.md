@@ -15,12 +15,20 @@ You must trust:
   adapter;
 - the GitHub CLI/token or other authority credentials available to the host.
 
-Pi-next does not provide an OS sandbox. Canonical worktrees isolate normal
-issue-worker working directories and lease/CAS checks prevent ordinary
-coordination races, but a worker process can still read credentials available
-to its OS user, execute repository code, access configured remotes, and affect
-anything permitted by the host. Read-only/reviewer conventions are not a
-substitute for an OS sandbox unless the host explicitly supplies one.
+Pi-next's worker adapter exposes positive capabilities rather than the host's
+raw shell: mutable Pi workers use an explicit tool allowlist, guarded file
+mutation paths, hook-disabled worker Git mutations, and sandboxed detached
+build/test launchers where the host supports the configured OS sandbox.
+Canonical worktrees isolate normal issue-worker working directories and
+lease/CAS checks prevent ordinary coordination races.
+
+Residual limitation: these controls are not a full same-user OS confinement
+proof for arbitrary future tools or for controller-owned checks that
+intentionally execute candidate code outside the worker sandbox. A worker
+process may still read repository-visible data and anything else exposed by an
+allowed tool. Read-only/reviewer conventions are not a substitute for an OS
+sandbox unless the host explicitly supplies one, and unsupported sandboxed
+launcher paths must fail closed rather than run unsandboxed.
 
 Use a disposable repository for initial testing. Use a dedicated GitHub token
 with the smallest practical repository permissions, avoid exposing production

@@ -43,6 +43,19 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   "describe",
 ]);
 
+const DISABLED_GIT_HOOKS_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
+const SAFE_GIT_INSPECTION_ARGS = [
+  "--no-pager",
+  "-c",
+  `core.hooksPath=${DISABLED_GIT_HOOKS_PATH}`,
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "diff.external=",
+  "-c",
+  "interactive.diffFilter=",
+];
+
 const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "corepack"]);
 const TEST_AND_BUILD_TOOLS = new Set([
   "make",
@@ -188,15 +201,26 @@ function allowsFindCommand(args: string[]): boolean {
 }
 
 function gitSubcommand(args: string[]): string | undefined {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === "-C" || arg === "-c" || arg === "--git-dir" || arg === "--work-tree") {
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith("--git-dir=") || arg.startsWith("--work-tree=") || arg.startsWith("-c")) continue;
+  for (const arg of args) {
     if (arg.startsWith("-")) continue;
     return arg.toLowerCase();
+  }
+  return undefined;
+}
+
+function unsafeGitInspectionOption(args: string[]): string | undefined {
+  for (const arg of args) {
+    const normalized = arg.toLowerCase();
+    if (
+      normalized === "-c" || normalized.startsWith("-c") ||
+      normalized === "--config-env" || normalized.startsWith("--config-env=") ||
+      normalized === "--git-dir" || normalized.startsWith("--git-dir=") ||
+      normalized === "--work-tree" || normalized.startsWith("--work-tree=") ||
+      normalized === "--exec-path" || normalized.startsWith("--exec-path=") ||
+      normalized === "-p" || normalized === "--paginate"
+    ) {
+      return arg;
+    }
   }
   return undefined;
 }
@@ -229,11 +253,13 @@ export function workerShellCommandDecision(command: string): WorkerShellCommandD
   if (base === "gh") return { allowed: false, reason: "GitHub authority is controller-owned" };
   if (UNSAFE_LAUNCHERS.has(base)) return { allowed: false, reason: `${base} can bypass worker authority controls` };
   if (base === "git") {
+    const unsafeOption = unsafeGitInspectionOption(args);
+    if (unsafeOption) return { allowed: false, reason: `git inspection option is outside the worker allowlist: ${unsafeOption}` };
     const subcommand = gitSubcommand(args);
     if (!subcommand || !READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) {
       return { allowed: false, reason: "git is limited to read-only inspection subcommands" };
     }
-    return { allowed: true, command: executable, args, env, workspaceMode: "current" };
+    return { allowed: true, command: executable, args: [...SAFE_GIT_INSPECTION_ARGS, ...args], env, workspaceMode: "current" };
   }
   if (base === "rm") return { allowed: false, reason: "destructive file removal is not available through worker shell" };
   if (base === "find" && !allowsFindCommand(args)) return { allowed: false, reason: "find execution/deletion actions are refused" };

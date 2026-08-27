@@ -661,6 +661,7 @@ export async function runIssueBoundaryMaintenance(
     const result = await worker(
       ctx.cwd,
       buildLoopMaintenancePrompt(ctx.cwd, decision),
+      { issueNumber: decision.issueNumber, phase: "maintenance" },
     );
     if (!result.ok) {
       throw new Error(

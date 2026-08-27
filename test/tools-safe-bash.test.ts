@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
 import { forbiddenWorkerCommand } from "../src/coordination/forbidden-worker-command.ts";
 import { createWorkerShellExecution, workerShellCommandDecision } from "../src/coordination/worker-shell-policy.ts";
+import { MUTABLE_ISSUE_WORKER_TOOLS } from "../extensions/pi-next/util-core.ts";
+import { registerGitTool } from "../extensions/pi-next/tools-git.ts";
 import { registerSafeBashTool } from "../extensions/pi-next/tools-safe-bash.ts";
+import { registerWorkerCapabilityGuards, workerToolPathDecision } from "../extensions/pi-next/worker-capability-guard.ts";
 
 const execFilePromise = promisify(execFile);
 const exec: typeof execFilePromise = (async (file: string, args?: readonly string[], options?: Parameters<typeof execFilePromise>[2]) => execFilePromise(file, args ?? [], {
@@ -24,6 +28,15 @@ type SafeBashExecute = (
   ctx: { cwd: string },
 ) => Promise<{ content: Array<{ type: "text"; text: string }>; details: { refused?: boolean; exitCode?: number | null } }>;
 
+type ToolCallHandler = (event: { toolName: string; input: Record<string, unknown> }, ctx: { cwd: string }) => Promise<{ block?: boolean; reason?: string; terminate?: boolean } | undefined>;
+type PiNextGitExecute = (
+  id: string,
+  params: { action: "checkpoint"; issueNumber: number; runId: string; paths: string[]; message: string } | { action: "status" },
+  signal: AbortSignal | undefined,
+  update: () => void,
+  ctx: { cwd: string },
+) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: Record<string, unknown> }>;
+
 function captureSafeBashTool(): SafeBashExecute | undefined {
   let execute: SafeBashExecute | undefined;
   registerSafeBashTool({
@@ -34,9 +47,64 @@ function captureSafeBashTool(): SafeBashExecute | undefined {
   return execute;
 }
 
+function capturePiNextGitTool(): PiNextGitExecute | undefined {
+  let execute: PiNextGitExecute | undefined;
+  registerGitTool({
+    registerTool(tool: { name: string; execute: PiNextGitExecute }) {
+      if (tool.name === "pi_next_git") execute = tool.execute;
+    },
+  } as never);
+  return execute;
+}
+
+function captureWorkerCapabilityGuard(): ToolCallHandler | undefined {
+  let handler: ToolCallHandler | undefined;
+  registerWorkerCapabilityGuards({
+    on(event: string, callback: ToolCallHandler) {
+      if (event === "tool_call") handler = callback;
+    },
+  } as never);
+  return handler;
+}
+
+test("mutable issue worker launch uses an explicit positive Pi tool allowlist", () => {
+  const tools = MUTABLE_ISSUE_WORKER_TOOLS.split(",");
+  assert.ok(tools.includes("safe_bash"));
+  assert.ok(tools.includes("pi_next_git"));
+  assert.ok(tools.includes("write"));
+  assert.equal(tools.includes("bash"), false);
+  assert.equal(new Set(tools).size, tools.length);
+});
+
+test("worker capability guards block built-in mutation tools from forged authority paths", async () => {
+  const priorWorkerFlag = process.env.PI_NEXT_ISSUE_WORKER;
+  const root = await mkdtemp(join(tmpdir(), "pi-next-worker-guard-"));
+  try {
+    process.env.PI_NEXT_ISSUE_WORKER = "1";
+    const guard = captureWorkerCapabilityGuard();
+    assert.ok(guard);
+
+    assert.equal(workerToolPathDecision(root, "src/index.ts").allowed, true);
+    assert.equal(workerToolPathDecision(root, ".pi/runtime/pi-next-loop-maintenance-result.json", { role: "maintenance" }).allowed, true);
+    for (const target of [".git/config", join(root, ".git", "hooks", "pre-push"), "../outside", ".pi/runtime/pi-next-loop-result.json"]) {
+      assert.equal(workerToolPathDecision(root, target).allowed, false, target);
+      const result = await guard({ toolName: "write", input: { path: target, content: "x" } }, { cwd: root });
+      assert.equal(result?.block, true, target);
+    }
+    assert.equal((await guard({ toolName: "bash", input: { command: "git push origin main" } }, { cwd: root }))?.block, true);
+    assert.equal(await guard({ toolName: "write", input: { path: "src/index.ts", content: "x" } }, { cwd: root }), undefined);
+  } finally {
+    if (priorWorkerFlag === undefined) delete process.env.PI_NEXT_ISSUE_WORKER;
+    else process.env.PI_NEXT_ISSUE_WORKER = priorWorkerFlag;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("forbiddenWorkerCommand refuses production worker merge/close/push/gh-issue commands", () => {
   for (const command of [
     "git push origin main",
+    "git -c core.hooksPath=.git/hooks status",
+    "git --git-dir=/tmp/repo/.git status",
     "git merge feature",
     "git checkout main",
     "git branch -D feature",
@@ -108,6 +176,53 @@ async function gitFixture() {
   await git(work, ["commit", "-am", "candidate"]);
   return { root, remote, work, baselineRemoteMain, baselineLocalMain, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
+
+test("pi_next_git worker checkpoint disables hooks that could bypass promotion request authority", async () => {
+  const priorWorkerFlag = process.env.PI_NEXT_ISSUE_WORKER;
+  const priorPath = process.env.PATH;
+  const f = await gitFixture();
+  try {
+    process.env.PI_NEXT_ISSUE_WORKER = "1";
+    const execute = capturePiNextGitTool();
+    assert.ok(execute);
+    const hookLog = join(f.root, "hook-ran");
+    const closeLog = join(f.root, "closed-issue");
+    const binDir = join(f.root, "bin");
+    await mkdir(binDir, { recursive: true });
+    const fakeGh = join(binDir, "gh");
+    await writeFile(fakeGh, `#!/bin/sh\necho "$*" > ${JSON.stringify(closeLog)}\n`);
+    await chmod(fakeGh, 0o755);
+    process.env.PATH = `${binDir}${delimiter}${priorPath ?? ""}`;
+    const hooksDir = join(f.work, ".git", "hooks");
+    await mkdir(hooksDir, { recursive: true });
+    for (const hook of ["pre-commit", "pre-push"]) {
+      const path = join(hooksDir, hook);
+      await writeFile(path, `#!/bin/sh\necho ${hook} > ${JSON.stringify(hookLog)}\ngit update-ref refs/heads/main HEAD\ngh issue close 162\n`);
+      await chmod(path, 0o755);
+    }
+    await writeFile(join(f.work, "README.md"), "candidate via guarded checkpoint\n");
+
+    const result = await execute("checkpoint", {
+      action: "checkpoint",
+      issueNumber: 162,
+      runId: "run-guarded-git",
+      paths: ["README.md"],
+      message: "test: guarded checkpoint",
+    }, new AbortController().signal, () => {}, { cwd: f.work });
+
+    assert.equal(result.details?.committed, true);
+    assert.equal(await git(f.work, ["rev-parse", "refs/heads/main"]), f.baselineLocalMain);
+    assert.equal(await git(f.work, ["ls-remote", "origin", "refs/heads/main"]), f.baselineRemoteMain);
+    assert.equal(existsSync(hookLog), false);
+    assert.equal(existsSync(closeLog), false);
+  } finally {
+    if (priorWorkerFlag === undefined) delete process.env.PI_NEXT_ISSUE_WORKER;
+    else process.env.PI_NEXT_ISSUE_WORKER = priorWorkerFlag;
+    if (priorPath === undefined) delete process.env.PATH;
+    else process.env.PATH = priorPath;
+    await f.cleanup();
+  }
+});
 
 test("production safe_bash refuses wrapper/interpreter authority bypasses before protected git state changes", async () => {
   const priorWorkerFlag = process.env.PI_NEXT_ISSUE_WORKER;
