@@ -28,6 +28,14 @@ The local trust-boundary overlay is kept outside the managed vendor directory.
 Upstream files stay unchanged, while local adaptations remain visible in a
 normal Git diff and survive synchronization.
 
+Reviewed availability is not enough for unattended execution. Every automatic or
+mandatory skill must also declare role compatibility: supported worker roles,
+capability profile, whether it may ask the user, required human checkpoints,
+sub-agent spawning, process-owner/router behavior, mutation scope, required
+kernel-bound inputs, companion-skill dependencies, unattended compatibility, and
+adaptation/provenance decision. The resolver validates this metadata
+mechanically before a worker receives any skill body.
+
 Consumer-owned skills may also participate in routing, but they remain outside
 the managed vendor destination and must be explicitly configured/registered.
 For example, a consumer may choose an output/presentation discipline such as
@@ -167,16 +175,20 @@ This is implemented as a versioned, validated `skills` section of
 }
 ```
 
-A missing section uses the built-in default policy, which mirrors the historical
-role/risk selection so default dispatch behavior is preserved. Rules may match on
-lifecycle role, risk class, a bounded case-insensitive `taskPattern`, and
-repository `paths`. Every referenced skill must exist in the reviewed registry;
-unknown skills, unsupported versions, invalid patterns, process-owner skills
-routed automatically, and competing methodologies fail configuration validation
-rather than reaching a worker. The verification-before-completion discipline is a
-package-owned skill adapted from the Superpowers concept; it is available and can
-be configured mandatory, but pi-next never enables a Superpowers workflow
-bootstrap.
+A missing section uses the built-in default policy. Review dispatch now routes
+role-specific adaptations: `review-spec` gets `code-review-spec`, and
+`review-standards` gets `code-review-standards`. The full upstream
+`code-review` orchestrator remains available only as reviewed provenance and is
+marked process-owner/incompatible for automatic or mandatory routing. Rules may
+match on lifecycle role, risk class, a bounded case-insensitive `taskPattern`,
+and repository `paths`. Every referenced skill must exist in the reviewed
+registry; unknown skills, unsupported versions, invalid patterns, unsupported
+roles/capabilities, missing compatibility metadata, process-owner skills routed
+automatically, nested-worker declarations without a kernel budget, and competing
+methodologies fail configuration validation or dispatch before reaching a
+worker. The verification-before-completion discipline is a package-owned skill
+adapted from the Superpowers concept; it is available and can be configured
+mandatory, but pi-next never enables a Superpowers workflow bootstrap.
 
 ## Lazy loading and conflicts
 
@@ -194,6 +206,12 @@ once, with precedence mandatory > automatic > explicit, so a worker never
 receives competing instructions. Repeating the same skill id under different
 role/risk conditions is not a conflict.
 
+The TDD adapter preserves red → green behavioral vertical slices but replaces
+upstream interactive seam confirmation with the dispatch-bound `testingSeam`.
+When an unattended TDD dispatch lacks that seam, the worker packet carries a
+typed `MISSING_BOUND_SKILL_INPUT` blocked-result contract instead of waiting for
+a user or inventing a seam.
+
 ## Telemetry and evaluation
 
 Bounded telemetry should record enough to evaluate routing without storing
@@ -201,6 +219,8 @@ prompts or hidden reasoning:
 
 - selected skill identifiers and exact provenance/version;
 - selection source/reason (`mandatory`, rule id, explicit request);
+- compatibility verdict (`compatible` or typed blocked), adaptation kind,
+  mutation scope, missing bound inputs, and nested-worker permission/count;
 - role/task/risk classification used by the resolver;
 - context/token contribution where measurable;
 - verified outcome, retries/escalations, and cost/latency metrics already

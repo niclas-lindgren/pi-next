@@ -13,12 +13,27 @@ import {
   type SkillRegistryEntry,
   type SkillRoutingPolicy,
 } from "../src/coordination/skill-registry.ts";
-import { selectWorkerSkills, type WorkerRole } from "../src/coordination/worker-dispatch.ts";
+import { selectWorkerSkills, type CapabilityProfile, type WorkerRole } from "../src/coordination/worker-dispatch.ts";
 
 const ROLES: WorkerRole[] = [
   "controller", "planning", "implementation", "repair",
   "review-spec", "review-standards", "verification", "maintenance",
 ];
+
+function fixtureCompatibility(role: WorkerRole = "implementation", capability: CapabilityProfile = "mutable-owner"): SkillRegistryEntry["compatibility"] {
+  return {
+    supportedRoles: [role],
+    capabilityProfiles: [capability],
+    mayAskUser: false,
+    requiresHumanCheckpoint: false,
+    maySpawnSubagents: false,
+    processBehavior: "discipline",
+    mutationScope: capability === "read-only-reviewer" ? "none" : "owned-workspace",
+    requiredBoundInputs: [],
+    unattended: "compatible",
+    adaptation: { kind: "pi-next-adapter", provenance: "fixture@pinned", decision: "fixture" },
+  };
+}
 
 test("registry building is deterministic and rejects duplicate ids", () => {
   const a = builtInSkillRegistry();
@@ -45,10 +60,17 @@ test("default resolver matches historical role/risk selection (parity)", () => {
     for (const risk of [undefined, "low", "normal", "high", "critical"] as const) {
       for (const task of [undefined, "implement test regression contract"]) {
         const legacy = selectWorkerSkills(role, { risk, task });
+        const reviewBoundInputs = role === "review-spec"
+          ? { authorityFingerprint: "a", candidateSha: "c", fixedPointSha: "f", boundInputs: { specEvidence: "issue #1" } }
+          : role === "review-standards"
+            ? { authorityFingerprint: "a", candidateSha: "c", fixedPointSha: "f", boundInputs: { standardsSources: "AGENTS.md" } }
+            : {};
         const resolved = resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, {
           role,
           ...(risk ? { risk } : {}),
           ...(task ? { task } : {}),
+          ...reviewBoundInputs,
+          capabilityProfile: role === "review-spec" || role === "review-standards" ? "read-only-reviewer" : role === "verification" ? "verification" : role === "maintenance" ? "maintenance" : role === "controller" ? "controller" : "mutable-owner",
         }).selected.map((skill) => skill.id);
         assert.deepEqual(resolved, legacy, `${role}/${risk}/${task}`);
       }
@@ -81,7 +103,7 @@ test("mandatory, automatic, and explicit tiers behave distinctly", () => {
 test("path-aware automatic routing selects configured disciplines", () => {
   const registry = buildSkillRegistry([
     ...BUILT_IN_SKILL_REGISTRY_ENTRIES,
-    { id: "browser-testing", category: "frontend-testing", source: "pi-next", provenanceVersion: "pi-next" },
+    { id: "browser-testing", category: "frontend-testing", source: "pi-next", provenanceVersion: "pi-next", compatibility: fixtureCompatibility("implementation") },
   ]);
   const policy: SkillRoutingPolicy = {
     version: 1,
@@ -106,20 +128,22 @@ test("installed-but-unselected skills are absent and available count exceeds sel
   assert.ok(!ids.includes("diagnosing-bugs"));
 });
 
-test("exact provenance and tier appear in bounded telemetry", () => {
+test("exact provenance, adaptation, and compatibility appear in bounded telemetry", () => {
   const registry = builtInSkillRegistry();
-  const resolution = resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, { role: "repair", task: "fix regression" });
+  const resolution = resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, { role: "repair", capabilityProfile: "mutable-owner", task: "fix regression" });
   const line = renderSkillResolutionTelemetry(resolution);
   assert.match(line, /registry=/);
-  assert.match(line, /diagnosing-bugs@mattpocock:885e2ca4d842d139e9aef4e48d366c63cb1b8013\(automatic:/);
+  assert.match(line, /diagnosing-bugs@mattpocock:885e2ca4d842d139e9aef4e48d366c63cb1b8013\(automatic:repair:diagnosis;compat=compatible;role=repair;adapt=upstream-reviewed;nested=0\)/);
+  assert.match(line, /tdd@pi-next-adapted-mattpocock:885e2ca4d842d139e9aef4e48d366c63cb1b8013\+pi-next-unattended-seam\(automatic:repair:regression-seam;compat=typed-blocked;role=repair;adapt=pi-next-adapter;nested=0 missing=testingSeam\)/);
   const tdd = resolution.selected.find((s) => s.id === "tdd");
-  assert.equal(tdd?.provenanceVersion, "885e2ca4d842d139e9aef4e48d366c63cb1b8013");
+  assert.equal(tdd?.compatibility.status, "typed-blocked");
+  assert.deepEqual(tdd?.compatibility.missingBoundInputs, ["testingSeam"]);
 });
 
 test("conflicting methodology categories fail validation", () => {
   const registry = buildSkillRegistry([
     ...BUILT_IN_SKILL_REGISTRY_ENTRIES,
-    { id: "systematic-debugging", category: "debugging", source: "superpowers", provenanceVersion: "pinned" },
+    { id: "systematic-debugging", category: "debugging", source: "superpowers", provenanceVersion: "pinned", compatibility: fixtureCompatibility("repair") },
   ]);
   // Matt diagnosing-bugs + Superpowers systematic-debugging on the same axis.
   const policy: SkillRoutingPolicy = {
@@ -133,6 +157,102 @@ test("conflicting methodology categories fail validation", () => {
   };
   assert.throws(() => validateSkillRoutingPolicy(policy, registry), (error: unknown) =>
     error instanceof SkillRegistryError && /competing debugging methodologies/.test(error.message));
+});
+
+test("automatic skills without reviewed compatibility fail closed", () => {
+  const registry = buildSkillRegistry([
+    ...BUILT_IN_SKILL_REGISTRY_ENTRIES,
+    { id: "raw-method", category: "raw", source: "example", provenanceVersion: "pinned" },
+  ]);
+  assert.throws(
+    () => validateSkillRoutingPolicy({ version: 1, mandatory: [], automatic: [{ skill: "raw-method", roles: ["implementation"] }], explicit: [] }, registry),
+    (error: unknown) => error instanceof SkillRegistryError && /lacks reviewed unattended compatibility metadata/.test(error.message),
+  );
+});
+
+test("review role compatibility requires exact kernel-bound inputs", () => {
+  const registry = builtInSkillRegistry();
+  assert.throws(
+    () => resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, {
+      role: "review-spec",
+      capabilityProfile: "read-only-reviewer",
+      authorityFingerprint: "a1",
+      candidateSha: "c1",
+      fixedPointSha: "f1",
+    }),
+    (error: unknown) => error instanceof SkillRegistryError && /specEvidence/.test(error.message),
+  );
+  assert.deepEqual(
+    resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, {
+      role: "review-spec",
+      capabilityProfile: "read-only-reviewer",
+      authorityFingerprint: "a1",
+      candidateSha: "c1",
+      fixedPointSha: "f1",
+      boundInputs: { specEvidence: "issue #172" },
+    }).selected.map((skill) => skill.id),
+    ["code-review-spec"],
+  );
+  assert.deepEqual(
+    resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, {
+      role: "review-standards",
+      capabilityProfile: "read-only-reviewer",
+      authorityFingerprint: "a1",
+      candidateSha: "c1",
+      fixedPointSha: "f1",
+      boundInputs: { standardsSources: "AGENTS.md" },
+      risk: "high",
+    }).selected.map((skill) => skill.id),
+    ["code-review-standards", "codebase-design"],
+  );
+});
+
+test("unattended TDD without an authoritative seam returns typed blocked compatibility", () => {
+  const registry = builtInSkillRegistry();
+  const missing = resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, { role: "implementation", capabilityProfile: "mutable-owner", task: "add behavior regression test" });
+  assert.equal(missing.selected.find((skill) => skill.id === "tdd")?.compatibility.status, "typed-blocked");
+  assert.deepEqual(missing.selected.find((skill) => skill.id === "tdd")?.compatibility.missingBoundInputs, ["testingSeam"]);
+
+  const bound = resolveSkills(registry, DEFAULT_SKILL_ROUTING_POLICY, {
+    role: "implementation",
+    capabilityProfile: "mutable-owner",
+    task: "add behavior regression test",
+    boundInputs: { testingSeam: "test/feature.test.ts around public API" },
+  });
+  assert.equal(bound.selected.find((skill) => skill.id === "tdd")?.compatibility.status, "compatible");
+});
+
+test("skills declaring internal sub-agent spawning are rejected unless dispatch permits a kernel budget", () => {
+  const registry = buildSkillRegistry([
+    ...BUILT_IN_SKILL_REGISTRY_ENTRIES,
+    {
+      id: "nested-debug",
+      category: "nested-debug",
+      source: "example",
+      provenanceVersion: "pinned",
+      compatibility: {
+        supportedRoles: ["repair"],
+        capabilityProfiles: ["mutable-owner"],
+        mayAskUser: false,
+        requiresHumanCheckpoint: false,
+        maySpawnSubagents: true,
+        processBehavior: "discipline",
+        mutationScope: "owned-workspace",
+        requiredBoundInputs: [],
+        unattended: "compatible",
+        adaptation: { kind: "pi-next-adapter", provenance: "example@pinned", decision: "fixture" },
+      },
+    },
+  ]);
+  const policy: SkillRoutingPolicy = { version: 1, mandatory: [], automatic: [{ skill: "nested-debug", roles: ["repair"] }], explicit: [] };
+  assert.throws(
+    () => validateSkillRoutingPolicy(policy, registry),
+    (error: unknown) => error instanceof SkillRegistryError && /may spawn nested workers/.test(error.message),
+  );
+  assert.equal(
+    resolveSkills(registry, policy, { role: "repair", capabilityProfile: "mutable-owner", allowNestedWorkers: true }).selected[0]?.compatibility.nestedWorkersPermitted,
+    true,
+  );
 });
 
 test("unavailable and process-owner skills fail closed", () => {
@@ -163,7 +283,15 @@ test("resolver stays adapter-neutral: identical contract regardless of caller", 
   // so any adapter computing the same resolution gets the same contract.
   const registryA = builtInSkillRegistry();
   const registryB = buildSkillRegistry(BUILT_IN_SKILL_REGISTRY_ENTRIES);
-  const input = { role: "review-standards" as const, risk: "high" as const };
+  const input = {
+    role: "review-standards" as const,
+    risk: "high" as const,
+    capabilityProfile: "read-only-reviewer" as const,
+    authorityFingerprint: "a1",
+    candidateSha: "c1",
+    fixedPointSha: "f1",
+    boundInputs: { standardsSources: "AGENTS.md" },
+  };
   assert.deepEqual(
     resolveSkills(registryA, DEFAULT_SKILL_ROUTING_POLICY, input),
     resolveSkills(registryB, DEFAULT_SKILL_ROUTING_POLICY, input),

@@ -75,6 +75,13 @@ The table is intentionally revisitable. New useful features discovered in mature
 - **adapter** — the Superpowers `verification-before-completion` concept is vendored as a package-owned discipline behind the same trust/authority boundary and can be configured mandatory; the Superpowers bootstrap/process-owner workflow is not imported and process-owner entries can never be routed automatically.
 - **reject** — loading every installed skill and relying on the model to choose, a general skill marketplace, a redundant lockfile while revisions stay immutable, and any routing that lowers context while worsening verified completion. Available != selected != loaded: installed-but-unselected skills add zero worker-context payload and #82 can measure routing against verified-completion efficiency.
 
+### Skill compatibility adapter decisions (issue #172)
+
+- **adopt-pattern** — treat a reviewed external skill as two artifacts: pinned methodology provenance and a separate mechanically validated runtime compatibility contract. Automatic/mandatory dispatch now checks role, capability profile, unattended behavior, mutation scope, required bound inputs, and nested-worker permission before loading context.
+- **adapter** — Matt Pocock `code-review` is not routed as-is. Pi-next keeps the upstream orchestrator as rejected provenance and exposes two extracted disciplines, `code-review-spec` and `code-review-standards`, so the kernel remains the only owner of review-axis spawning, budgets, and aggregation.
+- **adapter** — Matt Pocock `tdd` keeps red-green behavioral testing, but unattended seam confirmation is replaced with a kernel-bound `testingSeam`; absence becomes a typed `MISSING_BOUND_SKILL_INPUT` result rather than a prompt/user wait or invented seam.
+- **reject** — process-owner/router/human-facing skills (`code-review` as orchestrator, future `ask-matt`/`implement`/`triage`/`wayfinder`/`to-spec`-style entries) cannot become automatic lifecycle context without a new explicit adapter contract and evaluation evidence.
+
 ### Bootstrap auto-finalization recovery proof (issue #108)
 
 - **adopt-pattern** — durable workflow systems separate side-effect completion evidence from incidental local resources. The bootstrap supervisor now treats `.git/pi-next/bootstrap-lifecycle/issue-N.verified-candidate.json` as a bounded exact-candidate proof only after deterministic finalizer verification records the candidate SHA, and still validates the live local branch before skipping an implementation worker. Mere branch/worktree existence remains non-authoritative and cannot bypass no-op candidate semantics.

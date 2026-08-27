@@ -73,12 +73,20 @@ export const reviewedSkillRegistry: readonly SkillRegistryEntry[] = [
     context: "Prefer local cohesion and explicit module boundaries; avoid broad rewrites when the task asks for a bounded change.",
   },
   {
-    id: "matt-pocock.code-review",
-    title: "Code review",
-    source: "Matt Pocock skill catalog (managed snapshot)",
-    version: "2026-08-issue-82-reviewed",
-    appliesToRoles: ["review-spec", "review-standards"],
-    context: "Review the exact candidate against the requested behavior and repository standards; report concrete file/line findings or pass.",
+    id: "pi-next.code-review-spec",
+    title: "Spec-conformance review discipline",
+    source: "Pi-next adaptation of Matt Pocock code-review; kernel owns orchestration",
+    version: "2026-08-issue-172-spec-adapter",
+    appliesToRoles: ["review-spec"],
+    context: "Review only the exact bound candidate/fixed point against authoritative issue/spec evidence. Do not ask for inputs, spawn standards review, or aggregate axes.",
+  },
+  {
+    id: "pi-next.code-review-standards",
+    title: "Standards review discipline",
+    source: "Pi-next adaptation of Matt Pocock code-review; kernel owns orchestration",
+    version: "2026-08-issue-172-standards-adapter",
+    appliesToRoles: ["review-standards"],
+    context: "Review only engineering standards/design/test/regression risks for the exact bound candidate/fixed point. Do not ask for inputs, spawn spec review, or aggregate axes.",
   },
   {
     id: "matt-pocock.performance-telemetry",
@@ -138,9 +146,14 @@ export function resolveSkillContext(options: {
     return { available: registry.length, selected: [], loaded: [], totalEstimatedTokens: 0 };
   }
   const selected = new Map<string, { entry: SkillRegistryEntry; reason: "mandatory" | "deterministic-rule" | "explicit-policy" }>();
-  const dispatch = createWorkerDispatch({ phase: options.role, task: options.task, hasPlan: true });
+  const reviewBindings = options.role === "review-spec"
+    ? { authorityFingerprint: "eval-authority", candidateSha: "eval-candidate", fixedPointSha: "eval-fixed", boundInputs: { specEvidence: "eval spec fixture" } }
+    : options.role === "review-standards"
+      ? { authorityFingerprint: "eval-authority", candidateSha: "eval-candidate", fixedPointSha: "eval-fixed", boundInputs: { standardsSources: "eval standards fixture" } }
+      : {};
+  const dispatch = createWorkerDispatch({ phase: options.role, task: options.task, hasPlan: true, ...reviewBindings });
   for (const skill of dispatch.skills) {
-    const id = skill === "tdd" ? "matt-pocock.tdd" : skill === "diagnosing-bugs" ? "matt-pocock.diagnosing-bugs" : skill === "codebase-design" ? "matt-pocock.codebase-design" : skill === "code-review" ? "matt-pocock.code-review" : "matt-pocock.performance-telemetry";
+    const id = skill === "tdd" ? "matt-pocock.tdd" : skill === "diagnosing-bugs" ? "matt-pocock.diagnosing-bugs" : skill === "codebase-design" ? "matt-pocock.codebase-design" : skill === "code-review-spec" ? "pi-next.code-review-spec" : skill === "code-review-standards" ? "pi-next.code-review-standards" : "matt-pocock.performance-telemetry";
     const entry = registry.find((candidate) => candidate.id === id);
     if (entry) selected.set(entry.id, { entry, reason: "deterministic-rule" });
   }

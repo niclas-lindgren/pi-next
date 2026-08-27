@@ -51,7 +51,15 @@ test("bounded review creates independent axis contexts and invalidates repaired 
     binding,
     risk: "high",
     policy: { enabled: true, requiredRisk: "high", maxRounds: 2, axes: ["spec", "standards"] },
-    dispatch: (axis, candidate, round) => createWorkerDispatch({ phase: `review-${axis}`, issueNumber: candidate.issueNumber, candidateSha: candidate.candidateSha, fixedPointSha: candidate.fixedPointSha, authorityFingerprint: candidate.authorityFingerprint, task: `review round ${round}` }),
+    dispatch: (axis, candidate, round) => createWorkerDispatch({
+      phase: `review-${axis}`,
+      issueNumber: candidate.issueNumber,
+      candidateSha: candidate.candidateSha,
+      fixedPointSha: candidate.fixedPointSha,
+      authorityFingerprint: candidate.authorityFingerprint,
+      task: `review round ${round}`,
+      boundInputs: axis === "spec" ? { specEvidence: "issue fixture" } : { standardsSources: "AGENTS.md" },
+    }),
     createContext: (axis, round) => {
       const context = { reviewerId: `fresh-${axis}-${round}`, axis, round } as const;
       contexts.push(context.reviewerId);
@@ -82,7 +90,7 @@ test("persistent review findings become a bounded blocked result", async () => {
     binding,
     risk: "critical",
     policy: { enabled: true, requiredRisk: "critical", maxRounds: 2, axes: ["risk"] },
-    dispatch: () => createWorkerDispatch({ phase: "review-spec", issueNumber: 7, candidateSha: "c1", fixedPointSha: "m1", authorityFingerprint: "a1" }),
+    dispatch: () => createWorkerDispatch({ phase: "review-spec", issueNumber: 7, candidateSha: "c1", fixedPointSha: "m1", authorityFingerprint: "a1", boundInputs: { specEvidence: "issue fixture" } }),
     execute: async (request, context) => ({
       ...request,
       reviewerId: context.reviewerId,
