@@ -9,6 +9,7 @@ import {
   type BootstrapReport,
   type CommandRunner,
   type Disposition,
+  type WorkflowBudgetExhausted,
 } from "../bootstrap/types.js";
 import { BootstrapError } from "../bootstrap/errors.js";
 import { runCommand } from "../bootstrap/command-runner.js";
@@ -61,7 +62,7 @@ export interface UnifiedLifecycleResult {
   issueNumber: number;
   runId: string;
   entry: LifecycleEntryPoint;
-  disposition: Disposition | "finalization-blocked";
+  disposition: Disposition | "finalization-blocked" | "budget-yield";
   implementation: "PASS" | "FAIL" | "BLOCKED";
   verification: "PASS" | "FAIL";
   finalization: "PASS" | "BLOCKED" | "SKIPPED";
@@ -70,6 +71,8 @@ export interface UnifiedLifecycleResult {
   implementationReport: BootstrapReport;
   finalizationReport?: BootstrapFinalizerReport;
   finalizationFailure?: { code: string; reason: string };
+  /** Present when the terminal result is the canonical workflow/lifecycle budget boundary (#12). */
+  workflowBudget?: WorkflowBudgetExhausted;
   projection: LifecycleStateProjection;
 }
 
@@ -199,12 +202,20 @@ export async function runSingleIssueLifecycle(
       candidatePreserved: implementationReport.repairBudgetExhausted || undefined,
       implementationReport,
     } satisfies Omit<UnifiedLifecycleResult, "finalization" | "projection">;
+    // A bootstrap preflight that yielded the workflow/lifecycle commit boundary
+    // before any worker ran maps to the single canonical typed budget result
+    // rather than a generic blocked/dirty interpretation (#12).
+    const budgetYielded = implementationReport.workflowBudget?.status === "exhausted";
+    const baseWithBudget: Omit<UnifiedLifecycleResult, "finalization" | "projection"> = budgetYielded
+      ? { ...base, disposition: "budget-yield", implementation: "BLOCKED", verification: "FAIL", workflowBudget: implementationReport.workflowBudget }
+      : base;
 
     await lifecycleLock.update("verification");
     if (!options.finalize || options.verifyOnly || !implementationReport.mechanicalPass || (!implementationReport.finalizationReady && !resumeFinalizationOnly)) {
       emit(reporter, { issueNumber, phase: "finalization", state: "skipped", detail: !options.finalize ? "disabled" : options.verifyOnly ? "verify-only" : !implementationReport.mechanicalPass ? "verification-failed" : "not-ready" }, identity, "finalization");
       if (implementationReport.repairBudgetExhausted) emit(reporter, { issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: FAIL; repair: EXHAUSTED; candidate preserved" }, identity, "terminal");
-      const result = { ...base, finalization: "SKIPPED" } satisfies Omit<UnifiedLifecycleResult, "projection">;
+      if (budgetYielded) emit(reporter, { issueNumber, phase: "terminal", state: "fail", detail: "workflow/lifecycle commit budget exhausted; incident residue preserved as generated workflow state" }, identity, "terminal");
+      const result = { ...baseWithBudget, finalization: "SKIPPED" } satisfies Omit<UnifiedLifecycleResult, "projection">;
       return { ...result, projection: terminalProjection(result) };
     }
 
@@ -227,8 +238,7 @@ export async function runSingleIssueLifecycle(
       const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "FINALIZATION_FAILED";
       const reason = redact(error instanceof Error ? error.message : String(error));
       emit(reporter, { issueNumber, phase: "finalization", state: "blocked", detail: code }, identity, "finalization");
-      emit(reporter, { issueNumber, phase: "terminal", state: "fail", detail: "implementation: PASS; verification: PASS; finalization: BLOCKED; candidate preserved" }, identity, "terminal");
-      const result = { ...base, disposition: "finalization-blocked", finalization: "BLOCKED", candidatePreserved: true, finalizationFailure: { code, reason } } satisfies Omit<UnifiedLifecycleResult, "projection">;
+      let result: Omit<UnifiedLifecycleResult, "projection"> = { ...baseWithBudget, disposition: "finalization-blocked", finalization: "BLOCKED", candidatePreserved: true, finalizationFailure: { code, reason } };
       const unified = { ...result, projection: terminalProjection(result) };
       try {
         const config = loadPiNextConfig(cwd);
@@ -246,12 +256,32 @@ export async function runSingleIssueLifecycle(
           // guarded helper finalize already trusts (main-only, exact
           // origin/main, incident-paths-only), never gitignored, never left
           // to accumulate as unrelated dirty state.
-          await commitIncidentDiagnosticsBeforeFinalization({ root: cwd, runCommand: runner, issueNumber });
+          //
+          // Consume the guarded incident-commit boundary instead of ignoring
+          // it: when the shared workflow/lifecycle commit budget refuses the
+          // commit, the terminal lifecycle result must be the single
+          // canonical typed budget outcome with the residue preserved as
+          // generated workflow state - never a later generic ROOT_DIRTY/
+          // ROOT_BUSY reinterpretation (#12).
+          const incidentCommit = await commitIncidentDiagnosticsBeforeFinalization({ root: cwd, runCommand: runner, issueNumber });
+          if (incidentCommit.status === "budget-exhausted") {
+            result = {
+              ...result,
+              disposition: "budget-yield",
+              workflowBudget: {
+                status: "exhausted",
+                reason: incidentCommit.reason ?? "workflow-only/lifecycle commit bound reached",
+                residuePaths: incidentCommit.paths,
+              },
+            };
+          }
         }
       } catch {
         // Incident capture/reporting is observational and must never alter the preserved candidate lifecycle result.
       }
-      return unified;
+      emit(reporter, { issueNumber, phase: "terminal", state: "fail", detail: result.disposition === "budget-yield" ? "implementation: PASS; verification: PASS; finalization: BLOCKED; workflow budget: EXHAUSTED; candidate preserved" : "implementation: PASS; verification: PASS; finalization: BLOCKED; candidate preserved" }, identity, "terminal");
+      const unifiedResult = { ...result, projection: terminalProjection(result) };
+      return unifiedResult;
     }
   } finally {
     await lifecycleLock.release();

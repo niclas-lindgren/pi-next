@@ -299,12 +299,20 @@ export async function finalizeWithPostIntegrationReverification(input: {
   const reverifications: ExactMainReverificationResult[] = [];
   const lease = await input.leaseAuthority.read(input.finalizeInput.issueNumber);
   if (lease && issueLeaseMatchesOwner(lease, input.finalizeInput) && isIssueLeaseFresh(lease, new Date())) {
-    await commitIncidentDiagnosticsBeforeFinalization({
+    const incidentCommit = await commitIncidentDiagnosticsBeforeFinalization({
       root: input.finalizeInput.cwd,
       runCommand: input.runCommand,
       reporter: input.reporter,
       issueNumber: input.finalizeInput.issueNumber,
     });
+    if (incidentCommit.status === "budget-exhausted") {
+      // Consume the guarded incident-commit boundary rather than ignoring it
+      // (#12): the workflow/lifecycle commit budget refused the commit, so the
+      // residue is preserved as generated workflow state and must not be
+      // re-interpreted later as an unrelated ROOT_BUSY failure. The shared
+      // lifecycle maps this to the canonical typed budget-yield result.
+      input.reporter?.(`finalization · workflow/lifecycle commit budget exhausted; incident residue preserved as generated workflow state (${incidentCommit.reason ?? "workflow-only/lifecycle commit bound reached"})`);
+    }
   }
   let result = await finalizeIssue(input.leaseAuthority, input.workAuthority, input.finalizeInput);
 

@@ -28,5 +28,6 @@
   "src/coordination/work-authority.ts": "legacy work authority module predating this check; refactor separately",
   "src/lifecycle/bootstrap-finalize.ts": "bootstrap finalizer is a legacy cohesive lifecycle module (moved from scripts/ in #162 so the public ./lifecycle export ships its own dependency); issue #114 adds shared lifecycle-lock entry wrapping before a separate refactor",
   "src/evaluation/lifecycle-replay.ts": "legacy replay module predating this check; refactor separately",
-  "src/skills/sync.ts": "legacy skills sync module predating this check; refactor separately"
+  "src/skills/sync.ts": "legacy skills sync module predating this check; refactor separately",
+  "src/bootstrap/types.ts": "shared bootstrap/lifecycle type surface incl. typed workflow-budget boundary (#12); keep single shared file so bootstrap and lifecycle kernel map 1:1"
 }

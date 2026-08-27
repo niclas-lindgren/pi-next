@@ -294,12 +294,21 @@ async function runBootstrapFinalizeUnlocked(options: BootstrapFinalizeOptions = 
     };
   } else {
     if (!worktree) throw new BootstrapFinalizeError("MISSING_WORKTREE", `canonical worktree for ${branch} is missing before integration`);
-    await commitIncidentDiagnosticsBeforeFinalization({
+    const incidentCommit = await commitIncidentDiagnosticsBeforeFinalization({
       root,
       runCommand: runner,
       issueNumber,
       reporter: (line) => say(`bootstrap finalize #${issueNumber} · ${line}`),
     });
+    if (incidentCommit.status === "budget-exhausted") {
+      // Consume the guarded incident-commit boundary rather than ignoring it:
+      // the shared workflow/lifecycle commit budget refused the commit, so the
+      // residue is preserved as generated workflow state and the boundary must
+      // not resurface as an unrelated ROOT_DIRTY/ROOT_BUSY failure (#12). The
+      // finalizer's caller (the shared lifecycle) maps this to the canonical
+      // typed budget-yield result.
+      say(`bootstrap finalize #${issueNumber} · workflow/lifecycle commit budget exhausted; incident residue preserved as generated workflow state (${incidentCommit.reason ?? "workflow-only/lifecycle commit bound reached"})`);
+    }
     await git(worktree, ["fetch", "origin", "main", "--quiet"], runner);
     await git(worktree, ["diff", "--check"], runner);
     const worktreeHead = await git(worktree, ["rev-parse", "HEAD"], runner);

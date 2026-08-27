@@ -58,10 +58,25 @@ export async function prepareRepository(cwd: string, runner: CommandRunner, opti
     throw new BootstrapError("bootstrap must be started from the coordination checkout, not an issue worktree");
   }
   let rootStatus = await statusRaw(root, runner);
+  let workflowBudget: RepositoryState["workflowBudget"];
   if (rootStatus !== "") {
     const incidentCommit = await commitIncidentDiagnostics({ root, runCommand: runner, issueNumber: options.issueNumber });
     if (incidentCommit.status === "committed" || incidentCommit.status === "clean") {
       rootStatus = await statusRaw(root, runner);
+    } else if (incidentCommit.status === "budget-exhausted") {
+      // commitIncidentDiagnostics proved every dirty path is an
+      // incident-diagnostics path before the shared workflow/lifecycle commit
+      // budget refused the commit. Preserve that residue as generated
+      // workflow state at this boundary instead of reinterpreting it as a
+      // generic ROOT_DIRTY failure: later preflights/finalizers must see the
+      // typed workflow-budget boundary (#12), never an unrelated dirty-root
+      // error or destructive cleanup.
+      workflowBudget = {
+        status: "exhausted",
+        reason: incidentCommit.reason ?? "workflow-only/lifecycle commit bound reached",
+        residuePaths: incidentCommit.paths,
+      };
+      rootStatus = "";
     }
   }
   if (rootStatus !== "") {
@@ -79,7 +94,7 @@ export async function prepareRepository(cwd: string, runner: CommandRunner, opti
   if (ancestry.exitCode !== 0) {
     throw new BootstrapError("local main is not an ancestor of origin/main; refusing to discard or rewrite local work");
   }
-  return { root, baselineRevision };
+  return { root, baselineRevision, ...(workflowBudget ? { workflowBudget } : {}) };
 }
 
 export async function prepareWorktree(repository: RepositoryState, issueNumber: number, runner: CommandRunner): Promise<{ path: string; branch: string }> {
