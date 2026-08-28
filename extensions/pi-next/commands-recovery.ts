@@ -439,11 +439,6 @@ export async function recoverableAbandonedAutoRun(
   return undefined;
 }
 
-export interface RejectedLegacyAutoRun {
-  runId?: string;
-  blockedReason?: string;
-}
-
 /**
  * `production-lifecycle.ts` (the unified scheduler) never writes
  * `state.activeLease`, so `recoverableAbandonedAutoRun`'s candidate filter
@@ -451,14 +446,13 @@ export interface RejectedLegacyAutoRun {
  * -produced abandoned run — never a fresh-scheduler-produced one. The
  * retired ForegroundSupervisor/loop-controller.ts state machine that used to
  * reactivate such a run no longer exists (issue #165), so a matching
- * candidate is rejected explicitly with the same actionable migration
- * guidance `/pi-next-loop resume` gives for legacy state, instead of being
- * silently misinterpreted or launched through a state machine that has been
- * retired.
+ * candidate is marked as blocked for automatic recovery. `/pi-next auto`
+ * then falls through to fresh scheduling; explicit `/pi-next-loop resume`
+ * remains the operator-facing path that prints migration guidance.
  */
-async function rejectAbandonedLegacyAutoRun(cwd: string): Promise<RejectedLegacyAutoRun> {
+async function blockAbandonedLegacyAutoRun(cwd: string): Promise<void> {
   const state = await recoverableAbandonedAutoRun(cwd);
-  if (!state) return {};
+  if (!state) return;
   // This terminal state can never become explicitly recoverable on a later
   // pass: its status and lease do not change just by asking again. Mark it
   // so `recoverableAbandonedAutoRun` stops proposing it as a candidate on
@@ -468,12 +462,6 @@ async function rejectAbandonedLegacyAutoRun(cwd: string): Promise<RejectedLegacy
     ...state,
     autoResumeBlockedAt: new Date().toISOString(),
   });
-  return {
-    runId: state.runId,
-    blockedReason:
-      `Run ${state.runId} is legacy pre-migration state (status "${state.status}") and can no longer be resumed automatically. ` +
-      `Inspect it with "/pi-next-loop status ${state.runId} verbose", then either finish any in-progress work manually or discard the run and start a fresh "/pi-next auto" (the retired ForegroundSupervisor/loop-controller.ts state machine can no longer resume it).`,
-  };
 }
 
 /**
@@ -581,9 +569,8 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
       handler: async (args, ctx) => {
         setLiveCtx(ctx);
         const auto = args.trim() === "auto";
-        let preferredRunId: string | undefined;
         const stopStatus = auto
-          ? startAutoStatusHeartbeat(ctx, () => preferredRunId, { replaceExisting: true })
+          ? startAutoStatusHeartbeat(ctx, () => undefined, { replaceExisting: true })
           : undefined;
         try {
           if (auto) {
@@ -604,15 +591,13 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
             try {
               // No candidate found by `recoverableAbandonedAutoRun` can ever
               // be a fresh-scheduler-produced run (see
-              // `rejectAbandonedLegacyAutoRun`'s doc comment); reject it
-              // explicitly with actionable guidance instead of attempting to
-              // resume/launch it, then fall through to the normal handler so
-              // a new run can still start.
-              const outcome = await rejectAbandonedLegacyAutoRun(ctx.cwd);
-              if (outcome.runId) preferredRunId = outcome.runId;
-              if (outcome.blockedReason) {
-                safeNotify(ctx, outcome.blockedReason, "warning");
-              }
+              // `blockAbandonedLegacyAutoRun`'s doc comment). Mark the
+              // obsolete state so future `auto` invocations do not reconsider
+              // it, then stay silent and fall through to the normal handler:
+              // ordinary auto selection should pick fresh work, not surface
+              // explicit `/pi-next-loop resume` migration guidance or bind the
+              // footer to the ignored legacy run.
+              await blockAbandonedLegacyAutoRun(ctx.cwd);
             } catch (error) {
               safeNotify(
                 ctx,
