@@ -85,7 +85,7 @@ export class SdkSessionWorkerAdapter implements WorkerAdapter<SdkSessionWorkerTa
       telemetry: {
         status: report.terminalResultObserved ? (report.disposition === "completed" ? "complete" : "partial") : "unavailable",
         usage: usageFromReport(report),
-        activity: { modelRounds: report.terminalResultObserved ? 1 : 0, toolCalls: report.toolCalls, toolResults: report.toolCalls },
+        activity: { modelRounds: report.modelRounds ?? (report.terminalResultObserved ? 1 : 0), toolCalls: report.toolCalls, toolResults: report.toolCalls },
         model: report.model,
       },
       failure: failureFromReport(report),

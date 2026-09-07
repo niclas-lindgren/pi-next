@@ -33,7 +33,7 @@ export interface LifecycleRunIdentity {
   issueNumber: number;
 }
 
-export type LifecyclePhase = "preflight" | "claim" | "worker" | "verification" | "repair" | "finalization" | "cleanup" | "terminal";
+export type LifecyclePhase = "scheduler" | "preflight" | "claim" | "worker" | "verification" | "repair" | "finalization" | "cleanup" | "terminal";
 
 export interface LifecycleStateProjection {
   activeIssue?: number;

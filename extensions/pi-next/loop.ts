@@ -73,6 +73,7 @@ import {
 } from "./workflow-state-provider.ts";
 import { runProductionLifecycleScheduler } from "./production-lifecycle.ts";
 import { abortRun, registerRunAbortController } from "./run-cancellation.ts";
+import { createPiLifecycleReporter, emitAutoStart, formatAutoFailedSummary, formatAutoTerminalSummary, hasAutoStartEmitted, markAutoStartEmitted } from "./auto-lifecycle-reporter.ts";
 
 export { MAX_ISSUES, readLoopState, writeLoopResult } from "./loop-state.ts";
 export type { LoopOutcome, LoopResult, LoopState } from "./loop-state.ts";
@@ -874,9 +875,19 @@ export async function runPiNextLoop(
   // Validate provider configuration and, for explicit helpers, their output
   // before writing a new run state, claiming an issue, or launching a worker.
   // Status/stop/clear are intentionally diagnostic/control-only paths and do
-  // not need the autonomous-entry preflight.
-  await preflightWorkflowStateProvider(ctx.cwd);
-  await ctx.waitForIdle();
+  // not need the autonomous-entry preflight. Emit foreground evidence first:
+  // provider preflight can block, and `/pi-next auto` must never look dead at
+  // startup when footer/session status surfaces are unavailable.
+  if (!hasAutoStartEmitted(ctx)) emitAutoStart(ctx);
+  else markAutoStartEmitted(ctx);
+  const lifecycleReporter = createPiLifecycleReporter(ctx);
+  try {
+    await preflightWorkflowStateProvider(ctx.cwd);
+    await ctx.waitForIdle();
+  } catch (error) {
+    notifySafely(ctx, formatAutoFailedSummary(error), "error");
+    return;
+  }
   if (input === "resume") {
     const current = requestedRunId
       ? readLoopState(ctx.cwd, requestedRunId)
@@ -919,7 +930,7 @@ export async function runPiNextLoop(
     const controller = new AbortController();
     const unregister = registerRunAbortController(current.runId, controller);
     try {
-      await runProductionLifecycleScheduler({
+      const result = await runProductionLifecycleScheduler({
         cwd: ctx.cwd,
         ctx,
         entry: "auto",
@@ -927,8 +938,12 @@ export async function runPiNextLoop(
         runId: current.runId,
         onWorkLog,
         onWorkerState,
+        reporter: lifecycleReporter,
         signal: controller.signal,
       });
+      notifySafely(ctx, formatAutoTerminalSummary(result, current.remainingIssues), result.disposition === "blocked" ? "warning" : "info");
+    } catch (error) {
+      notifySafely(ctx, formatAutoFailedSummary(error), "error");
     } finally {
       unregister();
     }
@@ -945,7 +960,7 @@ export async function runPiNextLoop(
   const controller = new AbortController();
   const unregister = registerRunAbortController(runId, controller);
   try {
-    await runProductionLifecycleScheduler({
+    const result = await runProductionLifecycleScheduler({
       cwd: ctx.cwd,
       ctx,
       entry: "auto",
@@ -953,8 +968,12 @@ export async function runPiNextLoop(
       runId,
       onWorkLog,
       onWorkerState,
+      reporter: lifecycleReporter,
       signal: controller.signal,
     });
+    notifySafely(ctx, formatAutoTerminalSummary(result, requestedIssues), result.disposition === "blocked" ? "warning" : "info");
+  } catch (error) {
+    notifySafely(ctx, formatAutoFailedSummary(error), "error");
   } finally {
     unregister();
   }

@@ -32,6 +32,7 @@ import {
   selectCurrentLoop,
 } from "./loop-status.ts";
 import { renderAutoProgress } from "./auto-progress.ts";
+import { emitAutoStart, formatAutoFailedSummary, markAutoStartEmitted } from "./auto-lifecycle-reporter.ts";
 import { piNextRuntimeIdentity } from "../../src/version.ts";
 import {
   runtimeDir,
@@ -577,15 +578,15 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
             // Recovery can take over an abandoned lease and prepare its
             // canonical worktree, so provider validation must precede it as
             // well as the normal claim/worker path. Keep this failure separate
-            // from authority/recovery failures.
+            // from authority/recovery failures, but emit the mandatory
+            // foreground START first so provider validation cannot make auto
+            // look dead before the base command is entered.
+            emitAutoStart(ctx);
+            markAutoStartEmitted(ctx);
             try {
               await preflightWorkflowStateProvider(ctx.cwd);
             } catch (error) {
-              safeNotify(
-                ctx,
-                `Workflow state provider preflight failed: ${error instanceof Error ? error.message : String(error)}`,
-                "error",
-              );
+              safeNotify(ctx, formatAutoFailedSummary(error), "error");
               return;
             }
             try {
@@ -601,7 +602,7 @@ export function registerPiNextCommands(pi: ExtensionAPI): void {
             } catch (error) {
               safeNotify(
                 ctx,
-                `pi-next recovery lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+                formatAutoFailedSummary(error),
                 "error",
               );
               return;

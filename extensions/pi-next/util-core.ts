@@ -147,6 +147,8 @@ export function safeNotify(
   guardedHostCall(isDisposed, () => ctx.ui.notify(message, level), "notify");
 }
 const GIT_MUTATION_FAILURE_LIMIT = FAILURE_LIMIT;
+const WORKER_TOKEN_WARN = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_WARN ?? "20000", 10);
+const WORKER_TOKEN_HARD = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_HARD ?? "50000", 10);
 
 /**
  * Run one issue-scoped model turn in a dedicated OS process.
@@ -222,6 +224,8 @@ export interface IssueWorkerOptions {
   onProgress?: (elapsedMs: number) => void;
   /** Bounded child runtime metadata for truthful status inspection. */
   onWorkerState?: (runtime: IssueWorkerRuntime) => void;
+  /** Live aggregate telemetry snapshots from the child NDJSON stream. */
+  onTelemetry?: (report: WorkerTelemetryReport) => void;
   /** Structured soft/hard watchdog observations. */
   onWatchdog?: (event: WorkerWatchdogEvent) => void;
   /** Explicit test/consumer override; production defaults come from config. */
@@ -331,6 +335,8 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
   let lastActivityKind: string | undefined;
   let watchdogEvent: WorkerWatchdogEvent | undefined;
   let watchdogGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  let tokenBudgetWarned = false;
+  let tokenBudgetTerminating = false;
   let settled = false;
   const reportRuntime = (alive: boolean) => {
     try {
@@ -391,6 +397,58 @@ export const runIssueWorker: IssueWorkerRunner = (cwd, prompt, options = {}) => 
     // failure/diagnostic output and must never be fed to either parser.
     activity.push(value);
     telemetry.push(value);
+    const telemetrySnapshot = telemetry.snapshot();
+    try {
+      options.onTelemetry?.(telemetrySnapshot);
+    } catch {
+      // Diagnostic telemetry callbacks must never crash worker supervision.
+    }
+    const usage = telemetrySnapshot.usage;
+    const totalTokens = usage?.totalTokens ?? 0;
+    const warn = Number.isFinite(WORKER_TOKEN_WARN) && WORKER_TOKEN_WARN > 0 ? WORKER_TOKEN_WARN : 20_000;
+    const hard = Number.isFinite(WORKER_TOKEN_HARD) && WORKER_TOKEN_HARD > 0 ? WORKER_TOKEN_HARD : 50_000;
+    if (totalTokens >= warn && !tokenBudgetWarned) {
+      tokenBudgetWarned = true;
+      watchdogEvent = {
+        kind: "suspected_stall",
+        issueNumber: options.issueNumber,
+        runId: options.runId,
+        phase: options.phase,
+        pid: child.pid,
+        wallClockMs: Date.now() - startedAt,
+        idleMs: Date.now() - lastActivityAt,
+        lastActivityAt: new Date(lastActivityAt).toISOString(),
+        lastActivityKind,
+        reason: `worker token usage ${totalTokens} reached warning threshold ${warn} (input=${usage?.input ?? 0}, output=${usage?.output ?? 0}, cache-read=${usage?.cacheRead ?? 0})`,
+      };
+      persistWatchdogEvent(cwd, watchdogEvent);
+      options.onWatchdog?.(watchdogEvent);
+      options.display?.watchdog?.(watchdogEvent);
+    }
+    if (totalTokens >= hard && !tokenBudgetTerminating) {
+      tokenBudgetTerminating = true;
+      watchdogEvent = {
+        kind: "worker_timeout",
+        issueNumber: options.issueNumber,
+        runId: options.runId,
+        phase: options.phase,
+        pid: child.pid,
+        wallClockMs: Date.now() - startedAt,
+        idleMs: Date.now() - lastActivityAt,
+        lastActivityAt: new Date(lastActivityAt).toISOString(),
+        lastActivityKind,
+        reason: `worker token budget exhausted: ${totalTokens} reached hard threshold ${hard} (input=${usage?.input ?? 0}, output=${usage?.output ?? 0}, cache-read=${usage?.cacheRead ?? 0})`,
+      };
+      persistWatchdogEvent(cwd, watchdogEvent);
+      options.onWatchdog?.(watchdogEvent);
+      options.display?.watchdog?.(watchdogEvent);
+      terminate("SIGTERM");
+      watchdogGraceTimer = setTimeout(() => {
+        if (settled) return;
+        terminate("SIGKILL");
+      }, watchdog.terminationGraceMs);
+      watchdogGraceTimer.unref?.();
+    }
   };
   child.stdout.on("data", appendStdout);
   child.stderr.on("data", (chunk) => appendOutput(chunk, "stderr"));
