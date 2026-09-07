@@ -255,6 +255,18 @@ export class IncrementalWorkerTelemetryParser {
     for (const line of lines) consumeTelemetryLine(this.acc, line);
   }
 
+  snapshot(): WorkerTelemetryReport {
+    return finishAccumulator({
+      ...this.acc,
+      usage: this.acc.usage ? { ...this.acc.usage } : undefined,
+      activity: this.acc.activity ? { ...this.acc.activity } : undefined,
+      toolFailures: [...this.acc.toolFailures],
+      recoveredToolFailureFingerprints: [...this.acc.recoveredToolFailureFingerprints],
+      toolStarts: new Map(this.acc.toolStarts),
+      lastFailureByTool: new Map(this.acc.lastFailureByTool),
+    });
+  }
+
   finish(): WorkerTelemetryReport {
     if (this.pending) consumeTelemetryLine(this.acc, this.pending);
     this.pending = "";

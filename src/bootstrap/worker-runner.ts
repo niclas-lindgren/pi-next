@@ -4,7 +4,10 @@ import { extractAssistantTextDelta, parseReviewResultText } from "./reviewer.js"
 import { emitProgress, progressToolName, redact } from "./utils.js";
 import { classifyWorkerCompletion, createWorkerTerminalEvidence, observeWorkerEvent } from "../coordination/worker-terminal-result.js";
 
-function workerStats(session: WorkerSession): { toolCalls: number; usage?: WorkerStats; warning?: string } {
+const DEFAULT_WORKER_TOKEN_WARN = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_WARN ?? "20000", 10);
+const DEFAULT_WORKER_TOKEN_HARD = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_HARD ?? "50000", 10);
+
+function workerStats(session: WorkerSession): { toolCalls: number; modelRounds?: number; usage?: WorkerStats; warning?: string } {
   const stats = session.getSessionStats?.();
   if (!stats) return { toolCalls: 0 };
   const tokens = stats.tokens ?? stats;
@@ -20,7 +23,7 @@ function workerStats(session: WorkerSession): { toolCalls: number; usage?: Worke
   const warning = hasTokenStats && usage.cost > 0 && usage.total === 0
     ? "SDK reported nonzero cost with zero token usage"
     : undefined;
-  return { toolCalls: stats.toolCalls ?? 0, usage, warning };
+  return { toolCalls: stats.toolCalls ?? 0, modelRounds: stats.modelRounds, usage, warning };
 }
 
 export async function runWorker(
@@ -47,12 +50,32 @@ export async function runWorker(
   let lastSafeProgress = started;
   let cancelParent: (() => void) | undefined;
   let terminalEvidence = createWorkerTerminalEvidence();
+  let tokenBudgetWarning: string | undefined;
+  let rejectBudget: ((error: Error) => void) | undefined;
+  const tokenWarn = Number.isFinite(DEFAULT_WORKER_TOKEN_WARN) && DEFAULT_WORKER_TOKEN_WARN > 0 ? DEFAULT_WORKER_TOKEN_WARN : 20_000;
+  const tokenHard = Number.isFinite(DEFAULT_WORKER_TOKEN_HARD) && DEFAULT_WORKER_TOKEN_HARD > 0 ? DEFAULT_WORKER_TOKEN_HARD : 50_000;
+  const progressStats = () => session ? workerStats(session) : { toolCalls };
+  const checkTokenBudget = (stats: { usage?: WorkerStats; modelRounds?: number }): void => {
+    const total = stats.usage?.total ?? 0;
+    if (!total) return;
+    if (!tokenBudgetWarning && total >= tokenWarn) {
+      tokenBudgetWarning = `worker token warning: ${total} tokens reached warning threshold ${tokenWarn}`;
+      emitProgress(reporter, { issueNumber, phase: "worker", state: "heartbeat", role, model, elapsedMs: Date.now() - started, toolCalls, modelRounds: stats.modelRounds, usage: stats.usage, detail: tokenBudgetWarning });
+    }
+    if (total >= tokenHard) {
+      const reason = `worker token budget exhausted: ${total} tokens reached hard threshold ${tokenHard}`;
+      controller.abort(reason);
+      rejectBudget?.(new BootstrapError(reason));
+    }
+  };
   emitProgress(reporter, { issueNumber, phase: "worker", state: "start", role });
   if (heartbeatMs > 0) {
     heartbeat = setInterval(() => {
       const now = Date.now();
       if (now - lastSafeProgress < heartbeatMs) return;
-      emitProgress(reporter, { issueNumber, phase: "worker", state: "heartbeat", role, model, elapsedMs: now - started, toolCalls });
+      const stats = progressStats();
+      checkTokenBudget(stats);
+      emitProgress(reporter, { issueNumber, phase: "worker", state: "heartbeat", role, model, elapsedMs: now - started, toolCalls: Math.max(toolCalls, stats.toolCalls), modelRounds: stats.modelRounds, usage: stats.usage });
       lastSafeProgress = now;
     }, heartbeatMs);
   }
@@ -65,7 +88,14 @@ export async function runWorker(
       if (typeof event === "object" && event !== null && (event as { type?: string }).type === "tool_execution_end") {
         toolCalls += 1;
         const tool = progressToolName(event);
-        emitProgress(reporter, { issueNumber, phase: "worker", state: "activity", role, model, tool, elapsedMs: Date.now() - started, toolCalls });
+        const stats = progressStats();
+        checkTokenBudget(stats);
+        emitProgress(reporter, { issueNumber, phase: "worker", state: "activity", role, model, tool, elapsedMs: Date.now() - started, toolCalls: Math.max(toolCalls, stats.toolCalls), modelRounds: stats.modelRounds, usage: stats.usage });
+        lastSafeProgress = Date.now();
+      } else if (typeof event === "object" && event !== null && (event as { type?: string }).type === "pi_next_usage") {
+        const stats = progressStats();
+        checkTokenBudget(stats);
+        emitProgress(reporter, { issueNumber, phase: "worker", state: "heartbeat", role, model, elapsedMs: Date.now() - started, toolCalls: Math.max(toolCalls, stats.toolCalls), modelRounds: stats.modelRounds, usage: stats.usage });
         lastSafeProgress = Date.now();
       }
       const delta = extractAssistantTextDelta(event);
@@ -80,8 +110,12 @@ export async function runWorker(
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => { controller.abort(); reject(new BootstrapError(`worker ${role} timed out`)); }, timeoutMs);
     });
-    await Promise.race([session.prompt(prompt), timeout, cancellation]);
+    const budget = new Promise<never>((_, reject) => { rejectBudget = reject; });
+    const promptRun = session.prompt(prompt);
+    await Promise.race([promptRun, timeout, cancellation, budget]);
     const stats = workerStats(session);
+    checkTokenBudget(stats);
+    if ((stats.usage?.total ?? 0) >= tokenHard) throw new BootstrapError(`worker token budget exhausted: ${stats.usage?.total ?? 0} tokens reached hard threshold ${tokenHard}`);
     const classification = classifyWorkerCompletion(terminalEvidence);
     const report: WorkerReport = classification.ok
       ? {
@@ -90,8 +124,9 @@ export async function runWorker(
           model,
           durationMs: Date.now() - started,
           toolCalls: Math.max(toolCalls, stats.toolCalls),
+          modelRounds: stats.modelRounds,
           usage: stats.usage,
-          telemetryWarning: stats.warning,
+          telemetryWarning: tokenBudgetWarning ?? stats.warning,
           reviewResult: role === "review" ? parseReviewResultText(assistantText) : undefined,
           stopReason: terminalEvidence.stopReason,
           terminalResultKind: terminalEvidence.resultKind,
@@ -104,8 +139,9 @@ export async function runWorker(
           model,
           durationMs: Date.now() - started,
           toolCalls: Math.max(toolCalls, stats.toolCalls),
+          modelRounds: stats.modelRounds,
           usage: stats.usage,
-          telemetryWarning: stats.warning,
+          telemetryWarning: tokenBudgetWarning ?? stats.warning,
           reason: redact(`${classification.code}: ${classification.detail}`),
           stopReason: terminalEvidence.stopReason,
           terminalResultKind: terminalEvidence.resultKind,
@@ -121,7 +157,9 @@ export async function runWorker(
       model,
       elapsedMs: report.durationMs,
       toolCalls: report.toolCalls,
-      detail: classification.ok ? undefined : report.disposition,
+      modelRounds: report.modelRounds,
+      usage: report.usage,
+      detail: classification.ok ? report.telemetryWarning : (report.reason ?? report.disposition),
     });
     return report;
   } catch (error) {
@@ -135,8 +173,9 @@ export async function runWorker(
       model,
       durationMs: Date.now() - started,
       toolCalls: Math.max(toolCalls, stats.toolCalls),
+      modelRounds: stats.modelRounds,
       usage: stats.usage,
-      telemetryWarning: stats.warning,
+      telemetryWarning: tokenBudgetWarning ?? stats.warning,
       reason: redact(error instanceof Error ? error.message : String(error)),
       stopReason: terminalEvidence.stopReason,
       terminalResultKind: terminalEvidence.resultKind,
@@ -144,7 +183,7 @@ export async function runWorker(
       assistantOutputObserved: terminalEvidence.assistantOutputObserved || assistantText.length > 0,
     };
     reports.push(report);
-    emitProgress(reporter, { issueNumber, phase: "worker", state: "fail", role, model, elapsedMs: report.durationMs, toolCalls: report.toolCalls, detail: report.disposition });
+    emitProgress(reporter, { issueNumber, phase: "worker", state: "fail", role, model, elapsedMs: report.durationMs, toolCalls: report.toolCalls, modelRounds: report.modelRounds, usage: report.usage, detail: report.reason ?? report.disposition });
     return report;
   } finally {
     if (timer) clearTimeout(timer);

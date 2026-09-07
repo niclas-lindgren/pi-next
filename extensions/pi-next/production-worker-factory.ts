@@ -4,6 +4,7 @@ import type { WorkerFactory, WorkerRole, WorkerSession, WorkerStats } from "../.
 import { createWorkerDispatch } from "../../src/coordination/worker-dispatch.ts";
 import { loadEffectiveSkillRegistry } from "../../src/skills/effective-registry.ts";
 import type { IssueWorkerRunner, IssueWorkerRuntime } from "./util-core.ts";
+import type { WorkerTelemetryReport } from "./worker-telemetry.ts";
 import type { WorkerWorkLogEvent } from "./worker-activity.ts";
 
 function rolePhase(role: WorkerRole): string {
@@ -14,6 +15,7 @@ class PiWorkerSession implements WorkerSession {
   private readonly listeners = new Set<(event: unknown) => void>();
   private telemetry: WorkerStats | undefined;
   private toolCalls = 0;
+  private modelRounds = 0;
   model: { id?: string } | undefined;
 
   constructor(
@@ -43,8 +45,24 @@ class PiWorkerSession implements WorkerSession {
     // Cancellation is delivered through the AbortSignal supplied to the child process runner.
   }
 
-  getSessionStats(): Partial<WorkerStats> & { tokens?: Partial<WorkerStats>; toolCalls?: number } {
-    return { ...(this.telemetry ?? {}), tokens: this.telemetry, toolCalls: this.toolCalls };
+  getSessionStats(): Partial<WorkerStats> & { tokens?: Partial<WorkerStats>; toolCalls?: number; modelRounds?: number } {
+    return { ...(this.telemetry ?? {}), tokens: this.telemetry, toolCalls: this.toolCalls, modelRounds: this.modelRounds };
+  }
+
+  private updateTelemetry(report: WorkerTelemetryReport): void {
+    if (report.model) this.model = { id: report.model };
+    if (report.usage) {
+      this.telemetry = {
+        input: report.usage.input ?? 0,
+        output: report.usage.output ?? 0,
+        cacheRead: report.usage.cacheRead ?? 0,
+        cacheWrite: report.usage.cacheWrite ?? 0,
+        total: report.usage.totalTokens ?? 0,
+        cost: report.usage.cost ?? 0,
+      };
+    }
+    this.toolCalls = Math.max(this.toolCalls, report.activity?.toolCalls ?? 0);
+    this.modelRounds = Math.max(this.modelRounds, report.activity?.modelRounds ?? 0);
   }
 
   async prompt(text: string): Promise<void> {
@@ -64,33 +82,27 @@ class PiWorkerSession implements WorkerSession {
       dispatch,
       readOnly: this.input.role === "review",
       onWorkerState: this.input.onWorkerState,
+      onTelemetry: (telemetry) => {
+        this.updateTelemetry(telemetry);
+        this.emit({ type: "pi_next_usage" });
+      },
       onActivity: (event) => {
         this.toolCalls += 1;
         this.input.onWorkLog?.(event);
         this.emit({ type: "tool_execution_end", toolName: event.kind });
       },
     });
-    this.model = result.telemetry.model ? { id: result.telemetry.model } : undefined;
-    if (result.telemetry.usage) {
-      this.telemetry = {
-        input: result.telemetry.usage.input ?? 0,
-        output: result.telemetry.usage.output ?? 0,
-        cacheRead: result.telemetry.usage.cacheRead ?? 0,
-        cacheWrite: result.telemetry.usage.cacheWrite ?? 0,
-        total: result.telemetry.usage.totalTokens ?? 0,
-        cost: result.telemetry.usage.cost ?? 0,
-      };
-    }
-    this.toolCalls = Math.max(this.toolCalls, result.telemetry.activity?.toolCalls ?? 0);
+    this.updateTelemetry(result.telemetry);
+    const failureReason = result.watchdog?.reason || result.failure?.summary || result.output || `worker exited code=${result.code ?? "signal"}`;
     this.emit({
       type: "message_end",
       message: {
         role: "assistant",
         stopReason: result.ok ? "stop" : "error",
-        errorMessage: result.failure?.summary || result.output || `worker exited code=${result.code ?? "signal"}`,
+        errorMessage: failureReason,
       },
     });
-    if (!result.ok) throw new Error(result.failure?.summary || result.output || `worker exited code=${result.code ?? "signal"}`);
+    if (!result.ok) throw new Error(failureReason);
   }
 
   private emit(event: unknown): void {

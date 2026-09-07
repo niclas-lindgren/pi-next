@@ -118,7 +118,7 @@ Commands are Pi slash commands and run without asking the model to interpret the
 | `/pi-next-handoff` | Check whether the current checkout is safe to hand off. |
 | `/pi-next-view all\|off\|#N\|run ID\|compact\|verbose\|status` | Filter the worker display/transcript or select its density. |
 
-`/pi-next-doctor` and `/pi-next-status` are diagnostic only; a successful local status check does not establish issue ownership. `stop` never resets, stashes, or commits worker changes.
+`/pi-next auto` writes bounded foreground lifecycle progress immediately (`START`, selection, claim, preflight, worktree/dependencies, worker activity/heartbeat/usage, verification, repair, finalization, and one terminal scheduler summary). Footer/live-worker widgets remain best-effort convenience surfaces; disabling or losing them must not hide basic execution state. `/pi-next-doctor` and `/pi-next-status` are diagnostic only; a successful local status check does not establish issue ownership. `stop` never resets, stashes, or commits worker changes.
 
 ## Architecture and safety boundaries
 

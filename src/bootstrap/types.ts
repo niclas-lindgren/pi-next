@@ -21,7 +21,7 @@ export interface WorkflowBudgetExhausted {
   residuePaths: readonly string[];
 }
 export type WorkerRole = "implementation" | "implementation-retry" | "repair" | "review";
-export type BootstrapProgressPhase = "preflight" | "worktree" | "dependencies" | "issue" | "worker" | "check" | "finalization" | "terminal";
+export type BootstrapProgressPhase = "scheduler" | "preflight" | "claim" | "worktree" | "dependencies" | "issue" | "context" | "worker" | "check" | "repair" | "finalization" | "terminal";
 export type BootstrapProgressState = "start" | "ready" | "activity" | "heartbeat" | "pass" | "fail" | "blocked" | "skipped" | "completed";
 
 export interface BootstrapProgressEvent {
@@ -34,6 +34,8 @@ export interface BootstrapProgressEvent {
   model?: string;
   elapsedMs?: number;
   toolCalls?: number;
+  modelRounds?: number;
+  usage?: WorkerStats;
   detail?: string;
 }
 
@@ -158,6 +160,7 @@ export interface WorkerSession {
   getSessionStats?: () => (Partial<WorkerStats> & {
     tokens?: Partial<WorkerStats>;
     toolCalls?: number;
+    modelRounds?: number;
   });
 }
 
@@ -249,7 +252,7 @@ export interface CheckReport {
 export interface WorkerReport {
   role: WorkerRole; disposition: "completed" | "failed" | "cancelled" | "timed_out";
   model?: string;
-  durationMs: number; toolCalls: number;
+  durationMs: number; toolCalls: number; modelRounds?: number;
   usage?: WorkerStats;
   reason?: string;
   telemetryWarning?: string;
