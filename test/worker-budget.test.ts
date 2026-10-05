@@ -24,19 +24,19 @@ function workerFactory(stats: ReturnType<NonNullable<WorkerSession["getSessionSt
   };
 }
 
-test("cache reads do not consume the bootstrap worker token budget", async () => {
+test("token telemetry does not terminate bootstrap workers by default", async () => {
   const reports = [];
   const report = await runWorker(
     workerFactory({
       toolCalls: 3,
       tokens: {
-        input: 19_872,
-        output: 181,
-        cacheRead: 34_688,
+        input: 50_000,
+        output: 1_000,
+        cacheRead: 100_000,
         cacheWrite: 0,
-        total: 54_741,
+        total: 151_000,
       },
-      cost: 0.004,
+      cost: 0.01,
     }),
     "implementation",
     "implement the task",
@@ -49,36 +49,7 @@ test("cache reads do not consume the bootstrap worker token budget", async () =>
   );
 
   assert.equal(report.disposition, "completed");
-  assert.equal(report.usage?.total, 54_741);
-  assert.equal(report.usage?.cacheRead, 34_688);
-  assert.equal(report.telemetryWarning, "worker token warning: 20053 fresh tokens reached warning threshold 20000");
-});
-
-test("fresh input plus output still enforces the hard worker token budget", async () => {
-  const reports = [];
-  const report = await runWorker(
-    workerFactory({
-      toolCalls: 1,
-      tokens: {
-        input: 50_000,
-        output: 1,
-        cacheRead: 100_000,
-        cacheWrite: 0,
-        total: 150_001,
-      },
-      cost: 0.01,
-    }),
-    "implementation",
-    "implement the task",
-    process.cwd(),
-    1_000,
-    reports,
-    176,
-    undefined,
-    0,
-  );
-
-  assert.equal(report.disposition, "cancelled");
-  assert.match(report.reason ?? "", /50001 fresh tokens reached hard threshold 50000/);
+  assert.equal(report.usage?.total, 151_000);
   assert.equal(report.usage?.cacheRead, 100_000);
+  assert.equal(report.telemetryWarning, undefined);
 });
