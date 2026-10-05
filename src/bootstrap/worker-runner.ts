@@ -26,6 +26,13 @@ function workerStats(session: WorkerSession): { toolCalls: number; modelRounds?:
   return { toolCalls: stats.toolCalls ?? 0, modelRounds: stats.modelRounds, usage, warning };
 }
 
+function budgetedTokens(usage?: WorkerStats): number {
+  if (!usage) return 0;
+  // Cache reads/writes are retained in telemetry, but they do not represent
+  // new model work and must not terminate an otherwise healthy worker.
+  return Math.max(0, usage.input ?? 0) + Math.max(0, usage.output ?? 0);
+}
+
 export async function runWorker(
   factory: WorkerFactory,
   role: WorkerRole,
@@ -56,14 +63,14 @@ export async function runWorker(
   const tokenHard = Number.isFinite(DEFAULT_WORKER_TOKEN_HARD) && DEFAULT_WORKER_TOKEN_HARD > 0 ? DEFAULT_WORKER_TOKEN_HARD : 50_000;
   const progressStats = () => session ? workerStats(session) : { toolCalls };
   const checkTokenBudget = (stats: { usage?: WorkerStats; modelRounds?: number }): void => {
-    const total = stats.usage?.total ?? 0;
-    if (!total) return;
-    if (!tokenBudgetWarning && total >= tokenWarn) {
-      tokenBudgetWarning = `worker token warning: ${total} tokens reached warning threshold ${tokenWarn}`;
+    const tokens = budgetedTokens(stats.usage);
+    if (!tokens) return;
+    if (!tokenBudgetWarning && tokens >= tokenWarn) {
+      tokenBudgetWarning = `worker token warning: ${tokens} fresh tokens reached warning threshold ${tokenWarn}`;
       emitProgress(reporter, { issueNumber, phase: "worker", state: "heartbeat", role, model, elapsedMs: Date.now() - started, toolCalls, modelRounds: stats.modelRounds, usage: stats.usage, detail: tokenBudgetWarning });
     }
-    if (total >= tokenHard) {
-      const reason = `worker token budget exhausted: ${total} tokens reached hard threshold ${tokenHard}`;
+    if (tokens >= tokenHard) {
+      const reason = `worker token budget exhausted: ${tokens} fresh tokens reached hard threshold ${tokenHard}`;
       controller.abort(reason);
       rejectBudget?.(new BootstrapError(reason));
     }
@@ -115,7 +122,8 @@ export async function runWorker(
     await Promise.race([promptRun, timeout, cancellation, budget]);
     const stats = workerStats(session);
     checkTokenBudget(stats);
-    if ((stats.usage?.total ?? 0) >= tokenHard) throw new BootstrapError(`worker token budget exhausted: ${stats.usage?.total ?? 0} tokens reached hard threshold ${tokenHard}`);
+    const finalBudgetedTokens = budgetedTokens(stats.usage);
+    if (finalBudgetedTokens >= tokenHard) throw new BootstrapError(`worker token budget exhausted: ${finalBudgetedTokens} fresh tokens reached hard threshold ${tokenHard}`);
     const classification = classifyWorkerCompletion(terminalEvidence);
     const report: WorkerReport = classification.ok
       ? {
