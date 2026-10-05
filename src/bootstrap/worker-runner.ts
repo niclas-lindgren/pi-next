@@ -4,8 +4,8 @@ import { extractAssistantTextDelta, parseReviewResultText } from "./reviewer.js"
 import { emitProgress, progressToolName, redact } from "./utils.js";
 import { classifyWorkerCompletion, createWorkerTerminalEvidence, observeWorkerEvent } from "../coordination/worker-terminal-result.js";
 
-const DEFAULT_WORKER_TOKEN_WARN = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_WARN ?? "20000", 10);
-const DEFAULT_WORKER_TOKEN_HARD = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_HARD ?? "50000", 10);
+const DEFAULT_WORKER_TOKEN_WARN = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_WARN ?? "0", 10);
+const DEFAULT_WORKER_TOKEN_HARD = Number.parseInt(process.env.PI_NEXT_WORKER_TOKEN_HARD ?? "0", 10);
 
 function workerStats(session: WorkerSession): { toolCalls: number; modelRounds?: number; usage?: WorkerStats; warning?: string } {
   const stats = session.getSessionStats?.();
@@ -59,17 +59,18 @@ export async function runWorker(
   let terminalEvidence = createWorkerTerminalEvidence();
   let tokenBudgetWarning: string | undefined;
   let rejectBudget: ((error: Error) => void) | undefined;
-  const tokenWarn = Number.isFinite(DEFAULT_WORKER_TOKEN_WARN) && DEFAULT_WORKER_TOKEN_WARN > 0 ? DEFAULT_WORKER_TOKEN_WARN : 20_000;
-  const tokenHard = Number.isFinite(DEFAULT_WORKER_TOKEN_HARD) && DEFAULT_WORKER_TOKEN_HARD > 0 ? DEFAULT_WORKER_TOKEN_HARD : 50_000;
+  const tokenWarn = Number.isFinite(DEFAULT_WORKER_TOKEN_WARN) && DEFAULT_WORKER_TOKEN_WARN > 0 ? DEFAULT_WORKER_TOKEN_WARN : 0;
+  const tokenHard = Number.isFinite(DEFAULT_WORKER_TOKEN_HARD) && DEFAULT_WORKER_TOKEN_HARD > 0 ? DEFAULT_WORKER_TOKEN_HARD : 0;
   const progressStats = () => session ? workerStats(session) : { toolCalls };
   const checkTokenBudget = (stats: { usage?: WorkerStats; modelRounds?: number }): void => {
+    if (tokenWarn <= 0 && tokenHard <= 0) return;
     const tokens = budgetedTokens(stats.usage);
     if (!tokens) return;
-    if (!tokenBudgetWarning && tokens >= tokenWarn) {
+    if (tokenWarn > 0 && !tokenBudgetWarning && tokens >= tokenWarn) {
       tokenBudgetWarning = `worker token warning: ${tokens} fresh tokens reached warning threshold ${tokenWarn}`;
       emitProgress(reporter, { issueNumber, phase: "worker", state: "heartbeat", role, model, elapsedMs: Date.now() - started, toolCalls, modelRounds: stats.modelRounds, usage: stats.usage, detail: tokenBudgetWarning });
     }
-    if (tokens >= tokenHard) {
+    if (tokenHard > 0 && tokens >= tokenHard) {
       const reason = `worker token budget exhausted: ${tokens} fresh tokens reached hard threshold ${tokenHard}`;
       controller.abort(reason);
       rejectBudget?.(new BootstrapError(reason));
@@ -123,7 +124,9 @@ export async function runWorker(
     const stats = workerStats(session);
     checkTokenBudget(stats);
     const finalBudgetedTokens = budgetedTokens(stats.usage);
-    if (finalBudgetedTokens >= tokenHard) throw new BootstrapError(`worker token budget exhausted: ${finalBudgetedTokens} fresh tokens reached hard threshold ${tokenHard}`);
+    if (tokenHard > 0 && finalBudgetedTokens >= tokenHard) {
+      throw new BootstrapError(`worker token budget exhausted: ${finalBudgetedTokens} fresh tokens reached hard threshold ${tokenHard}`);
+    }
     const classification = classifyWorkerCompletion(terminalEvidence);
     const report: WorkerReport = classification.ok
       ? {
