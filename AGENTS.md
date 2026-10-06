@@ -5,6 +5,8 @@ Always process GitHub issues as a bounded, serial loop: implement one open issue
 land it safely, clean up its workspace, and then re-query the live issue queue
 before selecting the next issue.
 
+For ordinary repository-local lifecycle work, keep context small. Read [`PROJECT.md`](PROJECT.md) when a task crosses repository boundaries, ownership is unclear, or integration/runtime composition is involved; it is context-only and cannot weaken or override the mandatory issue lifecycle below.
+
 ## Architectural invariants
 
 - **One canonical issue identity.** An owned issue has exactly one canonical
